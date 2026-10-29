@@ -132,12 +132,18 @@ pnpm lint                # ESLint（类型感知规则）
 pnpm format:check        # Prettier 格式校验
 pnpm typecheck           # tsc --noEmit，全部包
 pnpm test                # Vitest 单元测试
-pnpm build               # 生成 Prisma Client + 构建全部包
+pnpm build:packages      # 生成 Prisma Client + 构建 @novel/shared、@novel/db（产出 dist）
+pnpm build:apps          # 构建 web 与 worker
+pnpm build               # = build:packages + build:apps
 pnpm license:check       # 生产依赖许可证门禁（GPL/LGPL/AGPL/SSPL/未知 → 失败）
 pnpm license:check:dev   # 开发依赖许可证门禁（同上，独立扫描）
 pnpm license:report      # 生成 THIRD_PARTY_LICENSES.md（生产依赖）
 pnpm license:report:dev  # 生成 THIRD_PARTY_LICENSES.dev.md（开发依赖）
 ```
+
+> **执行顺序要求**：`lint` / `typecheck` / `test` 都依赖 `@novel/shared` 与 `@novel/db`
+> 的 `dist` 产物（workspace 依赖以 `dist` 为入口）。因此必须**先执行
+> `pnpm build:packages`**，再执行 lint / typecheck / test。干净克隆后尤其要注意。
 
 ### 容器与健康检查验证（需要 Docker）
 
@@ -151,8 +157,8 @@ pnpm verify:health       # 仅验证四个健康检查端点（服务已在运�
 ### CI 流程（`.github/workflows/ci.yml`）
 
 **job `verify`**（质量门禁）：
-`pnpm install --frozen-lockfile` → `pnpm db:generate` → `format:check`（构建前）→
-`lint` → `typecheck` → `test` → `build` → `format:check`（构建后）→
+`pnpm install --frozen-lockfile` → `pnpm build:packages` → `format:check`（构建前）→
+`lint` → `typecheck` → `test` → `pnpm build:apps` → `format:check`（构建后）→
 构建后 Git 工作区洁净检查 → `docker compose config` → `license:check` + `license:check:dev` →
 `license:report` + `license:report:dev` → 上传两份许可证清单。
 
