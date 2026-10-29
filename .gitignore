@@ -47,3 +47,11 @@ Thumbs.db
 # 证书（Caddy 本地自签）
 infra/docker/caddy/*.crt
 infra/docker/caddy/*.key
+
+# 本地工具工作区数据（不属于产品源码）
+.workbuddy/
+
+# deploy 产物临时目录（scripts/build-deploy.sh 的本地验证）
+.dv-*/
+.dl-*/
+.deploy-*/
