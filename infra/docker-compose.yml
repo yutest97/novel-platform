@@ -60,6 +60,15 @@ services:
       MODEL_BASE_URL: ${MODEL_BASE_URL:-}
       MODEL_NAME: ${MODEL_NAME:-}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
+      # ---------- 认证（M1-B1） ----------
+      # 会话与 Cookie 策略；默认值为安全默认（Secure + HttpOnly + Lax）。
+      AUTH_SESSION_ABSOLUTE_HOURS: ${AUTH_SESSION_ABSOLUTE_HOURS:-12}
+      AUTH_SESSION_IDLE_MINUTES: ${AUTH_SESSION_IDLE_MINUTES:-30}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      AUTH_LOGIN_MAX_ATTEMPTS: ${AUTH_LOGIN_MAX_ATTEMPTS:-5}
+      AUTH_LOGIN_WINDOW_MINUTES: ${AUTH_LOGIN_WINDOW_MINUTES:-15}
+      # 经 Caddy 访问时的对外来源；留空则按请求 Host 同源校验。
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
     ports:
       - '127.0.0.1:${WEB_PORT:-3000}:3000'
     healthcheck:

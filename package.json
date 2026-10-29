@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "pnpm build:packages && pnpm build:apps",
-    "build:packages": "pnpm db:generate && pnpm --filter @novel/shared build && pnpm --filter @novel/db build",
+    "build:packages": "pnpm db:generate && pnpm --filter @novel/shared build && pnpm --filter @novel/db build && pnpm --filter @novel/auth build",
     "build:apps": "pnpm --filter @novel/web build && pnpm --filter @novel/worker build",
     "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
     "lint": "eslint .",
@@ -35,7 +35,8 @@
     "compose:reset": "docker compose -f infra/docker-compose.yml down -v --remove-orphans",
     "compose:logs": "docker compose -f infra/docker-compose.yml logs -f",
     "verify:health": "bash scripts/verify-healthchecks.sh",
-    "verify:stack": "bash scripts/verify-local.sh"
+    "verify:stack": "bash scripts/verify-local.sh",
+    "admin:create": "pnpm --filter @novel/auth seed:admin"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

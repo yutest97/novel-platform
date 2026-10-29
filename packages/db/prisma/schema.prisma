@@ -1,11 +1,11 @@
-// Prisma schema —— M1-A 阶段仅建立迁移框架与连接，不创建任何业务表。
+// Prisma schema —— M1-B1 阶段：账号、登录会话与审计。
 //
-// 本轮**明确不包含**：users、sessions、novels/works、chapters、facts 等业务表。
-// 业务表待 M1-B 及之后阶段按已批准的 `docs/03-data-model.md` 方案落地。
+// 本轮**只**新增三张表：users、sessions、audit_logs。
+// 明确不包含 novels/works、chapters、facts 等 M2/M6 业务表，
+// 也不包含任何模型调用相关表。
 //
 // 注意：Prisma 7 起 datasource 的连接串写在 prisma.config.ts 中（不在 schema 内）。
-// 本 schema 当前没有任何 model，`prisma migrate` 会生成空迁移（仅注释），
-// 用于打通"迁移可重复执行且安全"的链路。
+// 客户端产物输出到 src/generated/prisma（已在 .gitignore 中忽略，由 db:generate 生成）。
 
 generator client {
   provider = "prisma-client"
@@ -14,4 +14,85 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+/// 账号角色。M1-B1 只有管理员与作者两种，权限骨架不做细粒度授权。
+enum UserRole {
+  admin
+  author
+
+  @@map("user_role")
+}
+
+/// 账号状态。disabled 表示停用：其所有会话必须立即失效。
+enum UserStatus {
+  active
+  disabled
+
+  @@map("user_status")
+}
+
+/// 账号。
+///
+/// - email 统一以小写形式存储（应用层规范化），unique 保证唯一。
+/// - password_hash 只存 argon2id 哈希，绝不存明文或可逆密文。
+/// - must_change_password 为 true 时，登录后只允许改密与退出。
+model User {
+  id                 String     @id @default(uuid()) @db.Uuid
+  email              String     @unique
+  passwordHash       String     @map("password_hash")
+  role               UserRole   @default(author)
+  status             UserStatus @default(active)
+  mustChangePassword Boolean    @default(true) @map("must_change_password")
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sessions  Session[]
+  auditLogs AuditLog[] @relation("AuditActor")
+
+  @@map("users")
+}
+
+/// 登录会话。
+///
+/// - 数据库只保存 token 的 SHA-256 哈希，不保存 token 本身。
+/// - 同时具备绝对有效期（absolute_expires_at）与空闲有效期（idle_expires_at）。
+/// - 每个账号最多 MAX_ACTIVE_SESSIONS 个活跃会话，超出时淘汰最旧会话。
+model Session {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  tokenHash         String   @unique @map("token_hash")
+  absoluteExpiresAt DateTime @map("absolute_expires_at") @db.Timestamptz(3)
+  idleExpiresAt     DateTime @map("idle_expires_at") @db.Timestamptz(3)
+  lastActivityAt    DateTime @map("last_activity_at") @db.Timestamptz(3)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([idleExpiresAt])
+  @@map("sessions")
+}
+
+/// 审计日志（append-only）。
+///
+/// 数据库层由触发器禁止 UPDATE / DELETE（见迁移 SQL），
+/// 应用层只提供写入接口，不提供修改与删除接口。
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  detail     Json?
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([action])
+  @@index([actorId])
+  @@map("audit_logs")
 }

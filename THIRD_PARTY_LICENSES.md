@@ -2,9 +2,9 @@
 
 > 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。
 > 数据来源：`pnpm licenses list --json --recursive --prod`。
-> 生成时间：2026-10-29T14:53:28.409Z
+> 生成时间：2026-10-29T17:16:15.917Z
 
-**生产依赖**总数：**174**
+**生产依赖**总数：**176**
 
 本项目保持**封闭源码**。以下依赖均采用允许闭源分发的宽松许可证，
 其原始版权与许可证声明保留在各自包内（`node_modules/<包名>/LICENSE`）。
@@ -95,6 +95,8 @@
 - @img/colour@1.1.0
 - @next/env@16.4.3
 - @next/swc-win32-x64-msvc@16.4.3
+- @node-rs/argon2-win32-x64-msvc@2.2.2
+- @node-rs/argon2@2.2.2
 - @radix-ui/primitive@1.1.3
 - @radix-ui/react-compose-refs@1.1.2
 - @radix-ui/react-primitive@2.1.3

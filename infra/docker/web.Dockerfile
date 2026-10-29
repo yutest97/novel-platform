@@ -33,6 +33,7 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/db/package.json packages/db/package.json
+COPY packages/auth/package.json packages/auth/package.json
 # 用完整安装保证 workspace 内部依赖与 lockfile 一致（--frozen-lockfile 保证可复现）
 RUN pnpm install --frozen-lockfile
 
@@ -43,11 +44,13 @@ COPY tsconfig.base.json ./
 COPY scripts ./scripts
 COPY packages/shared packages/shared
 COPY packages/db packages/db
+COPY packages/auth packages/auth
 COPY apps/web apps/web
 # 依赖包需先编译为 dist（web 与 worker 均以 dist 为入口）
 RUN pnpm --filter @novel/shared build \
  && pnpm --filter @novel/db generate \
  && pnpm --filter @novel/db build \
+ && pnpm --filter @novel/auth build \
  && pnpm --filter @novel/web build
 
 # 生成可移植的生产依赖目录（hoisted；校验器逐条判定链接可移植性）

@@ -1,0 +1,36 @@
+{
+  "name": "@novel/auth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "账号、密码哈希、登录会话与审计的核心逻辑（M1-B1）",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "seed:admin": "node scripts/seed-admin.mjs"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "2.2.2",
+    "@novel/db": "workspace:*",
+    "@novel/shared": "workspace:*",
+    "dotenv": "18.0.9"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12"
+  }
+}

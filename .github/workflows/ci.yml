@@ -22,6 +22,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # 认证集成测试需要真实 PostgreSQL（不使用 mock 替代数据库测试）。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: novel
+          POSTGRES_PASSWORD: ci-placeholder
+          POSTGRES_DB: novel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novel -d novel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel?schema=public
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -43,9 +62,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # 必须先构建库包：web / worker 通过 workspace 依赖引用
-      # @novel/shared 与 @novel/db 的 dist 产物，lint / typecheck / test 都依赖它。
+      # @novel/shared、@novel/db、@novel/auth 的 dist 产物，
+      # lint / typecheck / test 都依赖它。
       - name: 生成 Prisma Client 并构建库包
         run: pnpm build:packages
+
+      # 集成测试直接连真实数据库，必须先应用迁移。
+      - name: 应用数据库迁移
+        run: pnpm db:deploy
 
       - name: 校验格式（构建前）
         run: pnpm format:check
@@ -56,7 +80,7 @@ jobs:
       - name: 类型检查
         run: pnpm typecheck
 
-      - name: 单元测试
+      - name: 单元测试与数据库集成测试
         run: pnpm test
 
       - name: 符号链接分类校验器的行为测试

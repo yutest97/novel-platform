@@ -44,13 +44,18 @@ cp .env.example .env            # .env 已被 .gitignore 排除，切勿提交
 
 `.env.example` 中**只有占位符**，不含任何真实密钥。至少需要修改：
 
-| 变量                | 说明                                                                 |
-| ------------------- | -------------------------------------------------------------------- |
-| `POSTGRES_PASSWORD` | 数据库密码（compose 会强制要求该项存在）                             |
-| `DATABASE_URL`      | Prisma 连接串。compose 内用服务名 `postgres`；本机直连用 `127.0.0.1` |
-| `MODEL_API_KEY`     | 模型密钥。**M1-A 阶段 worker 不调用模型**，留空即可                  |
+| 变量                     | 说明                                                                 |
+| ------------------------ | -------------------------------------------------------------------- |
+| `POSTGRES_PASSWORD`      | 数据库密码（compose 会强制要求该项存在）                             |
+| `DATABASE_URL`           | Prisma 连接串。compose 内用服务名 `postgres`；本机直连用 `127.0.0.1` |
+| `ADMIN_EMAIL`            | 初始管理员邮箱（只在 `pnpm admin:create` 时读取，不入 Git）          |
+| `ADMIN_INITIAL_PASSWORD` | 初始管理员口令（≥12 字符，不入 Git；首次登录必须改密）               |
+| `AUTH_SESSION_*`         | 会话绝对/空闲有效期（默认 12 小时 / 30 分钟）                        |
+| `APP_ORIGIN`             | 期望站点来源；留空则按请求 Host 同源校验                             |
+| `MODEL_API_KEY`          | 模型密钥。**M1-B1 阶段 worker 不调用模型**，留空即可                 |
 
 > API Key 的唯一来源是环境变量 / Docker secret，**不入数据库、不入管理页面、不入日志**。
+> 管理员初始口令同样只从环境变量读取，**不入 Git、不入日志、不入数据库明文**。
 
 ## 4. 启动服务
 
@@ -93,6 +98,57 @@ pnpm db:status           # 查看迁移状态
 > **不是** `pnpm deploy` 包部署命令。
 > 迁移要求显式设置 `DATABASE_URL`；缺失时会以非零码退出并给出明确错误，
 > 不会退回到占位连接串执行迁移（保护见 `packages/db/scripts/require-database-url.mjs`）。
+
+### 创建初始管理员（一次性）
+
+```bash
+# 邮箱与口令只从环境变量 / 本地 .env 读取，不进入 Git、日志或数据库明文
+ADMIN_EMAIL='admin@example.com' \
+ADMIN_INITIAL_PASSWORD='至少12位的口令' \
+  pnpm admin:create
+```
+
+- **不开放注册**：没有注册接口、没有自助注册页面，本命令是创建账号的唯一途径。
+- 幂等：邮箱已存在时不覆盖、不改密码。
+- 新账号 `must_change_password = true`：首次登录只能访问改密与退出。
+- 口令以 **argon2id** 哈希入库（`$argon2id$v=19$m=19456,t=2,p=1$…`）。
+
+### 认证接口（M1-B1）
+
+| 接口                        | 方法 | 说明                                 |
+| --------------------------- | ---- | ------------------------------------ |
+| `/api/auth/login`           | POST | 邮箱 + 密码登录，成功下发会话 Cookie |
+| `/api/auth/logout`          | POST | 退出并清除 Cookie（幂等）            |
+| `/api/auth/me`              | GET  | 读取当前用户与会话有效期             |
+| `/api/auth/change-password` | POST | 修改自己的密码，成功后**轮换会话**   |
+
+行为约定：
+
+| 场景                                  | 响应                                       |
+| ------------------------------------- | ------------------------------------------ |
+| 未登录 / 会话过期                     | `401 UNAUTHENTICATED`                      |
+| 账号不存在 **或** 密码错误            | `401 INVALID_CREDENTIALS`（文案完全一致）  |
+| 账号已停用                            | `403 ACCOUNT_DISABLED`（并吊销其全部会话） |
+| 首登未改密时访问其它接口              | `403 PASSWORD_CHANGE_REQUIRED`             |
+| 修改数据的接口缺少/伪造 `Origin`      | `403 INVALID_ORIGIN`                       |
+| 登录失败超过阈值（默认 15 分钟 5 次） | `429 RATE_LIMITED`                         |
+
+安全设计要点：
+
+- 口令哈希：**argon2id**（m=19456 KiB, t=2, p=1），不存明文或可逆密文。
+- 会话令牌：32 字节安全随机数（base64url），数据库只存 **SHA-256 哈希**。
+- Cookie：`HttpOnly` + `Secure` + `SameSite=Lax` + `Path=/`（本地 http 调试可经
+  `AUTH_COOKIE_SECURE=false` 关闭 Secure，仅限本机）。
+- 会话同时具备**绝对有效期**与**空闲有效期**，每次校验都会滑动空闲期。
+- 每账号最多 **5** 个活跃会话，第 6 个出现时淘汰最旧会话。
+- **每次请求都重新查库**校验账号状态与 `must_change_password`，不信任 Cookie 内容。
+- 停用账号：立即吊销其全部会话，且后续请求返回 403。
+- 登录失败使用统一文案，账号不存在时也执行一次等时 argon2 校验，避免时序侧信道。
+- 审计为 **append-only**：数据库触发器禁止 `UPDATE` / `DELETE`，写入前对
+  `detail` 脱敏（密码、令牌、密钥类字段直接丢弃）。
+
+数据表（本轮仅这三张）：`users`、`sessions`、`audit_logs`。
+不包含 works / chapters / facts 等 M2/M6 业务表。
 
 ## 5. 健康检查地址
 
@@ -170,9 +226,21 @@ pnpm license:report      # 生成 THIRD_PARTY_LICENSES.md（生产依赖）
 pnpm license:report:dev  # 生成 THIRD_PARTY_LICENSES.dev.md（开发依赖）
 ```
 
-> **执行顺序要求**：`lint` / `typecheck` / `test` 都依赖 `@novel/shared` 与 `@novel/db`
-> 的 `dist` 产物（workspace 依赖以 `dist` 为入口）。因此必须**先执行
+> **执行顺序要求**：`lint` / `typecheck` / `test` 都依赖 `@novel/shared`、`@novel/db`、
+> `@novel/auth` 的 `dist` 产物（workspace 依赖以 `dist` 为入口）。因此必须**先执行
 > `pnpm build:packages`**，再执行 lint / typecheck / test。干净克隆后尤其要注意。
+
+> **数据库集成测试**：`packages/auth` 与 `apps/web` 的认证测试直接连接**真实
+> PostgreSQL**（不使用 mock 替代数据库），因此运行 `pnpm test` 前必须：
+>
+> ```bash
+> export DATABASE_URL='postgresql://novel:密码@127.0.0.1:5432/novel?schema=public'
+> pnpm db:deploy      # 先应用迁移
+> pnpm test
+> ```
+>
+> 缺少 `DATABASE_URL` 时集成测试会**直接失败**（而不是静默跳过），
+> 以免在没有数据库的情况下显示为通过。CI 通过 `postgres` service 提供该数据库。
 
 ### 容器与健康检查验证（需要 Docker）
 
@@ -230,9 +298,10 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 
 ### CI 流程（`.github/workflows/ci.yml`）
 
-**job `verify`**（质量门禁）：
-`pnpm install --frozen-lockfile` → `pnpm build:packages` → `format:check`（构建前）→
-`lint` → `typecheck` → `test` → `pnpm build:apps` → `format:check`（构建后）→
+**job `verify`**（质量门禁，附带 `postgres:16-alpine` service）：
+`pnpm install --frozen-lockfile` → `pnpm build:packages` → `pnpm db:deploy`（应用迁移）→
+`format:check`（构建前）→ `lint` → `typecheck` → `test`（含数据库集成测试）→
+`test:deploy-symlinks` → `pnpm build:apps` → `format:check`（构建后）→
 构建后 Git 工作区洁净检查 → `docker compose config` → `license:check` + `license:check:dev` →
 `license:report` + `license:report:dev` → 上传两份许可证清单。
 
@@ -298,12 +367,15 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 .
 ├── apps/
 │   ├── web/                 # Next.js 16 + React 19（App Router）
-│   │   ├── app/             # 页面与 API Route（/api/healthz）
-│   │   └── src/             # web 内部逻辑（健康报告组装）
+│   │   ├── app/api/healthz  # 健康检查
+│   │   ├── app/api/auth/    # login / logout / me / change-password
+│   │   └── src/             # HTTP 适配层与认证运行期单例
 │   └── worker/              # 独立 Node Worker（/healthz）
 ├── packages/
 │   ├── shared/              # 前后端共享类型与纯函数（健康状态逻辑）
-│   └── db/                  # Prisma 迁移框架与连接（无业务表）
+│   ├── db/                  # Prisma 迁移与连接（users / sessions / audit_logs）
+│   └── auth/                # 账号、argon2id 哈希、会话、审计、限流、Origin 校验
+│       └── scripts/         # seed-admin.mjs（一次性创建管理员）
 ├── infra/
 │   ├── docker-compose.yml       # postgres / web / worker / caddy（默认 production）
 │   ├── docker-compose.dev.yml   # 开发模式 override（不改变默认 production）
