@@ -76,12 +76,16 @@ main()
     // 只输出可安全展示的信息：
     // - 本项目的 AuthError：输出其文案（仅含参数校验说明）；
     // - 其它异常（如 Prisma 错误）：只输出类型与错误码，避免把 SQL 参数（可能含哈希）打进日志。
+    const hasCode = typeof error === 'object' && error !== null && 'code' in error;
     if (isAuthError(error)) {
       console.error(`[seed] ✗ 创建管理员失败：${error.code} —— ${error.message}`);
+    } else if (error instanceof Error && !hasCode) {
+      // 本脚本自己抛出的普通 Error：文案已脱敏（不含口令/哈希），直接显示便于排障。
+      console.error(`[seed] ✗ 创建管理员失败：${error.message}`);
     } else {
+      // Prisma 等底层错误：只输出类型与错误码，避免把 SQL 参数（可能含哈希）打进日志。
       const name = error instanceof Error ? error.name : 'UnknownError';
-      const code =
-        typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'n/a';
+      const code = hasCode ? String(error.code) : 'n/a';
       console.error(`[seed] ✗ 创建管理员失败：name=${name} code=${code}`);
     }
     process.exitCode = 1;
