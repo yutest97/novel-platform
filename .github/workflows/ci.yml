@@ -107,6 +107,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: verify
+    env:
+      # 独立 Compose 项目名：容器/网络/卷均带此前缀，
+      # 与任何开发环境隔离；down -v 只清理本次运行创建的资源。
+      COMPOSE_PROJECT_NAME: novel-ci-${{ github.run_id }}
+      POSTGRES_PASSWORD: ci-placeholder
+      POSTGRES_USER: novel
+      POSTGRES_DB: novel
+      # 密码必须与 POSTGRES_PASSWORD 一致，
+      # 否则 compose config 校验会通过，但数据库实际连接失败。
+      DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
+      NODE_ENV: production
 
     steps:
       - name: 检出代码
@@ -131,42 +142,35 @@ jobs:
         run: pnpm build:packages
 
       - name: 构建容器镜像
-        env:
-          POSTGRES_PASSWORD: ci-placeholder
         run: docker compose -f infra/docker-compose.yml build
 
       - name: 启动四个服务并等待健康
-        env:
-          # POSTGRES_PASSWORD 与 DATABASE_URL 中的密码必须一致，
-          # 否则 compose config 校验会通过，但数据库实际连接失败。
-          POSTGRES_PASSWORD: ci-placeholder
-          POSTGRES_USER: novel
-          POSTGRES_DB: novel
-          DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
-          NODE_ENV: production
         run: |
           set -euo pipefail
           docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 300
 
       - name: 验证四个健康检查端点
-        env:
-          POSTGRES_PASSWORD: ci-placeholder
-          DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
-          NODE_ENV: production
         run: |
           set -euo pipefail
           bash scripts/verify-healthchecks.sh
 
       - name: 输出容器状态与日志
         if: always()
-        env:
-          POSTGRES_PASSWORD: ci-placeholder
         run: |
           docker compose -f infra/docker-compose.yml ps || true
           docker compose -f infra/docker-compose.yml logs --tail 100 || true
 
-      - name: 清理容器与卷
+      - name: 清理本次 CI 创建的容器与卷
         if: always()
-        env:
-          POSTGRES_PASSWORD: ci-placeholder
-        run: docker compose -f infra/docker-compose.yml down -v --remove-orphans
+        run: |
+          set -euo pipefail
+          # 保护：只允许清理本次 CI 的项目（novel-ci-*），避免误删其他资源
+          case "${COMPOSE_PROJECT_NAME}" in
+            novel-ci-*)
+              docker compose -f infra/docker-compose.yml down -v --remove-orphans
+              ;;
+            *)
+              echo "::error::COMPOSE_PROJECT_NAME 不是 novel-ci-*，拒绝清理"
+              exit 1
+              ;;
+          esac

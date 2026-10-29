@@ -21,7 +21,7 @@
     "test:coverage": "pnpm -r test:coverage",
     "db:generate": "pnpm --filter @novel/db generate",
     "db:migrate": "pnpm --filter @novel/db migrate",
-    "db:deploy": "pnpm --filter @novel/db deploy",
+    "db:deploy": "pnpm --filter @novel/db migrate:deploy",
     "db:status": "pnpm --filter @novel/db migrate:status",
     "license:check": "node scripts/license-check.mjs",
     "license:check:dev": "node scripts/license-check.mjs --dev",
@@ -30,7 +30,8 @@
     "compose:config": "docker compose -f infra/docker-compose.yml config",
     "compose:build": "docker compose -f infra/docker-compose.yml build",
     "compose:up": "docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 300",
-    "compose:down": "docker compose -f infra/docker-compose.yml down -v --remove-orphans",
+    "compose:down": "docker compose -f infra/docker-compose.yml down --remove-orphans",
+    "compose:reset": "docker compose -f infra/docker-compose.yml down -v --remove-orphans",
     "compose:logs": "docker compose -f infra/docker-compose.yml logs -f",
     "verify:health": "bash scripts/verify-healthchecks.sh",
     "verify:stack": "bash scripts/verify-local.sh"

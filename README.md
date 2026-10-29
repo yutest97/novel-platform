@@ -59,23 +59,39 @@ pnpm compose:up          # 等价于 docker compose -f infra/docker-compose.yml 
 pnpm compose:config      # 校验 compose 配置
 ```
 
-四个服务：
+四个服务（容器名由 compose 按 `COMPOSE_PROJECT_NAME` 自动生成，不再硬编码）：
 
-| 服务     | 容器名         | 宿主机地址                 | 说明                                 |
-| -------- | -------------- | -------------------------- | ------------------------------------ |
-| postgres | novel-postgres | `127.0.0.1:5432`           | 命名卷 `novel-pgdata` 持久化         |
-| web      | novel-web      | `127.0.0.1:3000`           | Next.js 16 standalone 输出           |
-| worker   | novel-worker   | `127.0.0.1:3001`           | 独立 Node 进程                       |
-| caddy    | novel-caddy    | `127.0.0.1:8080` / `:8443` | 本地反向代理，自签证书，**不出公网** |
+| 服务     | 容器名（默认项目）        | 宿主机地址                 | 说明                                          |
+| -------- | ------------------------- | -------------------------- | --------------------------------------------- |
+| postgres | novel-platform-postgres-1 | `127.0.0.1:5432`           | 命名卷 `novel-platform_pgdata` 持久化         |
+| web      | novel-platform-web-1      | `127.0.0.1:3000`           | Next.js 16（**Webpack 构建** + `next start`） |
+| worker   | novel-platform-worker-1   | `127.0.0.1:3001`           | 独立 Node 进程                                |
+| caddy    | novel-platform-caddy-1    | `127.0.0.1:8080` / `:8443` | 本地反向代理，自签证书，**不出公网**          |
 
 所有端口均绑定 `127.0.0.1`，不对局域网/公网暴露。
 
-### 首次启动后执行迁移
+**容器运行模式默认 `production`**。如需开发模式，叠加 override 文件（不改默认值）：
 
 ```bash
-pnpm db:deploy           # 应用迁移（可重复执行，重复执行不报错）
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
+```
+
+**镜像依赖布局**：web/worker 镜像不使用 Next 的 standalone 输出，
+而是用 `pnpm deploy --config.node-linker=hoisted` 生成**扁平、无符号链接**的
+生产依赖目录，再配合 `next build`（Webpack）产物 + `next start` 运行。
+原因见 §7「容器镜像的可移植性设计」。
+
+### 首次启动后执行数据库迁移
+
+```bash
+pnpm db:deploy           # 执行迁移（= pnpm --filter @novel/db migrate:deploy）
 pnpm db:status           # 查看迁移状态
 ```
+
+> `pnpm db:deploy` 调用的是 **Prisma 迁移**（`prisma migrate deploy`），
+> **不是** `pnpm deploy` 包部署命令。
+> 迁移要求显式设置 `DATABASE_URL`；缺失时会以非零码退出并给出明确错误，
+> 不会退回到占位连接串执行迁移（保护见 `packages/db/scripts/require-database-url.mjs`）。
 
 ## 5. 健康检查地址
 
@@ -109,19 +125,31 @@ pnpm db:status           # 查看迁移状态
 ## 6. 停止服务与查看日志
 
 ```bash
-pnpm compose:down        # 停止并移除容器与卷（会删除数据库数据，慎用）
+pnpm compose:down        # 停止并移除容器，**保留数据卷**（默认，安全）
+pnpm compose:reset       # 停止并移除容器，**同时删除数据卷**（会丢数据，慎用）
 pnpm compose:logs        # 跟随查看全部服务日志
 pnpm compose:logs web    # 只看某个服务
 ```
 
-> `compose:down` 对应 `docker compose down -v --remove-orphans`，**会删除命名卷**。
-> 若只想停止容器并保留数据，请直接执行 `docker compose -f infra/docker-compose.yml down`。
+> **`compose:down`（默认）** 对应 `docker compose down --remove-orphans`，**不删卷**，
+> 数据库数据得以保留。
+>
+> **`compose:reset`** 对应 `docker compose down -v --remove-orphans`，
+> ⚠️ **会永久删除命名卷 `novel-platform_pgdata` 中的全部数据**。
+> 仅在确实需要清空数据库重来时使用。
 
 本地原生进程（非容器）方式：
 
 ```bash
 pnpm dev                 # 同时启动 web / worker 开发模式
 ```
+
+### 验证脚本的数据隔离
+
+`pnpm verify:stack` 使用独立 Compose 项目名 `novel-verify-<pid>`，
+其容器、网络、数据卷均带该前缀，与日常开发环境（`novel-platform_*`）完全隔离。
+脚本在清理前会校验项目名必须以 `novel-verify-` 开头，否则拒绝执行——
+**不会误删日常开发数据卷**。
 
 ## 7. 运行测试与质量检查
 
@@ -167,7 +195,14 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 ```
 
 它生成**扁平、无符号链接**的生产依赖目录（实测 0 个符号链接），可随镜像整体移动。
-脚本会校验符号链接数，若不为 0 则直接失败。
+脚本会依次校验：符号链接数必须为 0 → 关键依赖版本与 `pnpm-lock.yaml` 一致 →
+对产物重新执行许可证扫描。任一步失败即中止镜像构建。
+
+**关于 `--legacy`**：pnpm 10 起，部署 workspace 包默认要求
+`inject-workspace-packages=true`，否则报 `ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE`。
+当前仓库未启用注入模式，因此必须使用 `--legacy`。
+代价是该模式**不读取 workspace lockfile**、会重新解析依赖，存在版本漂移风险，
+故用上述"版本一致性校验 + 许可证复扫"兜底。
 
 > 另：Next 构建使用 **Webpack**（`next build --webpack`）。
 > Next 16 默认的 Turbopack 会对 pnpm 布局的外部包生成带 hash 的引用
@@ -187,6 +222,8 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 `scripts/verify-healthchecks.sh`（校验 web / worker / Caddy→web / Caddy→worker 四个端点）→
 输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
 
+> CI 的 docker job 使用 `COMPOSE_PROJECT_NAME=novel-ci-<run_id>` 独立项目名，
+> 与开发环境隔离，`down -v` 只清理该次 CI 创建的资源。
 > CI 中 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 的密码**保持一致**，
 > 避免"compose config 校验通过但数据库实际连接失败"。
 > 容器内 `NODE_ENV=production`。
@@ -249,13 +286,15 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 │   ├── shared/              # 前后端共享类型与纯函数（健康状态逻辑）
 │   └── db/                  # Prisma 迁移框架与连接（无业务表）
 ├── infra/
-│   ├── docker-compose.yml   # postgres / web / worker / caddy
-│   └── docker/              # Dockerfile 与 Caddyfile
+│   ├── docker-compose.yml       # postgres / web / worker / caddy（默认 production）
+│   ├── docker-compose.dev.yml   # 开发模式 override（不改变默认 production）
+│   └── docker/                  # Dockerfile 与 Caddyfile
 ├── scripts/
-│   ├── license-check.mjs        # 许可证门禁（--dev 扫描开发依赖）
-│   ├── build-deploy.sh          # 生成容器用的可移植生产依赖（0 符号链接）
-│   ├── verify-healthchecks.sh   # 四个健康检查端点验证（可移植）
-│   └── verify-local.sh          # 本地容器栈端到端验证（可移植，基于 compose）
+│   ├── license-check.mjs          # 许可证门禁（--dev 开发依赖 / --dir 扫描 deploy 产物）
+│   ├── check-deploy-versions.mjs  # 校验 deploy 产物关键依赖版本与 lockfile 一致
+│   ├── build-deploy.sh            # 生成可移植生产依赖（0 符号链接 + 版本/许可证校验）
+│   ├── verify-healthchecks.sh     # 四个健康检查端点验证（可移植）
+│   └── verify-local.sh            # 本地容器栈验证（独立项目名，与开发环境隔离）
 ├── docs/                    # 七份方案文档（产品/架构/验收/许可证）
 ├── .github/workflows/ci.yml # CI（质量门禁 + 容器验收两个 job）
 ├── THIRD_PARTY_LICENSES.md      # 生产依赖许可证清单（自动生成）
@@ -266,11 +305,12 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 
 ```bash
 git checkout <上一个提交> && pnpm install --frozen-lockfile
-docker compose -f infra/docker-compose.yml down
+docker compose -f infra/docker-compose.yml down          # 保留数据卷
 docker compose -f infra/docker-compose.yml up -d --wait
 ```
 
-- 数据库数据保存在命名卷 `novel-pgdata` 中，`down` 不删数据，`down -v` 才删除。
+- 数据库数据保存在命名卷 `novel-platform_pgdata` 中。
+  `compose:down` **不删数据**；只有 `compose:reset`（`down -v`）才会删除。
 - 回滚到旧版本镜像前，建议先 `pnpm db:status` 确认迁移状态；Prisma 迁移不做自动回滚。
 
 ## 12. 相关文档

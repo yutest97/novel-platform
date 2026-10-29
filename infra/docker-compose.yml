@@ -1,17 +1,27 @@
-# 本地开发用 Docker Compose —— 仅供本地/内网使用，不部署公网。
+# 本地容器编排 —— 仅供本地/内网使用，不部署公网。
 #
 # 服务：postgres / web / worker / caddy
+#
 # 用法：
 #   cp .env.example .env
-#   docker compose -f infra/docker-compose.yml up -d
-#   docker compose -f infra/docker-compose.yml config   # 校验
+#   pnpm compose:up        # 启动（等价 docker compose -f infra/docker-compose.yml up -d --wait）
+#   pnpm compose:down      # 停止容器，**保留数据卷**
+#   pnpm compose:reset     # 停止容器并**删除数据卷**（会丢数据，慎用）
+#
+# 项目名与资源命名（v1.1 修正）：
+# - 顶层 name 使用 COMPOSE_PROJECT_NAME（默认 novel-platform）。
+# - **卷名、网络名不再硬编码**，而是带项目名前缀：
+#     日常开发 → novel-platform_pgdata
+#    验证实例 → novel-verify-<pid>_pgdata（见 scripts/verify-local.sh）
+#   这保证验证脚本的 `down -v` 只能删除它自己创建的资源，
+#   不会误删日常开发数据卷。
+# - 服务不再设置 container_name，由 compose 按项目名自动命名，避免多项目冲突。
 
-name: novel-platform
+name: ${COMPOSE_PROJECT_NAME:-novel-platform}
 
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: novel-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-novel}
@@ -36,13 +46,15 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/web.Dockerfile
-    container_name: novel-web
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      NODE_ENV: ${NODE_ENV:-development}
+      # 容器运行模式默认为 production（v1.1 修正）。
+      # 如需开发模式，使用 infra/docker-compose.dev.yml 覆盖，不改默认值：
+      #   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
+      NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql://novel:change-me-local-only@postgres:5432/novel?schema=public}
       WEB_PORT: ${WEB_PORT:-3000}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-}
@@ -67,13 +79,13 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/worker.Dockerfile
-    container_name: novel-worker
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      NODE_ENV: ${NODE_ENV:-development}
+      # 同 web：默认 production，开发模式走 override 文件。
+      NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql://novel:change-me-local-only@postgres:5432/novel?schema=public}
       WORKER_PORT: ${WORKER_PORT:-3001}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-}
@@ -96,7 +108,6 @@ services:
 
   caddy:
     image: caddy:2-alpine
-    container_name: novel-caddy
     restart: unless-stopped
     depends_on:
       - web
@@ -113,14 +124,17 @@ services:
       - app-net
 
 volumes:
+  # 卷名带项目名前缀（不再硬编码），确保不同 compose 项目互不影响。
+  # 日常开发：novel-platform_pgdata
+  # 验证实例：novel-verify-<pid>_pgdata
   pgdata:
-    name: novel-pgdata
+    name: ${COMPOSE_PROJECT_NAME:-novel-platform}_pgdata
   caddy-data:
-    name: novel-caddy-data
+    name: ${COMPOSE_PROJECT_NAME:-novel-platform}_caddy-data
   caddy-config:
-    name: novel-caddy-config
+    name: ${COMPOSE_PROJECT_NAME:-novel-platform}_caddy-config
 
 networks:
   app-net:
-    name: novel-app-net
+    name: ${COMPOSE_PROJECT_NAME:-novel-platform}_app-net
     driver: bridge

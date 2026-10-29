@@ -2,7 +2,7 @@
 
 > 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。
 > 数据来源：`pnpm licenses list --json --recursive --prod`。
-> 生成时间：2026-10-29T12:35:05.531Z
+> 生成时间：2026-10-29T14:53:28.409Z
 
 **生产依赖**总数：**174**
 

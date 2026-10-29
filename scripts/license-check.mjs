@@ -16,7 +16,7 @@
  *   node scripts/license-check.mjs --write [--dev]   # 同时写出清单
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -127,16 +127,72 @@ function loadLicenses(dev) {
   return JSON.parse(raw);
 }
 
+/**
+ * 扫描任意 node_modules 目录（用于 pnpm deploy 产物）。
+ *
+ * `pnpm deploy --legacy` 会重新解析依赖、不读 workspace lockfile，
+ * 因此产物中的依赖集合可能与仓库安装结果不同 —— 必须单独复扫一遍。
+ */
+function loadLicensesFromDir(dir) {
+  const nodeModules = resolve(dir, 'node_modules');
+  if (!existsSync(nodeModules)) {
+    throw new Error(`未找到 ${nodeModules}`);
+  }
+
+  const grouped = {};
+  const visit = (scopeDir) => {
+    for (const entry of readdirSync(scopeDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.name.startsWith('.')) {
+        continue;
+      }
+      const fullPath = resolve(scopeDir, entry.name);
+      if (entry.name.startsWith('@')) {
+        visit(fullPath); // scoped 包：再下一层
+        continue;
+      }
+      const pkgJsonPath = resolve(fullPath, 'package.json');
+      if (!existsSync(pkgJsonPath)) {
+        continue;
+      }
+      try {
+        const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+        const license =
+          typeof pkg.license === 'string'
+            ? pkg.license
+            : Array.isArray(pkg.licenses)
+              ? pkg.licenses.map((l) => l.type).join(' OR ')
+              : 'UNKNOWN';
+        (grouped[license] ??= []).push({
+          name: pkg.name,
+          versions: [pkg.version],
+          license,
+        });
+      } catch {
+        // 忽略无法解析的 package.json
+      }
+    }
+  };
+
+  visit(nodeModules);
+  return grouped;
+}
+
 function main() {
   const dev = process.argv.includes('--dev');
   const shouldWrite = process.argv.includes('--write');
-  const scope = dev ? '开发依赖' : '生产依赖';
+  const dirIndex = process.argv.indexOf('--dir');
+  const scanDir = dirIndex !== -1 ? process.argv[dirIndex + 1] : undefined;
+
+  const scope = scanDir !== undefined ? `deploy 产物（${scanDir}）` : dev ? '开发依赖' : '生产依赖';
   const outputPath = resolve(
     repoRoot,
     dev ? 'THIRD_PARTY_LICENSES.dev.md' : 'THIRD_PARTY_LICENSES.md',
   );
 
-  if (!existsSync(resolve(repoRoot, 'node_modules'))) {
+  if (scanDir === undefined && !existsSync(resolve(repoRoot, 'node_modules'))) {
     console.error(
       `[license:${scope}] 未找到 node_modules，请先执行 pnpm install --frozen-lockfile`,
     );
@@ -145,7 +201,7 @@ function main() {
 
   let grouped;
   try {
-    grouped = loadLicenses(dev);
+    grouped = scanDir !== undefined ? loadLicensesFromDir(scanDir) : loadLicenses(dev);
   } catch (error) {
     console.error(`[license:${scope}] 扫描失败：`, error instanceof Error ? error.message : error);
     process.exit(1);
@@ -153,9 +209,16 @@ function main() {
 
   // pnpm 输出结构：{ "<许可证>": [ { name, versions, license, ... } ] }
   const entries = [];
+  const ownPackages = [];
   for (const [licenseKey, packages] of Object.entries(grouped)) {
     for (const pkg of packages) {
       for (const version of pkg.versions ?? []) {
+        // 本项目自有 workspace 包（@novel/*）不是第三方依赖：
+        // 它们没有 license 字段，也不属于"分发第三方代码"的范畴，跳过。
+        if (typeof pkg.name === 'string' && pkg.name.startsWith('@novel/')) {
+          ownPackages.push(`${pkg.name}@${version}`);
+          continue;
+        }
         entries.push({
           name: pkg.name,
           version,
@@ -243,9 +306,10 @@ function main() {
 
   const allowedCount = entries.length - reviewed.length;
   console.log(
-    `[license:${scope}] ✓ 扫描通过：${entries.length} 个依赖 —— ${allowedCount} 个宽松许可` +
+    `[license:${scope}] ✓ 扫描通过：${entries.length} 个第三方依赖 —— ${allowedCount} 个宽松许可` +
       (reviewed.length > 0 ? `，${reviewed.length} 个已逐包审阅（需在清单中署名）` : '') +
-      '；未发现 GPL/LGPL/AGPL/SSPL/未知许可证。',
+      '；未发现 GPL/LGPL/AGPL/SSPL/未知许可证。' +
+      (ownPackages.length > 0 ? `（已排除本项目自有包 ${ownPackages.length} 个）` : ''),
   );
 }
 

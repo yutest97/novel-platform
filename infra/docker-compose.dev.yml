@@ -1,0 +1,20 @@
+# 开发模式覆盖文件 —— **不修改默认的 production 运行模式**。
+#
+# 用途：仅在需要以开发模式（更详细的 Prisma 日志等）运行容器时叠加使用。
+#
+# 用法：
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
+#
+# 说明：
+# - 默认的 infra/docker-compose.yml 中 NODE_ENV 为 production。
+# - 本文件只是把 NODE_ENV 覆盖为 development，其余配置不变。
+# - 不要把本文件当作默认启动方式；CI 与日常验收均使用默认文件（production）。
+
+services:
+  web:
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+
+  worker:
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
