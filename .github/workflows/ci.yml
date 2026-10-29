@@ -145,6 +145,11 @@ jobs:
       # 否则 compose config 校验会通过，但数据库实际连接失败。
       DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
       NODE_ENV: production
+      # 容器内经 Caddy 的 HTTPS 入口访问，因此期望来源就是该地址。
+      APP_ORIGIN: https://127.0.0.1:8443
+      # 一次性烟测账号（仅存在于本次 CI 的内存/临时卷中，运行结束即销毁）。
+      ADMIN_EMAIL: ci-smoke@example.test
+      ADMIN_INITIAL_PASSWORD: Ci-Smoke-Pass-2026
 
     steps:
       - name: 检出代码
@@ -180,6 +185,40 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/verify-healthchecks.sh
+
+      - name: 容器内 argon2 原生模块可用性
+        run: |
+          set -euo pipefail
+          # 直接在被验证的 web 运行层里加载原生模块：失败即镜像不可用。
+          docker compose -f infra/docker-compose.yml exec -T web node -e "
+            import('@node-rs/argon2')
+              .then(async (m) => {
+                const hash = await m.hash('smoke-password-value', {
+                  algorithm: 2, memoryCost: 19456, timeCost: 2, parallelism: 1, outputLen: 32,
+                });
+                const ok = await m.verify(hash, 'smoke-password-value', { algorithm: 2 });
+                if (!ok) throw new Error('argon2 verify failed');
+                console.log('argon2 在容器内可用：' + hash.slice(0, 20) + '...');
+              })
+              .catch((error) => { console.error(error.message); process.exit(1); });
+          "
+
+      - name: 对容器数据库执行迁移并创建初始管理员
+        env:
+          # 宿主机经映射端口访问容器内 PostgreSQL（compose 绑定 127.0.0.1:5432）
+          DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel?schema=public
+        run: |
+          set -euo pipefail
+          pnpm db:deploy
+          pnpm admin:create
+
+      - name: 登录烟测（经 Caddy HTTPS）
+        env:
+          BASE: https://127.0.0.1:8443
+          ORIGIN: https://127.0.0.1:8443
+        run: |
+          set -euo pipefail
+          bash scripts/verify-auth-smoke.sh
 
       - name: 输出容器状态与日志
         if: always()

@@ -136,16 +136,29 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
 安全设计要点：
 
 - 口令哈希：**argon2id**（m=19456 KiB, t=2, p=1），不存明文或可逆密文。
+- 密码策略：**≥12 字符**、允许任意字符（不强制大小写/数字，依据 NIST SP 800-63B
+  以长度为主要强度来源）；空值、与当前密码相同、示例占位值一律拒绝。
 - 会话令牌：32 字节安全随机数（base64url），数据库只存 **SHA-256 哈希**。
-- Cookie：`HttpOnly` + `Secure` + `SameSite=Lax` + `Path=/`（本地 http 调试可经
-  `AUTH_COOKIE_SECURE=false` 关闭 Secure，仅限本机）。
+- Cookie：`HttpOnly` + `Secure` + `SameSite=Lax` + `Path=/`。
+  生产（默认 compose）`AUTH_COOKIE_SECURE=true`；仅本地用 **http** 调试时，
+  叠加 `infra/docker-compose.dev.yml` 会把它设为 `false`（浏览器不会在 http 下保存
+  Secure Cookie）。生产 HTTPS 环境**必须**保持 `true`。
 - 会话同时具备**绝对有效期**与**空闲有效期**，每次校验都会滑动空闲期。
-- 每账号最多 **5** 个活跃会话，第 6 个出现时淘汰最旧会话。
+- 每账号最多 **5** 个活跃会话，第 6 个出现时淘汰最旧会话；
+  并发建会话使用 `pg_advisory_xact_lock` 串行化，避免并发下突破上限。
 - **每次请求都重新查库**校验账号状态与 `must_change_password`，不信任 Cookie 内容。
 - 停用账号：立即吊销其全部会话，且后续请求返回 403。
+- 管理员操作（停用/启用、重置密码）统一走 `requireActiveAdmin`：
+  **作者 / 已停用管理员 / 不存在的操作者一律 403**，且业务数据不变。
 - 登录失败使用统一文案，账号不存在时也执行一次等时 argon2 校验，避免时序侧信道。
+- 限流额度在**进入数据库查询与 argon2 校验之前**同步预留：
+  并发 20 次错误登录时只有 5 次会真正进入完整校验，其余立即 429。
+- 客户端 IP **只信任** Caddy 覆盖写入的 `X-Real-IP`（见 `infra/docker/caddy/Caddyfile`）；
+  应用不读取 `X-Forwarded-For`，因此伪造该头无法绕过按 IP 的限流。
 - 审计为 **append-only**：数据库触发器禁止 `UPDATE` / `DELETE`，写入前对
   `detail` 脱敏（密码、令牌、密钥类字段直接丢弃）。
+- 审计与业务修改**同事务**：停用/启用、重置密码、创建管理员时，
+  审计写失败会连业务修改一起回滚，不会出现"改了但没审计"。
 
 数据表（本轮仅这三张）：`users`、`sessions`、`audit_logs`。
 不包含 works / chapters / facts 等 M2/M6 业务表。
@@ -251,6 +264,26 @@ pnpm verify:health       # 仅验证四个健康检查端点（服务已在运�
 
 `verify:stack` 与 CI 的 `docker` job 执行**同一套命令**，任一端点失败即以非零状态码退出。
 
+### 登录烟测（容器内真实链路）
+
+容器与数据库都就绪后，可验证"真实容器内"的认证链路（含容器内的原生 argon2）：
+
+```bash
+# 1) 建库结构与初始管理员（宿主机经映射端口连容器内 PostgreSQL）
+DATABASE_URL='postgresql://novel:密码@127.0.0.1:5432/novel?schema=public' pnpm db:deploy
+ADMIN_EMAIL='smoke@example.test' ADMIN_INITIAL_PASSWORD='Smoke-Pass-2026' pnpm admin:create
+
+# 2) 经 Caddy HTTPS 走一遍登录 → /me → 退出
+BASE=https://127.0.0.1:8443 \
+ADMIN_EMAIL='smoke@example.test' ADMIN_INITIAL_PASSWORD='Smoke-Pass-2026' \
+  bash scripts/verify-auth-smoke.sh
+```
+
+脚本断言：登录 200 + Cookie 含 `HttpOnly/Secure/SameSite=Lax/Path=/`、
+响应体不含明文口令、`/me` 200、退出后 `Max-Age=0`、退出后 `/me` 401。
+CI 的 `docker` job 还会额外 `docker compose exec web node -e` 直接加载
+`@node-rs/argon2` 完成一次 hash/verify，证明镜像内原生模块可用。
+
 ### 容器镜像的可移植性设计
 
 pnpm 默认的 isolated linker 会创建**指向构建机绝对路径**的符号链接
@@ -308,6 +341,8 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 **job `docker`**（容器验收）：
 `docker compose build` → `docker compose up -d --wait`（等待四个服务健康）→
 `scripts/verify-healthchecks.sh`（校验 web / worker / Caddy→web / Caddy→worker 四个端点）→
+容器内加载 `@node-rs/argon2` 做一次 hash/verify → 对容器数据库 `pnpm db:deploy` +
+`pnpm admin:create` → `scripts/verify-auth-smoke.sh`（经 Caddy HTTPS 完成登录/`me`/退出）→
 输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
 
 > CI 的 docker job 使用 `COMPOSE_PROJECT_NAME=novel-ci-<run_id>` 独立项目名，
@@ -387,6 +422,7 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 │   ├── test-deploy-symlinks.mjs   # 上述校验器的 5 组行为测试
 │   ├── build-deploy.sh            # 生成可移植生产依赖（链接校验 + 版本/许可证校验）
 │   ├── verify-healthchecks.sh     # 四个健康检查端点验证（可移植）
+│   ├── verify-auth-smoke.sh       # 登录/退出烟测（容器内真实链路）
 │   └── verify-local.sh            # 本地容器栈验证（独立项目名，与开发环境隔离）
 ├── docs/                    # 七份方案文档（产品/架构/验收/许可证）
 ├── .github/workflows/ci.yml # CI（质量门禁 + 容器验收两个 job）

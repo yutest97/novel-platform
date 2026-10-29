@@ -9,6 +9,15 @@
 
 import type { PrismaClient } from '@novel/db';
 
+/**
+ * 审计写入所需的最小数据库能力。
+ *
+ * 同时接受 `PrismaClient` 与 `Prisma.TransactionClient`，
+ * 以便把「业务修改 + 审计写入」放进**同一个事务**：
+ * 审计写失败时，业务修改会随事务一起回滚。
+ */
+export type AuditDb = Pick<PrismaClient, 'auditLog'>;
+
 /** 审计动作常量（与 docs 中的动作命名保持一致）。 */
 export const AUDIT_ACTIONS = {
   ADMIN_CREATED: 'admin.created',
@@ -87,7 +96,7 @@ export interface AuditEntry {
 }
 
 /** 写入一条审计日志。 */
-export async function writeAuditLog(db: PrismaClient, entry: AuditEntry): Promise<void> {
+export async function writeAuditLog(db: AuditDb, entry: AuditEntry): Promise<void> {
   await db.auditLog.create({
     data: {
       action: entry.action,

@@ -4,6 +4,13 @@
 # - 使用 `tls internal` 生成自签证书，不向 Let's Encrypt 申请公网证书。
 # - 仅监听 80/443，由 compose 绑定到宿主机回环地址 8080/8443。
 # - 不做任何公网部署配置。
+#
+# 客户端 IP 传递（REV-01）：
+# - `header_up X-Real-IP {remote_host}`：由 Caddy 写入**真实**对端地址，
+#   并覆盖客户端自带的同名头。应用只信任这一个头（见 packages/auth/src/origin.ts）。
+# - `header_up X-Forwarded-For {remote_host}`：覆盖而非追加，
+#   避免客户端伪造的 XFF 列表被继续往下传。
+# - 应用**不读取** X-Forwarded-For，因此伪造该头无法绕过按 IP 的登录限流。
 {
 	admin off
 	auto_https off
@@ -12,18 +19,27 @@
 :80 {
 	# /healthz 路由到 web 应用
 	handle /api/healthz* {
-		reverse_proxy web:3000
+		reverse_proxy web:3000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	# worker 健康检查：handle_path 会剥离路径前缀，
 	# 转发到 worker 时变为 /healthz（worker 自身的健康路径）。
 	handle_path /worker/* {
-		reverse_proxy worker:3001
+		reverse_proxy worker:3001 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	# 其余请求代理到 web 应用
 	handle {
-		reverse_proxy web:3000
+		reverse_proxy web:3000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	log {
@@ -36,15 +52,24 @@
 	tls internal
 
 	handle /api/healthz* {
-		reverse_proxy web:3000
+		reverse_proxy web:3000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	handle_path /worker/* {
-		reverse_proxy worker:3001
+		reverse_proxy worker:3001 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	handle {
-		reverse_proxy web:3000
+		reverse_proxy web:3000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	log {

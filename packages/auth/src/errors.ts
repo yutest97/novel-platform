@@ -15,6 +15,7 @@ export type AuthErrorCode =
   | 'INVALID_ORIGIN'
   | 'RATE_LIMITED'
   | 'VALIDATION_FAILED'
+  | 'FORBIDDEN'
   | 'NOT_FOUND';
 
 /** 错误码 → HTTP 状态码。 */
@@ -26,6 +27,7 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   INVALID_ORIGIN: 403,
   RATE_LIMITED: 429,
   VALIDATION_FAILED: 400,
+  FORBIDDEN: 403,
   NOT_FOUND: 404,
 };
 
@@ -39,6 +41,8 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   INVALID_ORIGIN: '请求来源不受信任',
   RATE_LIMITED: '尝试过于频繁，请稍后再试',
   VALIDATION_FAILED: '请求参数不合法',
+  // 越权与"操作者不存在"使用同一文案，避免泄露账号是否存在。
+  FORBIDDEN: '没有权限执行该操作',
   NOT_FOUND: '资源不存在',
 };
 

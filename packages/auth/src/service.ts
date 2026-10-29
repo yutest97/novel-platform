@@ -66,12 +66,18 @@ export async function loginWithPassword(
   const key = loginRateLimitKey(email, input.meta.ip);
   const ipKey = loginIpRateLimitKey(input.meta.ip);
 
-  // 1) 限流前置检查（不消耗配额）：已被限流则直接拒绝。
-  for (const candidate of [key, ipKey]) {
-    const state = limiter.inspect(candidate);
-    if (!state.allowed) {
-      throw new AuthError('RATE_LIMITED', `请 ${state.retryAfterSeconds} 秒后重试`);
-    }
+  // 1) **先预留额度，再进入数据库查询与 argon2 校验**。
+  //    预留是同步且原子的，因此并发请求会在这里被顺序判定：
+  //    只有不超过阈值的请求才会走到后面的 argon2 计算与数据库查询，
+  //    其余立即 429。若改为"先查库/校验、失败后再计数"，
+  //    并发请求会同时通过检查，等于放行了 N 倍的验证开销。
+  const ipReservation = limiter.consume(ipKey);
+  if (!ipReservation.allowed) {
+    throw new AuthError('RATE_LIMITED', `请 ${ipReservation.retryAfterSeconds} 秒后重试`);
+  }
+  const keyReservation = limiter.consume(key);
+  if (!keyReservation.allowed) {
+    throw new AuthError('RATE_LIMITED', `请 ${keyReservation.retryAfterSeconds} 秒后重试`);
   }
 
   const user = await db.user.findUnique({ where: { email } });
@@ -79,8 +85,6 @@ export async function loginWithPassword(
   // 2) 账号不存在：执行等时校验，再返回与"密码错误"完全一致的错误。
   if (user === null) {
     await verifyAbsentUserPassword(input.password);
-    limiter.consume(key);
-    limiter.consume(ipKey);
     await writeAuditLog(db, {
       action: AUDIT_ACTIONS.LOGIN_FAILED,
       actorId: null,
@@ -96,8 +100,6 @@ export async function loginWithPassword(
 
   // 3) 账号已停用：直接 403（不校验密码，也不泄露密码是否正确）。
   if (user.status === 'disabled') {
-    limiter.consume(key);
-    limiter.consume(ipKey);
     await writeAuditLog(db, {
       action: AUDIT_ACTIONS.LOGIN_FAILED,
       actorId: user.id,
@@ -113,8 +115,6 @@ export async function loginWithPassword(
   // 4) 校验密码。
   const passwordOk = await verifyPassword(user.passwordHash, input.password);
   if (!passwordOk) {
-    limiter.consume(key);
-    limiter.consume(ipKey);
     await writeAuditLog(db, {
       action: AUDIT_ACTIONS.LOGIN_FAILED,
       actorId: user.id,
@@ -127,8 +127,9 @@ export async function loginWithPassword(
     throw new AuthError('INVALID_CREDENTIALS');
   }
 
-  // 5) 登录成功：清空该邮箱的失败计数。
+  // 5) 登录成功：重置"邮箱 + IP"两个计数（额度已在第 1 步预留）。
   limiter.reset(key);
+  limiter.reset(ipKey);
 
   // 6) 轮换：把此前同一浏览器持有的会话吊销，再签发新会话。
   if (input.previousToken !== null && input.previousToken !== undefined) {

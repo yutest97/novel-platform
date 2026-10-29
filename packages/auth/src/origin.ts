@@ -64,14 +64,30 @@ export function assertTrustedOrigin(request: Request, config: AuthConfig): void 
   }
 }
 
-/** 从请求头解析客户端 IP（取反向代理最常见的一跳）。 */
+/**
+ * 从请求头解析客户端 IP。
+ *
+ * 安全要求（REV-01）：
+ * - **只信任** 由反向代理写入的 `X-Real-IP`（Caddyfile 中通过
+ *   `header_up X-Real-IP {remote_host}` 强制覆盖，客户端无法伪造）。
+ * - **刻意不读取** `X-Forwarded-For`：该头由客户端完全可控，
+ *   即便代理会追加，其"首段"仍可能是攻击者填入的假 IP；
+ *   一旦采信首段，每次换一个假 IP 就能绕过按 IP 的限流。
+ * - 缺失或格式异常时返回 null（退化为"未知来源"的共享桶，
+ *   宁可让匿名请求共享额度，也不接受可伪造的来源）。
+ */
 export function readClientIp(request: Request): string | null {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded !== null && forwarded.trim() !== '') {
-    const first = forwarded.split(',')[0]?.trim();
-    if (first !== undefined && first !== '') {
-      return first;
-    }
+  const realIp = request.headers.get('x-real-ip');
+  if (realIp === null) {
+    return null;
   }
-  return request.headers.get('x-real-ip');
+  const trimmed = realIp.trim();
+  if (trimmed === '' || trimmed.includes(',')) {
+    return null;
+  }
+  // 仅接受 IPv4 / IPv6 字符集，拒绝任意字符串。
+  if (!/^[0-9a-fA-F:.]{2,45}$/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
 }

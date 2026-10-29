@@ -69,12 +69,12 @@ describe('Origin 校验（CSRF 防护）', () => {
     ).toThrowError(AuthError);
   });
 
-  it('readClientIp 优先取 X-Forwarded-For 首段', () => {
+  it('readClientIp 只信任 X-Real-IP（不采信可伪造的 X-Forwarded-For）', () => {
     const request = new Request('http://localhost:3000/', {
       headers: { 'x-forwarded-for': '203.0.113.7, 10.0.0.1', 'x-real-ip': '10.0.0.9' },
     });
 
-    expect(readClientIp(request)).toBe('203.0.113.7');
+    expect(readClientIp(request)).toBe('10.0.0.9');
     expect(readClientIp(new Request('http://localhost:3000/'))).toBeNull();
   });
 });

@@ -24,6 +24,7 @@ import { config as loadEnv } from 'dotenv';
 import {
   EMPTY_REQUEST_META,
   createInitialAdmin,
+  assertAcceptableInitialPassword,
   isAuthError,
   normalizeEmail,
 } from '../dist/index.js';
@@ -44,9 +45,15 @@ async function main() {
   if (email === undefined || email.trim() === '') {
     throw new Error('缺少环境变量 ADMIN_EMAIL');
   }
-  if (password === undefined || password === '') {
-    throw new Error('缺少环境变量 ADMIN_INITIAL_PASSWORD');
+  if (password === undefined || password.trim() === '') {
+    throw new Error(
+      '缺少环境变量 ADMIN_INITIAL_PASSWORD（.env.example 中该值为空，必须显式设置真实口令）',
+    );
   }
+
+  // 明确拒绝示例/占位口令与不合规口令，避免把 .env.example 的内容直接当成真实口令。
+  // createInitialAdmin 内部也会再校验一次（防御性重复）。
+  assertAcceptableInitialPassword(password);
 
   const db = getPrismaClient();
   const result = await createInitialAdmin(db, {

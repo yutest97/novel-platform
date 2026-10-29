@@ -294,6 +294,34 @@ describe('认证接口', () => {
     expect(body.error.code).toBe('RATE_LIMITED');
   });
 
+  it('伪造 X-Forwarded-For 无法绕过登录限流', async () => {
+    const user = await createTestUser();
+
+    // 每次都换一个伪造的 XFF，但应用只信任代理写入的 X-Real-IP（此处缺失 → 同一共享桶）
+    for (let index = 0; index < 5; index += 1) {
+      const response = await loginRoute(
+        jsonRequest(
+          '/api/auth/login',
+          { email: user.email, password: `wrong-password-${index}` },
+          { origin: ORIGIN, 'x-forwarded-for': `10.0.0.${index}` },
+        ),
+      );
+      expect(response.status).toBe(401);
+    }
+
+    const blocked = await loginRoute(
+      jsonRequest(
+        '/api/auth/login',
+        { email: user.email, password: user.password },
+        { origin: ORIGIN, 'x-forwarded-for': '10.9.9.9' },
+      ),
+    );
+
+    expect(blocked.status).toBe(429);
+    const body = (await blocked.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('RATE_LIMITED');
+  });
+
   it('错误响应不包含密码、令牌或哈希', async () => {
     const user = await createTestUser();
     const submitted = 'submitted-password-value-1234';

@@ -100,6 +100,14 @@ export async function createSession(
   const maxSessions = input.config.maxActiveSessions || MAX_ACTIVE_SESSIONS;
 
   const session = await db.$transaction(async (tx) => {
+    // 0) 串行化同一账号的并发建会话请求。
+    //    仅靠 "先 count 再 insert" 在并发下会突破上限（多个事务同时读到同样的数量）。
+    //    这里用 PostgreSQL 事务级 advisory lock（按 user_id 哈希），
+    //    锁随事务提交/回滚自动释放，不需要额外的表或基础设施。
+    //    注意：pg_advisory_xact_lock 返回 void，Prisma 无法反序列化（P2010
+    //    UnsupportedNativeDataType），因此用子查询把结果转成可读的整数。
+    await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtext(${input.userId})::bigint)) AS lock_acquired`;
+
     // 1) 顺手清理过期会话，避免它们占用上限名额。
     await tx.session.deleteMany({
       where: {

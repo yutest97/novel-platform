@@ -7,13 +7,17 @@
 #
 # 说明：
 # - 默认的 infra/docker-compose.yml 中 NODE_ENV 为 production。
-# - 本文件只是把 NODE_ENV 覆盖为 development，其余配置不变。
+# - 本文件把 NODE_ENV 覆盖为 development，并关闭 Cookie 的 Secure 标志
+#   （仅因本地用 http 访问；生产必须保持 Secure=true）。
 # - 不要把本文件当作默认启动方式；CI 与日常验收均使用默认文件（production）。
 
 services:
   web:
     environment:
       NODE_ENV: ${NODE_ENV:-development}
+      # 本地以 http 访问时浏览器不会保存 Secure Cookie，故开发模式显式关闭；
+      # 默认（生产）配置必须保持 AUTH_COOKIE_SECURE=true。
+      AUTH_COOKIE_SECURE: 'false'
 
   worker:
     environment:

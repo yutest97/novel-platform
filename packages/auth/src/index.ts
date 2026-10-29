@@ -3,7 +3,7 @@
  */
 
 export { AUDIT_ACTIONS, sanitizeAuditDetail, writeAuditLog } from './audit.js';
-export type { AuditAction, AuditEntry, SanitizedValue } from './audit.js';
+export type { AuditAction, AuditDb, AuditEntry, SanitizedValue } from './audit.js';
 export {
   MAX_ACTIVE_SESSIONS,
   MAX_PASSWORD_LENGTH,
@@ -50,10 +50,12 @@ export { EMPTY_REQUEST_META } from './types.js';
 export type { RequestMeta } from './types.js';
 export {
   adminResetPassword,
+  assertAcceptableInitialPassword,
   assertValidEmail,
   createInitialAdmin,
   findUserByEmail,
   normalizeEmail,
+  requireActiveAdmin,
   setUserStatus,
 } from './users.js';
 export type { CreatedAdmin } from './users.js';
