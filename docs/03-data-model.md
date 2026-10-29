@@ -1,6 +1,6 @@
 # 03 数据模型（Data Model）
 
-- 版本：v1.2（方案稿，退回修订中，待技术负责人第三次复审）
+- 版本：v1.3（方案稿，退回修订中，待技术负责人第四次定向复审）
 - 状态：**未获批准。**
 
 本文定义核心数据对象、字段、关系；重点说明**通用小说核心与玄幻规则包的边界**，以及数据隔离、版本化、任务持久化、事实闭环方案。
@@ -23,7 +23,9 @@
 ```
 users (admin/author)  [status: active/disabled + must_change_password 布尔]
   └─ sessions
-  └─ audit_logs
+  └─ audit_logs (含正文查看/密码重置/停用审计)
+  └─ content_access_requests (正文查看授权请求)   ★v1.3
+  └─ content_access_grants (正文查看授权)          ★v1.3
 
 works (所属 author_id)  [不含题材专有列]
   ├─ work_settings (规则包驱动的题材参数)
@@ -36,7 +38,8 @@ works (所属 author_id)  [不含题材专有列]
   │         ├─ review_reports (一致性检查)
   │         └─ chapter_facts (事实主表)          ★v1.1
   │              ├─ fact_versions (事实版本)     ★v1.2
-  │              └─ fact_effects (结构化影响)    ★v1.2
+  │              ├─ fact_effects (结构化影响)    ★v1.2
+  │              └─ fact_effect_applications (应用/冲正记录) ★v1.3
   ├─ story_arcs (情节弧：主线/支线)
   ├─ plot_threads (伏笔主表，含计划回收章)        ★v1.1
   │    └─ plot_thread_events (埋设/强化/回收)     ★v1.1
@@ -76,7 +79,7 @@ rule_packages (题材规则包，系统级)
 | must_change_password | boolean | **独立布尔**，首登强改由它控制（v1.0 曾把 `must_change_password` 作为 status 枚举值，已修正） |
 | created_at / updated_at | timestamptz | |
 
-**账号上限口径**：`count(*)`（含 disabled）≤ 10；新建时用事务锁（`SELECT ... FOR UPDATE` 或 advisory lock）保证并发不突破（见 §6.1）。
+**账号上限口径**：`count(*)`（含 disabled）≤ 10；新建时用 `pg_advisory_xact_lock`（或固定单行配额表加行锁）保证并发不突破（见 §6.1，v1.3 修正）。
 
 **sessions（会话表，v1.2 补充会话安全）**：
 
@@ -96,6 +99,49 @@ rule_packages (题材规则包，系统级)
 - **多设备上限**：单账号同时活跃会话 ≤ 5；超出时最旧会话被踢出。
 - 服务端可强制下线任一账号全部会话（`sessions` 按 user_id 批量失效）。
 - 修改数据的接口必须有 **Origin 校验或 CSRF token**（防跨站请求伪造，见 `05` §5）。
+
+### 3.1.1 隐私授权对象（v1.3 新增，回应审查第 3 条）
+
+**content_access_requests（正文查看授权请求）**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| requester_id | uuid FK→users | 发起人（管理员） |
+| work_id | uuid FK→works | 目标作品 |
+| chapter_id | uuid nullable | 目标章节（null = 整部作品） |
+| reason | text | 申请事由 |
+| status | enum('pending','approved','rejected','expired','revoked') | |
+| approver_id | uuid nullable | 批准人（默认作品作者） |
+| requested_at / decided_at | timestamptz | |
+
+**content_access_grants（正文查看授权）**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| request_id | uuid FK→content_access_requests | |
+| grantee_id | uuid FK→users | 被授权人 |
+| scope_work_id | uuid FK→works | 授权范围：作品 |
+| scope_chapter_id | uuid nullable | 授权范围：章节（null = 全作品） |
+| expires_at | timestamptz | 授权有效期（默认 1 小时） |
+| created_at | timestamptz | |
+
+**audit_logs（审计日志）**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| actor_id | uuid FK→users | 操作者 |
+| action | text | 动作（如 `content_view`、`password_reset`、`account_disable`、`account_create`、`export`、`task_retry`） |
+| target_type / target_id | text / uuid | 目标（work/chapter/user…） |
+| detail | jsonb | 明细（who/when/what/why） |
+| ip / user_agent | text | |
+| created_at | timestamptz | 不可篡改（append-only） |
+
+> 以下**三类操作必须落审计**（v1.3 明确）：管理员**密码重置**、**账号停用/启用**、**正文查看**。审计日志 append-only，不提供更新/删除接口。
+
+**技术边界（v1.3 修正过度承诺）**：本方案不宣称"管理员绝对无法查看正文"。应用层默认禁止管理员读正文、需临时授权，但**服务端所有者（持有 DB 凭证者）在数据库层面仍可读取任何数据**。因此表述统一为"应用层默认禁止 + 授权 + 审计"，不承诺"绝对无法访问"。
 
 ### 3.2 works（v1.1 删除题材专有列）
 
@@ -244,12 +290,19 @@ rule_packages (题材规则包，系统级)
 | progress | jsonb | 阶段步进 |
 | created_at / updated_at | timestamptz | |
 
-**幂等键设计（v1.2 修正）**：
-- `request_id`：客户端为每次"逻辑操作"生成 UUID，**按用户唯一**，唯一约束为 `UNIQUE(user_id, request_id)`。同一用户的**同一次逻辑操作**（重复点击、网络重发、并发重复提交）复用同一 `request_id` → 命中唯一约束，返回已有任务，**阻止并发重复提交**。
+**幂等键与 request_id 语义（v1.3 补全，回应审查第 5 条）**：
+- `request_id`：客户端为每次"逻辑操作"生成 UUID，**按用户唯一**，唯一约束为 `UNIQUE(user_id, request_id)`。
 - `input_hash`：入参指纹，**只作审计与输入比较字段，不设全局唯一约束**。
-- **区分"重复点击"与"用户再次生成"**：
-  - 重复点击 = 同 `user_id` + 同 `request_id`，幂等返回已有任务。
-  - 用户明确再次生成 = **新开 `request_id`，即使 `input_hash` 相同，也允许创建新任务**（不因 input 未变而拦截）。
+
+四种情况的精确语义：
+
+| 情况 | 判定条件 | 行为 |
+| --- | --- | --- |
+| 幂等命中 | 同 `user_id` + 同 `request_id` + 同 `input_hash` | 返回**原任务**（不新建），阻止并发重复提交 |
+| request_id 复用冲突 | 同 `user_id` + 同 `request_id` + **不同** `input_hash` | 返回 `409 REQUEST_ID_REUSED`（同一 request_id 被用于不同入参，属客户端 bug） |
+| Worker 自动重试 | 同 task（租约过期/崩溃后重抢） | **同一 task**，`attempt_count + 1`，不新建 task |
+| 用户主动重新生成 | 同 `user_id` + **新 `request_id`**（input_hash 可相同可不同） | 新建 task |
+
 - **作用域**（用于业务校验与任务分类，不参与唯一约束）：
   - `work` 级（卷纲、阶段目标）：`chapter_id = null`。
   - `chapter` 级（细纲、节拍、正文草稿、检查）：`chapter_id` 非空。
@@ -257,7 +310,7 @@ rule_packages (题材规则包，系统级)
 
 **队列与租约（v1.1）**：
 - Worker 用 `SELECT ... FOR UPDATE SKIP LOCKED` 抢 `pending` 任务，抢到后写 `locked_by + lease_until + heartbeat_at`。
-- Worker 定期心跳；`lease_until` 过期且无心跳 → 视为崩溃，任务可被重新抢占，`attempt_count + 1`。
+- Worker 定期心跳；`lease_until` 过期且无心跳 → 视为崩溃，任务可被重新抢占，`attempt_count + 1`（**同一 task，不新建**）。
 - 超过最大 attempt（默认 3）→ 标 `failed`。
 - `cancel_requested_at` 非空 → Worker 在处理前检查并停止后续动作。
 
@@ -321,6 +374,23 @@ rule_packages (题材规则包，系统级)
 | new_value | jsonb nullable | 变更后值 |
 | delta | jsonb nullable | 增量（资源/物品类使用，如 `{"amount": -500}`） |
 | created_at | timestamptz | |
+
+**fact_effect_applications（影响应用记录，v1.3 新增）**：记录每个结构化影响是否已应用、对应流水、冲正流水与应用时间。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| fact_effect_id | uuid FK→fact_effects | 对应的结构化影响 |
+| status | enum('applied','reversed','pending') | 已应用 / 已冲正 / 待应用 |
+| applied_at | timestamptz nullable | 应用时间 |
+| resource_ledger_id | uuid nullable | 若影响资源，指向 `resource_ledgers` 流水行 |
+| item_event_id | uuid nullable | 若影响物品，指向 `item_events` 流水行 |
+| reversal_ledger_id | uuid nullable | 冲正时写入的反向 `resource_ledgers` 行 |
+| reversal_item_event_id | uuid nullable | 冲正时写入的反向 `item_events` 行 |
+| reversed_at | timestamptz nullable | 冲正时间 |
+| created_at | timestamptz | |
+
+> 每个 fact_effect 至多一条 `applied` 记录；`resource_ledger_id` / `item_event_id` 唯一（一个流水行只能由一个 effect 应用产生）。
 
 **作者确认流程（v1.2 明确）**：系统提取时同时产出 `fact_versions`（候选）+ 对应的 `fact_effects`（候选影响）。作者逐条确认时，看到的是**自然语言事实 + 结构化影响**（如"灵石 −500，当前余额 0"），确认后 `fact_effects` 生效并触发状态回写。作者可**修正影响**（改 old/new/delta）后再确认，确认的是最终结构化影响，而非仅有自然语言。
 
@@ -405,13 +475,23 @@ rule_packages (题材规则包，系统级)
 - **管理员与正文隔离（v1.1）**：管理员默认仅可读任务/用量/错误等元数据；正文读取走**临时授权 + 审计**（见 `00` §7.1）。技术实现上，管理员正文接口独立且默认 `403`，需有效授权才放行。
 - **无跨作品检索**：检索仅限单作品内。
 
-### 6.1 账号上限的事务锁（v1.1 新增）
+### 6.1 账号上限的并发锁（v1.3 修正，回应审查第 4 条）
 
-新建账号时，在同一事务内：
-1. `SELECT count(*) FROM users FOR UPDATE`（或对账号计数表加 advisory lock）；
-2. 校验 `count < 10`；
-3. 插入新账号。
-确保两个管理员**并发创建**时不会双双通过校验而突破 10 上限。
+> v1.1 曾写 `SELECT count(*) FROM users FOR UPDATE`，此写法在空表/无行可锁时**不能可靠串行化**并发创建，已废弃。
+
+**采用方案（二选一，实现阶段确定）**：
+1. **`pg_advisory_xact_lock(key)`**：新建账号事务开始时获取一个固定 key 的事务级咨询锁（如 `pg_advisory_xact_lock(42)`），再 `count(*)` 校验 + 插入，事务结束自动释放。所有新建账号并发串行化。
+2. **固定单行账号配额表**：`account_quota(id, count)` 只保留一行，事务内 `SELECT ... FOR UPDATE` 锁该行，读 count、校验、`count+1` 更新、插入账号，同一事务提交。
+
+**流程（以方案 1 为例）**：
+1. `BEGIN`；
+2. `SELECT pg_advisory_xact_lock(<固定key>)`；
+3. `SELECT count(*) FROM users WHERE ...`；
+4. 校验 `count < 10`，否则 `ROLLBACK` 并返回 `ACCOUNT_LIMIT_REACHED`；
+5. `INSERT INTO users ...`；
+6. `COMMIT`（锁自动释放）。
+
+确保两个管理员**并发创建**时串行执行，不会双双通过校验而突破 10 上限（对应 `04` AT-AUTH-1 真实 PostgreSQL 并发测试）。
 
 ---
 
@@ -428,27 +508,41 @@ rule_packages (题材规则包，系统级)
 - **最终正文版本确定后再提取事实**：事实提取（`fact_extract`）只在章节存在**正式版本**且作者点击"定稿/提取事实"后触发；生成草稿或候选阶段**不提取事实**。
 - 提取基于**当前正式版本**（`source_version_id` 指向该版本），产出候选 `fact_versions` + 候选 `fact_effects`。
 
-### 8.2 接受与回写
+### 8.2 接受与回写（含应用记录）
 
 1. 作者**接受/拒绝**每个候选事实版本（写 `reviewer_id`、`reviewed_at`）。作者可先**修正结构化影响**（fact_effects 的 old/new/delta）再确认。
 2. 接受的事实触发**一致性回写**，以下内容在**同一数据库事务**提交：
    - `fact_versions` 状态 → accepted（`chapter_facts.status` 同步为最新版本状态）；
-   - 按 `fact_effects` 写目标实体：人物状态 → `entity_attributes` 新快照 + `entity_versions`；资源 → 追加 `resource_ledgers`（含 seq_no）；物品 → 追加 `item_events`（含 seq_no）；认知 → 写/更新 `knowledge_marks`（指向 fact_version）。
+   - 按 `fact_effects` 写目标实体：人物状态 → `entity_attributes` 新快照 + `entity_versions`；资源 → 追加 `resource_ledgers`（含 seq_no）；物品 → 追加 `item_events`（含 seq_no）；认知 → 写/更新 `knowledge_marks`（指向 fact_version）；
+   - **写 `fact_effect_applications`**：每个 effect 记一条 `applied` 记录，`resource_ledger_id` / `item_event_id` 指向刚写入的流水行，`applied_at` 记录时间。
 3. **回写失败**：事务整体回滚，事实版本保持 candidate，无半写。
 4. **重复回写**：以 `fact_version_id` 幂等，不重复追加流水。
 
-### 8.3 正式版本变更后的事实失效、重提与回滚（v1.2 新增）
+### 8.2.1 事实并发应用（v1.3 新增，回应审查第 2 条）
+
+- **行锁顺序（固定，防死锁）**：先锁 `entities`（目标实体行）→ 再锁资源/物品流水对应的目标行。人物状态与资源/物品分属不同实体，需按固定顺序加锁。
+- **应用前校验 old_value**：写 `fact_effects` 前，读取目标实体当前值，与 `fact_effects.old_value` 比对：
+  - 一致 → 应用；
+  - 不一致 → 返回 `409 FACT_STATE_CONFLICT`，该 effect 不应用，整笔事务回滚（不写 application、不写流水）。
+- **seq_no 安全分配**：资源/物品流水的 `seq_no` 在加锁事务内计算 `max(seq_no) + 1`（锁住目标实体行后串行化，避免并发抢同一 seq_no）。
+- 两个事实同时修改同一资源 → 先到者应用，后到者 `old_value` 校验失败 → `409 FACT_STATE_CONFLICT`（对应 `04` AT-FACT-14）。
+
+### 8.3 正式版本变更后的事实失效、重提、冲正与重应用（v1.3 补全）
 
 - **正文修改导致事实失效**：当某章节的**正式版本被新版本取代**（人工编辑保存、局部重写应用、采纳新候选），系统**自动**将该章节旧版本派生的、已 accepted 的 `fact_versions` 标记为 `stale`，其 `chapter_facts.status` 同步为 `stale`。
+- **已应用影响的冲正（v1.3 明确）**：事实 stale 时，逐条读取其 `fact_effect_applications` 中 `status='applied'` 的记录：
+  - 资源类：追加一条**反向 `resource_ledgers`**（delta 取反，`reversal_of` 指向原流水，新 seq_no），并把 application 标记 `status='reversed'`、`reversal_ledger_id` 指向冲正流水、`reversed_at` 记时间；
+  - 物品类：追加反向 `item_events`（`reversal_of` 指向原事件），application 标记 `reversed`；
+  - 人物属性类：写 `entity_attributes` 新快照恢复到应用前值（`old_value`）+ `entity_versions`。
 - **重提**：作者对章节再次"提取事实"，基于新正式版本产出**新的候选事实版本**（version_no 递增），旧版本保留为 `stale`。
-- **重新确认后恢复**：新候选被接受 → 事实恢复有效（`accepted`），并按其 `fact_effects` 重新回写状态（必要时以冲正/新事件校正资源与物品流水）。
-- **回滚**：若作者发现错误，可将某事实版本标记 `rejected` 或冲正其已回写的流水（走 §3.6 冲正机制），不改历史。
+- **重新确认后重应用**：新候选被接受 → 事实恢复有效（`accepted`），按其 `fact_effects` **重新应用**（新增 application 记录、新流水），而非复用已冲正的历史流水。
+- **回滚**：若作者发现错误，可将某事实版本标记 `rejected` 或冲正其已回写流水（走 §3.6 冲正机制），不改历史。
 
-### 8.4 下一章上下文使用规则（v1.2 明确）
+### 8.4 下一章上下文使用规则（v1.3 修正默认策略）
 
 - **生成下一章时，只使用 `accepted` 且未 `stale` 的事实**作为上下文；`candidate` / `rejected` / `stale` / `superseded` 的事实**不得进入后续章节上下文**。
 - 上下文检索按 `fact_versions.status = 'accepted'` 过滤，并取每个 `fact_id` 的**最新有效版本**。
-- 待确认事实是否阻塞下一章：默认**不阻塞**（策略可配），生成前提示"有 N 条事实待确认"。
+- **阻塞策略（v1.3 修正为推荐默认）**：**存在 `stale` 事实或待校正影响（有 `applied` 但未冲正的 application）时，禁止生成下一章**（返回 `FACT_PENDING_CORRECTION`），作者须先处理（重提确认或冲正）后才能继续。候选事实待确认仍默认不阻塞（策略可配），仅提示。
 
 ---
 

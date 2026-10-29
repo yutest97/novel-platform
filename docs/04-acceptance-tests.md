@@ -1,6 +1,6 @@
 # 04 验收测试（Acceptance Tests）
 
-- 版本：v1.2（方案稿，退回修订中，待技术负责人第三次复审）
+- 版本：v1.3（方案稿，退回修订中，待技术负责人第四次定向复审）
 - 状态：**未获批准。**
 
 本文定义可执行的验收用例，覆盖：创建作品→导出章节全流程、10 章连续性、七类一致性检查、服务重启/API 失败/重复任务/双 Worker/租约过期/事实回写/stale/隐私授权/会话安全等场景。用例编号供阶段验收引用。
@@ -63,12 +63,16 @@
 | 编号 | 用例 | 预期 |
 | --- | --- | --- |
 | AT-PRV-1 | **未授权**：管理员直接请求作者正文接口 | `403`，默认无正文读取权限 |
-| AT-PRV-2 | **作者批准**：管理员发起授权 → 作者 A 批准 → 管理员查看 | 授权成功，查看成功，落审计（who/when/what/why） |
-| AT-PRV-3 | **管理员自批**（若负责人决策为 B） | 自批生效但**必须记录为负责人决策**；审计留痕 |
-| AT-PRV-4 | **授权过期**：超过默认 1 小时再访问 | `403`，需重新发起授权 |
-| AT-PRV-5 | **越范围读取**：授权章节 A，请求章节 B 正文 | `403`，范围外拒绝 |
-| AT-PRV-6 | **审计不可缺失**：任意一次查看后查审计日志 | 必有一条完整记录（who/when/what/why），不可篡改 |
-| AT-PRV-7 | **作者未批准**：授权请求未被批准时管理员访问 | `403` |
+| AT-PRV-2 | **作者站内批准**：管理员发起授权 → 作者在站内批准 → 管理员查看 | 授权成功，查看成功，落审计（who/when/what/why） |
+| AT-PRV-3 | **作者站内拒绝**：作者拒绝授权请求 | 拒绝留痕（审计），管理员查看仍 `403` |
+| AT-PRV-4 | **待处理请求提示** | 作者有 pending 请求时，工作台显示"有 N 条请求待处理" |
+| AT-PRV-5 | **管理员自批**（若负责人决策为 B） | 自批生效但**必须记录为负责人决策**；审计留痕 |
+| AT-PRV-6 | **授权过期**：超过默认 1 小时再访问 | `403`，需重新发起授权 |
+| AT-PRV-7 | **越范围读取**：授权章节 A，请求章节 B 正文 | `403`，范围外拒绝 |
+| AT-PRV-8 | **审计不可缺失**：任意一次查看后查审计日志 | 必有一条完整记录（who/when/what/why），不可篡改 |
+| AT-PRV-9 | **密码重置留审计**：管理员重置某账号密码 | append-only 审计记录，含操作者/目标/时间 |
+| AT-PRV-10 | **账号停用留审计**：管理员停用账号 | 审计记录不可缺失 |
+| AT-PRV-11 | **密码重置后访问**：被重置账号的旧会话 | 立即失效 `403`；重置事件在审计中可查 |
 
 ---
 
@@ -158,14 +162,15 @@
 | 编号 | 用例 | 预期 |
 | --- | --- | --- |
 | AT-Q1 | **同 request_id 并发提交**（同一用户两个请求同 request_id 同时到达） | 仅产生 1 个 task（`UNIQUE(user_id, request_id)` 阻止并发重复提交） |
-| AT-Q2 | **不同 request_id、相同 input_hash**（用户明确再次生成） | **允许**创建新任务（input_hash 无唯一约束） |
-| AT-Q3 | **任务完成后再生成**（同用户、新 request_id、同输入） | 允许创建新任务，产生新候选，不影响旧版本 |
-| AT-Q4 | **双 Worker 抢同一任务** | 仅 1 个 Worker 拿到锁（SKIP LOCKED），不重复执行 |
-| AT-Q5 | **Worker 崩溃（拿锁后不心跳）** | `lease_until` 过期后任务被重新抢占，`attempt_count+1` |
-| AT-Q6 | **租约过期** | 超 lease 的任务可被重新执行，不永久卡死 |
-| AT-Q7 | **attempt 超限** | 达上限（默认 3）后标 `failed` |
-| AT-Q8 | **用户取消** | `cancel_requested_at` 生效，Worker 停止后续动作 |
-| AT-Q9 | **request_id 为空** | 服务端拒绝（`422`） |
+| AT-Q2 | **同 request_id、不同 input_hash** | 返回 `409 REQUEST_ID_REUSED`（request_id 被用于不同入参） |
+| AT-Q3 | **不同 request_id、相同 input_hash**（用户明确再次生成） | **允许**创建新任务（input_hash 无唯一约束） |
+| AT-Q4 | **任务完成后再生成**（同用户、新 request_id、同输入） | 允许创建新任务，产生新候选，不影响旧版本 |
+| AT-Q5 | **Worker 自动重试**（租约过期/崩溃后重抢） | **同一 task**，`attempt_count + 1`，不新建 task |
+| AT-Q6 | **双 Worker 抢同一任务** | 仅 1 个 Worker 拿到锁（SKIP LOCKED），不重复执行 |
+| AT-Q7 | **租约过期** | 超 lease 的任务可被重新执行，不永久卡死 |
+| AT-Q8 | **attempt 超限** | 达上限（默认 3）后标 `failed` |
+| AT-Q9 | **用户取消** | `cancel_requested_at` 生效，Worker 停止后续动作 |
+| AT-Q10 | **request_id 为空** | 服务端拒绝（`422`） |
 
 ---
 
@@ -184,6 +189,11 @@
 | AT-FACT-9 | **重新提取 → 确认 → 恢复** | stale 事实经重新提取（新候选）→ 确认后恢复 accepted |
 | AT-FACT-10 | **过期事实不进上下文** | 生成下一章时，stale/rejected/candidate 事实**不得**出现在上下文中；仅 accepted 且未 stale 的事实被检索 |
 | AT-FACT-11 | **knowledge_marks 指向存在的事实版本** | fact_version 为外键，指向不存在的版本时写入失败 |
+| AT-FACT-12 | **删除旧事实影响（冲正）** | 事实 stale 后，其 `applied` 的 fact_effect_applications 自动冲正：资源追加反向流水、物品追加反向事件、人物属性恢复 old_value；application 标记 reversed |
+| AT-FACT-13 | **修改资源变化 / 修改人物境界** | 作者修正 fact_effect 的 old/new/delta 后重应用，产生新流水/新快照，不复用已冲正历史 |
+| AT-FACT-14 | **两个事实同时修改同一资源** | 先到者应用；后到者 old_value 校验失败 → `409 FACT_STATE_CONFLICT`，不写流水不写 application |
+| AT-FACT-15 | **物品转手失效** | 物品转手事实 stale 后冲正，持有人恢复；重新确认后按新 effect 重应用 |
+| AT-FACT-16 | **存在 stale 事实时禁止生成下一章** | 返回 `FACT_PENDING_CORRECTION`，处理完（冲正/重确认）后才能继续 |
 
 ---
 
@@ -230,7 +240,7 @@
 
 | 编号 | 用例 | 预期 |
 | --- | --- | --- |
-| AT-AUTH-1 | 账号数上限（含停用）并发创建 | 事务锁保证不突破 10 |
+| AT-AUTH-1 | 账号数上限（含停用）**真实 PostgreSQL 并发创建** | 两个事务并发创建，`pg_advisory_xact_lock` 串行化，总数不突破 10 |
 | AT-AUTH-2 | 停用账号会话立即失效 | 逐请求校验，立即 `403` |
 | AT-AUTH-3 | 首登强制改密 | 未改密前其他路由 302 到改密页 |
 | AT-AUTH-4 | 登录失败限流 | 第 6 次返回 `LOGIN_LOCKED` |
@@ -255,17 +265,17 @@
 
 ---
 
-## 14. 追踪矩阵（P0 功能 → 用例，v1.2 逐个列出）
+## 14. 追踪矩阵（P0 功能 → 用例，v1.3 按实际 ID 更新）
 
 | P0 功能 | 覆盖用例 |
 | --- | --- |
 | F-AUTH-01 | AT-AUTH-5（初始密码一次性展示）、AT-FLOW-1 |
 | F-AUTH-02 | AT-AUTH-3（首登强制改密） |
 | F-AUTH-03 | AT-AUTH-7（管理员重置密码）、AT-AUTH-2（停用生效） |
-| F-AUTH-04 | AT-AUTH-1（并发创建不突破上限） |
+| F-AUTH-04 | AT-AUTH-1（真实 PG 并发创建不突破上限） |
 | F-AUTH-05 | AT-AUTH-6（argon2id） |
 | F-AUTH-06 | AT-AUTH-8/9/10/11/12（轮换/有效期/多设备/Secure） |
-| F-AUTH-10 | AT-AUTH-13（CSRF/Origin） |
+| F-AUTH-11 | AT-AUTH-13（CSRF/Origin） |
 | F-WRK-01 | AT-FLOW-1（新建作品） |
 | F-WRK-02 | AT-FLOW-1（方向参数存 work_settings） |
 | F-WRK-03 | AT-FLOW-1（世界观设定） |
@@ -291,26 +301,30 @@
 | F-DRAFT-05 | AT-VER-2（人工编辑） |
 | F-DRAFT-06 | AT-VER-3（局部重写） |
 | F-DRAFT-08 | AT-VER-4（版本恢复） |
-| F-DRAFT-10 | AT-Q3（任务完成后再生成） |
+| F-DRAFT-10 | AT-Q4（任务完成后再生成） |
 | F-REV-01 | AT-CHK-1~7 |
 | F-REV-02 | AT-CHK-* 证据格式断言 |
 | F-REV-03 | AT-CHK-*（问题定位） |
 | F-REV-06 | AT-CHK-*（规则包驱动） |
-| F-CTX-01 | AT-R1/R2、AT-Q1~9 |
+| F-CTX-01 | AT-R1/R2、AT-Q1~10 |
 | F-CTX-02 | AT-CTX-1 |
 | F-CTX-03 | AT-CTX-2 |
-| F-CTX-04 | AT-Q8（取消）、AT-Q2/Q3（重试与再次生成） |
+| F-CTX-04 | AT-Q9（取消）、AT-Q3/Q4（再次生成）、AT-Q5（Worker 重试） |
 | F-FACT-01 | AT-FACT-1 |
 | F-FACT-02 | AT-FACT-2/6 |
 | F-FACT-03 | AT-FACT-3/4/5（原子/幂等/回滚） |
-| F-FACT-04 | AT-FACT-8/9（stale/恢复） |
+| F-FACT-04 | AT-FACT-8/9、AT-FACT-12/13/15（stale 冲正/重应用/物品转手失效） |
 | F-FACT-05 | AT-FACT-10（过期事实不进上下文）、AT-FACT-11 |
+| F-FACT-06 | AT-FACT-14（并发冲突 409） |
+| F-FACT-07 | AT-FACT-16（stale 阻塞下一章） |
 | F-EXP-01 | AT-EXP-1/2 |
 | F-ADM-01 | AT-AUTH-1/7 |
 | F-ADM-02 | AT-CTX-3/4/5 |
 | F-ADM-03 | AT-CTX-2 |
-| F-PRV-01 | AT-PRV-1/2/4/5/6/7 |
-| F-PRV-02 | AT-PRV-3（管理员自批，若决策为 B） |
+| F-PRV-01 | AT-PRV-1/2/6/7/8 |
+| F-PRV-02 | AT-PRV-5（管理员自批，若决策为 B） |
+| F-PRV-03 | AT-PRV-3/4（站内拒绝/待处理提示） |
+| F-PRV-04 | AT-PRV-9/10/11（密码重置/停用/重置后访问审计） |
 
 ---
 
@@ -318,10 +332,10 @@
 
 - P0 用例 100% 通过，P1 ≥90%（桩模型自动化部分）。
 - 存在 1 部作品完成 10 章（AT-CONT-1，真实模型），且质量指标达标（§10）。
-- 故障无半写、无重复：AT-R1/AT-F1/AT-F2/AT-C2/AT-C3/AT-Q1/AT-Q4/AT-Q5/AT-FACT-3/AT-FACT-5/AT-CAND-7 全绿。
+- 故障无半写、无重复：AT-R1/AT-F1/AT-F2/AT-C2/AT-C3/AT-Q1/AT-Q6/AT-FACT-3/AT-FACT-5/AT-CAND-7 全绿。
 - 一致性：AT-CHK-1~7 全绿（7 类检查均可触发且证据完整）。
-- 事实闭环：AT-FACT-8/9/10 全绿（stale/恢复/上下文过滤）。
-- 隐私：AT-PRV-1/2/4/5/6 全绿。
+- 事实闭环：AT-FACT-8/9/10/12/14/16 全绿（stale 冲正/上下文过滤/并发冲突/阻塞）。
+- 隐私：AT-PRV-1/2/6/7/8/9 全绿。
 - 备份恢复：AT-BK-1 全绿。
 - 许可证检查通过（见 `05` §6）。
 
