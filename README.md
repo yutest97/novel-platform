@@ -154,6 +154,26 @@ pnpm verify:health       # 仅验证四个健康检查端点（服务已在运�
 
 `verify:stack` 与 CI 的 `docker` job 执行**同一套命令**，任一端点失败即以非零状态码退出。
 
+### 容器镜像的可移植性设计
+
+pnpm 默认的 isolated linker 会创建**指向构建机绝对路径**的符号链接
+（如 `node_modules/@novel/db -> /home/runner/work/xxx/packages/db`）。
+Docker `COPY` 会原样保留这些链接，容器内将无法解析 workspace 依赖。
+
+因此镜像构建使用 `scripts/build-deploy.sh`：
+
+```bash
+pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
+```
+
+它生成**扁平、无符号链接**的生产依赖目录（实测 0 个符号链接），可随镜像整体移动。
+脚本会校验符号链接数，若不为 0 则直接失败。
+
+> 另：Next 构建使用 **Webpack**（`next build --webpack`）。
+> Next 16 默认的 Turbopack 会对 pnpm 布局的外部包生成带 hash 的引用
+> （如 `pg-<hash>`）并把实体放在 `.next/node_modules/`——该目录会被 `pnpm deploy`
+> 跳过，容器内会报 `Cannot find module 'pg-<hash>'`。
+
 ### CI 流程（`.github/workflows/ci.yml`）
 
 **job `verify`**（质量门禁）：
@@ -233,6 +253,7 @@ pnpm verify:health       # 仅验证四个健康检查端点（服务已在运�
 │   └── docker/              # Dockerfile 与 Caddyfile
 ├── scripts/
 │   ├── license-check.mjs        # 许可证门禁（--dev 扫描开发依赖）
+│   ├── build-deploy.sh          # 生成容器用的可移植生产依赖（0 符号链接）
 │   ├── verify-healthchecks.sh   # 四个健康检查端点验证（可移植）
 │   └── verify-local.sh          # 本地容器栈端到端验证（可移植，基于 compose）
 ├── docs/                    # 七份方案文档（产品/架构/验收/许可证）

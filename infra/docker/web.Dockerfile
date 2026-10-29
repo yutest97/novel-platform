@@ -1,7 +1,22 @@
-# Web 应用镜像（Next.js standalone 输出）
+# Web 应用镜像（Next.js 生产模式）
 #
 # 构建上下文为仓库根目录（见 infra/docker-compose.yml 的 build.context）。
 # 该镜像只包含运行时所需产物，不包含任何密钥。
+#
+# 关键设计（两个坑，均已在本机实测确认）：
+#
+# 1. 不用 Next 的 standalone 输出：
+#    standalone 的 outputFileTracing 在 pnpm monorepo 下无法追踪到 workspace 依赖
+#    （@novel/shared、@novel/db 不在 standalone 内）。
+#
+# 2. 不用 Turbopack 构建（见 apps/web/package.json 的 `next build --webpack`）：
+#    Turbopack 会对 pnpm 布局的外部包生成带 hash 的引用（如 pg-<hash>），
+#    并把实体放在 .next/node_modules/ —— 该目录会被 pnpm deploy 跳过，
+#    容器内运行时将报 "Cannot find module 'pg-<hash>'"。
+#
+# 因此改用 `pnpm deploy --config.node-linker=hoisted` 生成
+# **扁平、无符号链接**的生产依赖目录（deploy 产物 0 个符号链接），
+# 配合 Webpack 构建产物 + `next start` 运行。
 
 FROM node:22.22.2-bookworm-slim AS base
 ENV PNPM_HOME=/usr/local/pnpm
@@ -24,6 +39,7 @@ RUN pnpm install --frozen-lockfile
 FROM deps AS builder
 WORKDIR /app
 COPY tsconfig.base.json ./
+COPY scripts ./scripts
 COPY packages/shared packages/shared
 COPY packages/db packages/db
 COPY apps/web apps/web
@@ -33,6 +49,9 @@ RUN pnpm --filter @novel/shared build \
  && pnpm --filter @novel/db build \
  && pnpm --filter @novel/web build
 
+# 生成可移植的生产依赖目录（hoisted → 无符号链接）
+RUN bash scripts/build-deploy.sh @novel/web /out
+
 # ---------- 运行层 ----------
 FROM base AS runner
 WORKDIR /app
@@ -40,11 +59,10 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# 运行所需文件：standalone 输出 + 静态资源
-# 注意：apps/web/public 目录当前不存在（Next 会在缺失时回退到根路径），
+# deploy 产物：package.json + 扁平 node_modules（无符号链接）+ .next 构建产物
+COPY --from=builder /out ./
+# 注意：apps/web/public 目录当前不存在（Next 在缺失时回退到根路径），
 # 因此不 COPY 该目录，避免构建失败。
-COPY --from=builder /app/apps/web/.next/standalone ./
-COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
 
 EXPOSE 3000
-CMD ["node", "apps/web/server.js"]
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-p", "3000", "-H", "0.0.0.0"]
