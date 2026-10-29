@@ -1,0 +1,12 @@
+-- M1-A 基线迁移（空迁移）。
+--
+-- 生成方式：
+--   prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script
+-- Prisma 对"无任何 model"的 schema 输出 `-- This is an empty migration.`。
+--
+-- 本阶段**刻意不创建任何业务表**（users / sessions / works / chapters / facts 等）：
+-- 业务表待 M1-B 及之后阶段按已批准的 docs/03-data-model.md 方案落地。
+--
+-- 该空迁移的作用是打通"迁移可重复执行且安全"的链路：
+--   prisma migrate deploy   —— 可重复执行，重复执行不报错、不重复建表
+--   prisma migrate status   —— 可查询迁移状态

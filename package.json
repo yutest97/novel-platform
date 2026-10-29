@@ -1,0 +1,91 @@
+{
+  "name": "novel-writing-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "中文 AI 小说写作平台 — 封闭源码、限定用户使用的私有 Web 系统",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22.22.2 <23"
+  },
+  "scripts": {
+    "build": "pnpm db:generate && pnpm -r build",
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:coverage": "pnpm -r test:coverage",
+    "db:generate": "pnpm --filter @novel/db generate",
+    "db:migrate": "pnpm --filter @novel/db migrate",
+    "db:deploy": "pnpm --filter @novel/db deploy",
+    "db:status": "pnpm --filter @novel/db migrate:status",
+    "license:check": "node scripts/license-check.mjs",
+    "license:report": "node scripts/license-check.mjs --write",
+    "compose:config": "docker compose -f infra/docker-compose.yml config",
+    "compose:up": "docker compose -f infra/docker-compose.yml up -d",
+    "compose:down": "docker compose -f infra/docker-compose.yml down",
+    "compose:logs": "docker compose -f infra/docker-compose.yml logs -f"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.20.5",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "16.4.0",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "4.1.12"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "prisma"
+    ],
+    "ignoredOptionalDependencies": [
+      "@img/sharp-darwin-arm64",
+      "@img/sharp-darwin-x64",
+      "@img/sharp-freebsd-wasm32",
+      "@img/sharp-libvips-darwin-arm64",
+      "@img/sharp-libvips-darwin-x64",
+      "@img/sharp-libvips-linux-arm",
+      "@img/sharp-libvips-linux-arm64",
+      "@img/sharp-libvips-linux-ppc64",
+      "@img/sharp-libvips-linux-riscv64",
+      "@img/sharp-libvips-linux-s390x",
+      "@img/sharp-libvips-linux-x64",
+      "@img/sharp-libvips-linuxmusl-arm64",
+      "@img/sharp-libvips-linuxmusl-x64",
+      "@img/sharp-linux-arm",
+      "@img/sharp-linux-arm64",
+      "@img/sharp-linux-ppc64",
+      "@img/sharp-linux-riscv64",
+      "@img/sharp-linux-s390x",
+      "@img/sharp-linux-x64",
+      "@img/sharp-linuxmusl-arm64",
+      "@img/sharp-linuxmusl-x64",
+      "@img/sharp-wasm32",
+      "@img/sharp-webcontainers-wasm32",
+      "@img/sharp-win32-arm64",
+      "@img/sharp-win32-ia32",
+      "@img/sharp-win32-x64",
+      "@visx/curve",
+      "@visx/event",
+      "@visx/grid",
+      "@visx/group",
+      "@visx/point",
+      "@visx/responsive",
+      "@visx/scale",
+      "@visx/shape",
+      "@visx/vendor",
+      "elkjs"
+    ],
+    "overrides": {
+      "elkjs": "-"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+dist/
+build/
+out/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Prisma 生成代码（由 `pnpm db:generate` 生成，不入库）
+**/src/generated/
+
+# Next.js 构建临时文件
+_tmp_*
+
+# 环境变量与密钥（严禁入库）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+!infra/**/*.example
+
+# 本地数据与运行时产物
+data/
+tmp/
+*.sqlite
+*.sqlite3
+*.db
+logs/
+*.log
+
+# 覆盖率与测试产物
+coverage/
+.nyc_output/
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 证书（Caddy 本地自签）
+infra/docker/caddy/*.crt
+infra/docker/caddy/*.key

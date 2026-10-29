@@ -1,0 +1,35 @@
+# 构建产物
+node_modules
+.next
+dist
+coverage
+*.tsbuildinfo
+
+# 版本控制与编辑器
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# 环境与密钥（严禁进入镜像）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets
+
+# 本地数据
+data
+tmp
+logs
+*.log
+*.sqlite
+
+# 文档（不参与运行时）
+docs
+*.md
+!README.md

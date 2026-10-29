@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22.22.2'
+  PNPM_VERSION: '9.15.0'
+
+jobs:
+  verify:
+    name: 安装 / lint / typecheck / test / build / 许可证
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 生成 Prisma Client
+        run: pnpm db:generate
+
+      - name: 校验格式
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 单元测试
+        run: pnpm test
+
+      - name: 构建
+        run: pnpm build
+
+      - name: Docker Compose 配置校验
+        run: |
+          POSTGRES_PASSWORD=ci-placeholder docker compose -f infra/docker-compose.yml config --quiet
+          POSTGRES_PASSWORD=ci-placeholder docker compose -f infra/docker-compose.yml config > /dev/null
+
+      - name: 依赖许可证扫描（GPL/LGPL/AGPL/SSPL/未知即失败）
+        run: pnpm license:check
+
+      - name: 生成第三方许可证清单
+        run: pnpm license:report
+
+      - name: 上传许可证清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: THIRD_PARTY_LICENSES.md

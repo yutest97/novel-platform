@@ -1,0 +1,17 @@
+// Prisma schema —— M1-A 阶段仅建立迁移框架与连接，不创建任何业务表。
+//
+// 本轮**明确不包含**：users、sessions、novels/works、chapters、facts 等业务表。
+// 业务表待 M1-B 及之后阶段按已批准的 `docs/03-data-model.md` 方案落地。
+//
+// 注意：Prisma 7 起 datasource 的连接串写在 prisma.config.ts 中（不在 schema 内）。
+// 本 schema 当前没有任何 model，`prisma migrate` 会生成空迁移（仅注释），
+// 用于打通"迁移可重复执行且安全"的链路。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
