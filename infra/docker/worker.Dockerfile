@@ -8,7 +8,8 @@
 # Docker COPY 会原样保留这些链接，容器内将无法解析 workspace 依赖。
 #
 # 因此这里用 `pnpm deploy --config.node-linker=hoisted` 生成
-# **扁平、无符号链接**的生产依赖目录（deploy 产物 0 个符号链接），
+# 扁平的生产依赖目录：第三方依赖与 workspace 包均为实体目录，仅保留
+# `node_modules/.bin/` 下的相对符号链接（详见 scripts/build-deploy.sh 的校验规则），
 # 运行时只依赖该目录，可随镜像整体移动。
 
 FROM node:22.22.2-bookworm-slim AS base
@@ -41,7 +42,7 @@ RUN pnpm --filter @novel/shared build \
  && pnpm --filter @novel/db build \
  && pnpm --filter @novel/worker build
 
-# 生成可移植的生产依赖目录（hoisted → 无符号链接）
+# 生成可移植的生产依赖目录（hoisted；校验器逐条判定链接可移植性）
 RUN bash scripts/build-deploy.sh @novel/worker /out
 
 # ---------- 运行层 ----------
@@ -50,7 +51,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV WORKER_PORT=3001
 
-# deploy 产物：package.json + dist + 扁平 node_modules（无符号链接）
+# deploy 产物：package.json + dist + 扁平 node_modules
 COPY --from=builder /out ./
 
 EXPOSE 3001

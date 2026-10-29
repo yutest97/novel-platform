@@ -59,6 +59,9 @@ jobs:
       - name: 单元测试
         run: pnpm test
 
+      - name: 符号链接分类校验器的行为测试
+        run: pnpm test:deploy-symlinks
+
       - name: 构建应用
         run: pnpm build:apps
 

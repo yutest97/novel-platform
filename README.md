@@ -77,8 +77,9 @@ docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
 ```
 
 **镜像依赖布局**：web/worker 镜像不使用 Next 的 standalone 输出，
-而是用 `pnpm deploy --config.node-linker=hoisted` 生成**扁平、无符号链接**的
-生产依赖目录，再配合 `next build`（Webpack）产物 + `next start` 运行。
+而是用 `pnpm deploy --config.node-linker=hoisted` 生成**扁平**的
+生产依赖目录（第三方依赖与 workspace 包均为实体目录），再配合
+`next build`（Webpack）产物 + `next start` 运行。
 原因见 §7「容器镜像的可移植性设计」。
 
 ### 首次启动后执行数据库迁移
@@ -194,9 +195,27 @@ Docker `COPY` 会原样保留这些链接，容器内将无法解析 workspace �
 pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 ```
 
-它生成**扁平、无符号链接**的生产依赖目录（实测 0 个符号链接），可随镜像整体移动。
-脚本会依次校验：符号链接数必须为 0 → 关键依赖版本与 `pnpm-lock.yaml` 一致 →
-对产物重新执行许可证扫描。任一步失败即中止镜像构建。
+它生成**扁平**的生产依赖目录：第三方依赖与 workspace 包都是实体目录，
+仅保留 `node_modules/.bin/` 下的**相对**符号链接（如 `tsc -> ../typescript/bin/tsc`）。
+
+脚本按下列规则**逐条分类校验**符号链接（不再使用"链接数必须为 0"的简单规则，
+因为 `.bin` 下的相对链接完全可移植）：
+
+| 情形                                   | 判定                                 |
+| -------------------------------------- | ------------------------------------ |
+| 相对路径 + 解析后仍在输出目录内 + 有效 | 允许（`node_modules/.bin` 另行标注） |
+| 绝对路径                               | 拒绝 → 先尝试用目标真实内容复制替换  |
+| 相对路径但解析后逃逸输出目录           | 拒绝                                 |
+| 断链（目标不存在）                     | 拒绝                                 |
+
+每个链接都会打印：路径、`readlink` 目标、是否为绝对路径、`realpath` 结果、
+是否位于输出目录内、判定依据。替换采用"复制真实内容"，**不删除依赖**。
+
+脚本随后校验关键依赖版本与 `pnpm-lock.yaml` 一致，并对产物重新执行许可证扫描。
+任一步失败即中止镜像构建。
+
+校验器自身的 5 组行为测试（内部相对链接通过 / 逃逸失败 / 绝对失败 / 断链失败 /
+绝对链接被复制替换后通过）：`pnpm test:deploy-symlinks`。
 
 **关于 `--legacy`**：pnpm 10 起，部署 workspace 包默认要求
 `inject-workspace-packages=true`，否则报 `ERR_PNPM_DEPLOY_NONINJECTED_WORKSPACE`。
@@ -292,7 +311,9 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 ├── scripts/
 │   ├── license-check.mjs          # 许可证门禁（--dev 开发依赖 / --dir 扫描 deploy 产物）
 │   ├── check-deploy-versions.mjs  # 校验 deploy 产物关键依赖版本与 lockfile 一致
-│   ├── build-deploy.sh            # 生成可移植生产依赖（0 符号链接 + 版本/许可证校验）
+│   ├── check-deploy-symlinks.mjs  # 符号链接逐条分类校验（绝对/断链/逃逸 → 失败）
+│   ├── test-deploy-symlinks.mjs   # 上述校验器的 5 组行为测试
+│   ├── build-deploy.sh            # 生成可移植生产依赖（链接校验 + 版本/许可证校验）
 │   ├── verify-healthchecks.sh     # 四个健康检查端点验证（可移植）
 │   └── verify-local.sh            # 本地容器栈验证（独立项目名，与开发环境隔离）
 ├── docs/                    # 七份方案文档（产品/架构/验收/许可证）

@@ -15,7 +15,8 @@
 #    容器内运行时将报 "Cannot find module 'pg-<hash>'"。
 #
 # 因此改用 `pnpm deploy --config.node-linker=hoisted` 生成
-# **扁平、无符号链接**的生产依赖目录（deploy 产物 0 个符号链接），
+# 扁平的生产依赖目录：第三方依赖与 workspace 包均为实体目录，仅保留
+# `node_modules/.bin/` 下的相对符号链接（详见 scripts/build-deploy.sh 的校验规则），
 # 配合 Webpack 构建产物 + `next start` 运行。
 
 FROM node:22.22.2-bookworm-slim AS base
@@ -49,7 +50,7 @@ RUN pnpm --filter @novel/shared build \
  && pnpm --filter @novel/db build \
  && pnpm --filter @novel/web build
 
-# 生成可移植的生产依赖目录（hoisted → 无符号链接）
+# 生成可移植的生产依赖目录（hoisted；校验器逐条判定链接可移植性）
 RUN bash scripts/build-deploy.sh @novel/web /out
 
 # ---------- 运行层 ----------
@@ -59,7 +60,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# deploy 产物：package.json + 扁平 node_modules（无符号链接）+ .next 构建产物
+# deploy 产物：package.json + 扁平 node_modules + .next 构建产物
 COPY --from=builder /out ./
 # 注意：apps/web/public 目录当前不存在（Next 在缺失时回退到根路径），
 # 因此不 COPY 该目录，避免构建失败。
