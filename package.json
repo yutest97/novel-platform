@@ -22,11 +22,16 @@
     "db:deploy": "pnpm --filter @novel/db deploy",
     "db:status": "pnpm --filter @novel/db migrate:status",
     "license:check": "node scripts/license-check.mjs",
+    "license:check:dev": "node scripts/license-check.mjs --dev",
     "license:report": "node scripts/license-check.mjs --write",
+    "license:report:dev": "node scripts/license-check.mjs --write --dev",
     "compose:config": "docker compose -f infra/docker-compose.yml config",
-    "compose:up": "docker compose -f infra/docker-compose.yml up -d",
-    "compose:down": "docker compose -f infra/docker-compose.yml down",
-    "compose:logs": "docker compose -f infra/docker-compose.yml logs -f"
+    "compose:build": "docker compose -f infra/docker-compose.yml build",
+    "compose:up": "docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 300",
+    "compose:down": "docker compose -f infra/docker-compose.yml down -v --remove-orphans",
+    "compose:logs": "docker compose -f infra/docker-compose.yml logs -f",
+    "verify:health": "bash scripts/verify-healthchecks.sh",
+    "verify:stack": "bash scripts/verify-local.sh"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
@@ -82,10 +87,12 @@
       "@visx/scale",
       "@visx/shape",
       "@visx/vendor",
-      "elkjs"
+      "elkjs",
+      "lightningcss"
     ],
     "overrides": {
-      "elkjs": "-"
+      "elkjs": "-",
+      "lightningcss": "-"
     }
   }
 }

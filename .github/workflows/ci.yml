@@ -13,7 +13,8 @@ concurrency:
 
 env:
   NODE_VERSION: '22.22.2'
-  PNPM_VERSION: '9.15.0'
+  # 必须与 package.json 的 packageManager 字段完全一致
+  PNPM_VERSION: '10.34.9'
 
 jobs:
   verify:
@@ -25,10 +26,12 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
+      # 使用 corepack 安装与 package.json packageManager 完全一致的 pnpm 版本
+      - name: 启用 corepack 并安装指定 pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@${PNPM_VERSION} --activate
+          pnpm --version
 
       - name: 安装 Node.js
         uses: actions/setup-node@v4
@@ -42,7 +45,7 @@ jobs:
       - name: 生成 Prisma Client
         run: pnpm db:generate
 
-      - name: 校验格式
+      - name: 校验格式（构建前）
         run: pnpm format:check
 
       - name: Lint
@@ -57,19 +60,111 @@ jobs:
       - name: 构建
         run: pnpm build
 
+      - name: 校验格式（构建后，防止 Next 重写文件导致回归）
+        run: pnpm format:check
+
+      - name: 校验构建后 Git 工作区未被污染
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::构建过程修改了被跟踪文件，请检查 Next/Prisma 是否重写了源文件："
+            git status --porcelain
+            git --no-pager diff
+            exit 1
+          fi
+          echo "Git 工作区干净 ✓"
+
       - name: Docker Compose 配置校验
         run: |
+          set -euo pipefail
           POSTGRES_PASSWORD=ci-placeholder docker compose -f infra/docker-compose.yml config --quiet
           POSTGRES_PASSWORD=ci-placeholder docker compose -f infra/docker-compose.yml config > /dev/null
 
-      - name: 依赖许可证扫描（GPL/LGPL/AGPL/SSPL/未知即失败）
-        run: pnpm license:check
+      - name: 依赖许可证扫描（生产依赖 + 开发依赖）
+        run: |
+          set -euo pipefail
+          pnpm license:check
+          pnpm license:check:dev
 
       - name: 生成第三方许可证清单
-        run: pnpm license:report
+        run: |
+          set -euo pipefail
+          pnpm license:report
+          pnpm license:report:dev
 
       - name: 上传许可证清单
         uses: actions/upload-artifact@v4
         with:
           name: third-party-licenses
-          path: THIRD_PARTY_LICENSES.md
+          path: |
+            THIRD_PARTY_LICENSES.md
+            THIRD_PARTY_LICENSES.dev.md
+
+  docker:
+    name: 容器构建与端到端健康验证
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: verify
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 启用 corepack 并安装指定 pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@${PNPM_VERSION} --activate
+          pnpm --version
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 生成 Prisma Client
+        run: pnpm db:generate
+
+      - name: 构建容器镜像
+        env:
+          POSTGRES_PASSWORD: ci-placeholder
+        run: docker compose -f infra/docker-compose.yml build
+
+      - name: 启动四个服务并等待健康
+        env:
+          # POSTGRES_PASSWORD 与 DATABASE_URL 中的密码必须一致，
+          # 否则 compose config 校验会通过，但数据库实际连接失败。
+          POSTGRES_PASSWORD: ci-placeholder
+          POSTGRES_USER: novel
+          POSTGRES_DB: novel
+          DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 300
+
+      - name: 验证四个健康检查端点
+        env:
+          POSTGRES_PASSWORD: ci-placeholder
+          DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
+          NODE_ENV: production
+        run: |
+          set -euo pipefail
+          bash scripts/verify-healthchecks.sh
+
+      - name: 输出容器状态与日志
+        if: always()
+        env:
+          POSTGRES_PASSWORD: ci-placeholder
+        run: |
+          docker compose -f infra/docker-compose.yml ps || true
+          docker compose -f infra/docker-compose.yml logs --tail 100 || true
+
+      - name: 清理容器与卷
+        if: always()
+        env:
+          POSTGRES_PASSWORD: ci-placeholder
+        run: docker compose -f infra/docker-compose.yml down -v --remove-orphans

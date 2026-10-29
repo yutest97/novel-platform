@@ -1,0 +1,327 @@
+# 第三方依赖许可证清单（THIRD-PARTY NOTICES）— 开发依赖
+
+> 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。
+> 数据来源：`pnpm licenses list --json --recursive --dev`。
+> 生成时间：2026-10-29T12:35:06.869Z
+
+**开发依赖**总数：**284**
+
+本项目保持**封闭源码**。以下依赖均采用允许闭源分发的宽松许可证，
+其原始版权与许可证声明保留在各自包内（`node_modules/<包名>/LICENSE`）。
+
+## 已人工审阅的例外（绑定具体包与版本）
+
+- （无）
+
+## 按许可证分组
+
+### Apache-2.0
+
+- @electric-sql/pglite-socket@0.1.3
+- @electric-sql/pglite-tools@0.3.3
+- @electric-sql/pglite@0.4.3
+- @eslint/config-array@0.21.2
+- @eslint/config-helpers@0.4.2
+- @eslint/core@0.17.0
+- @eslint/object-schema@2.1.7
+- @eslint/plugin-kit@0.4.1
+- @humanfs/core@0.19.2
+- @humanfs/node@0.16.8
+- @humanfs/types@0.15.0
+- @humanwhocodes/module-importer@1.0.1
+- @humanwhocodes/retry@0.4.3
+- @prisma/config@7.10.1
+- @prisma/debug@7.10.1
+- @prisma/debug@7.2.0
+- @prisma/engines-version@8.1.0-1.d1b3f377ca835d73fd50954a5e22128b9ebdd6b8
+- @prisma/engines@7.10.1
+- @prisma/fetch-engine@7.10.1
+- @prisma/get-platform@7.10.1
+- @prisma/get-platform@7.2.0
+- @prisma/query-plan-executor@7.2.0
+- @prisma/streams-local@0.1.11
+- @prisma/studio-core@0.33.0
+- eslint-visitor-keys@3.4.3
+- eslint-visitor-keys@4.2.1
+- eslint-visitor-keys@5.0.1
+- expect-type@1.4.0
+- long@5.3.2
+- prisma@7.10.1
+- typescript@5.9.3
+
+### BlueOak-1.0.0
+
+- minimatch@10.2.6
+
+### BSD-2-Clause
+
+- dotenv@17.4.2
+- eslint-scope@8.4.0
+- espree@10.4.0
+- esrecurse@4.3.0
+- estraverse@5.3.0
+- esutils@2.0.3
+- uri-js@4.4.1
+
+### BSD-3-Clause
+
+- deepmerge-ts@8.0.2
+- esquery@1.7.0
+- fast-uri@3.1.9
+- source-map-js@1.2.2
+
+### ISC
+
+- @prisma/dev@0.24.17
+- d3-array@3.2.1
+- d3-array@3.2.4
+- d3-color@3.1.0
+- d3-delaunay@6.0.2
+- d3-format@3.1.0
+- d3-geo@3.1.0
+- d3-interpolate@3.0.1
+- d3-path@3.1.0
+- d3-scale@4.0.2
+- d3-shape@3.2.0
+- d3-time-format@4.1.0
+- d3-time@3.1.0
+- delaunator@5.1.0
+- flatted@3.4.4
+- foreground-child@3.3.1
+- glob-parent@6.0.2
+- graceful-fs@4.2.11
+- internmap@2.0.3
+- isexe@2.0.0
+- minimatch@3.1.5
+- pg-int8@1.0.1
+- picocolors@1.1.1
+- semver@7.8.5
+- siginfo@2.0.0
+- signal-exit@3.0.7
+- signal-exit@4.1.0
+- which@2.0.2
+
+### MIT
+
+- @eslint-community/eslint-utils@4.10.1
+- @eslint-community/regexpp@4.12.2
+- @eslint/eslintrc@3.3.7
+- @eslint/js@9.39.5
+- @jridgewell/sourcemap-codec@1.6.0
+- @oxc-project/types@0.155.0
+- @radix-ui/primitive@1.1.3
+- @radix-ui/react-compose-refs@1.1.2
+- @radix-ui/react-primitive@2.1.3
+- @radix-ui/react-slot@1.2.3
+- @radix-ui/react-toggle@1.1.10
+- @radix-ui/react-use-controllable-state@1.2.2
+- @radix-ui/react-use-effect-event@0.0.2
+- @radix-ui/react-use-layout-effect@1.1.1
+- @rolldown/pluginutils@1.0.1
+- @standard-schema/spec@1.1.0
+- @types/chai@5.2.3
+- @types/d3-array@3.0.3
+- @types/d3-color@3.1.0
+- @types/d3-delaunay@6.0.1
+- @types/d3-format@3.0.1
+- @types/d3-geo@3.1.0
+- @types/d3-interpolate@3.0.1
+- @types/d3-path@3.1.1
+- @types/d3-scale@4.0.2
+- @types/d3-shape@3.1.7
+- @types/d3-time-format@2.1.0
+- @types/d3-time@3.0.0
+- @types/deep-eql@4.0.2
+- @types/estree@1.0.10
+- @types/geojson@7946.0.16
+- @types/json-schema@7.0.15
+- @types/lodash@4.17.27
+- @types/node@22.20.5
+- @types/pg@8.15.6
+- @types/react-dom@19.3.0
+- @types/react@19.3.0
+- @typescript-eslint/eslint-plugin@8.72.1
+- @typescript-eslint/parser@8.72.1
+- @typescript-eslint/project-service@8.72.1
+- @typescript-eslint/scope-manager@8.72.1
+- @typescript-eslint/tsconfig-utils@8.72.1
+- @typescript-eslint/type-utils@8.72.1
+- @typescript-eslint/types@8.72.1
+- @typescript-eslint/typescript-estree@8.72.1
+- @typescript-eslint/utils@8.72.1
+- @typescript-eslint/visitor-keys@8.72.1
+- @visx/curve@4.0.1-alpha.0
+- @visx/event@4.0.1-alpha.0
+- @visx/grid@4.0.1-alpha.0
+- @visx/group@4.0.1-alpha.0
+- @visx/point@4.0.1-alpha.0
+- @visx/responsive@4.0.1-alpha.0
+- @visx/scale@4.0.1-alpha.0
+- @visx/shape@4.0.1-alpha.0
+- @vitest/expect@4.1.12
+- @vitest/mocker@4.1.12
+- @vitest/pretty-format@4.1.12
+- @vitest/runner@4.1.12
+- @vitest/snapshot@4.1.12
+- @vitest/spy@4.1.12
+- @vitest/utils@4.1.12
+- acorn-jsx@5.3.2
+- acorn@8.19.0
+- ajv@6.15.0
+- ajv@8.20.0
+- ansi-styles@4.3.0
+- assertion-error@2.0.1
+- aws-ssl-profiles@1.1.2
+- balanced-match@1.0.2
+- balanced-match@4.0.4
+- better-result@2.10.0
+- brace-expansion@1.1.21
+- brace-expansion@5.0.12
+- c12@3.3.4
+- callsites@3.1.0
+- chai@6.3.0
+- chalk@4.1.2
+- chokidar@5.0.0
+- classnames@2.5.1
+- color-convert@2.0.1
+- color-name@1.1.4
+- concat-map@0.0.1
+- confbox@0.2.4
+- confbox@0.3.2
+- convert-source-map@2.0.0
+- cross-spawn@7.0.6
+- csstype@3.2.3
+- debug@4.4.3
+- deep-is@0.1.4
+- defu@6.1.7
+- destr@2.0.5
+- effect@3.20.0
+- empathic@2.0.0
+- env-paths@3.0.0
+- es-module-lexer@2.3.2
+- esbuild@0.28.2
+- escape-string-regexp@4.0.0
+- eslint-config-prettier@10.1.8
+- eslint@9.39.5
+- estree-walker@3.0.3
+- exsolve@1.2.0
+- fast-check@3.23.2
+- fast-decode-uri-component@1.0.1
+- fast-deep-equal@3.1.3
+- fast-json-stable-stringify@2.1.0
+- fast-levenshtein@2.0.6
+- fast-querystring@1.1.2
+- fdir@6.5.0
+- file-entry-cache@8.0.0
+- find-my-way@9.7.0
+- find-up@5.0.0
+- flat-cache@4.0.1
+- generate-function@2.3.1
+- get-port-please@3.2.0
+- giget@3.3.1
+- globals@14.0.0
+- globals@16.4.0
+- grammex@3.1.13
+- graphmatch@1.1.1
+- has-flag@4.0.0
+- iconv-lite@0.7.3
+- ignore@5.3.2
+- ignore@7.0.14
+- import-fresh@3.3.1
+- imurmurhash@0.1.4
+- is-extglob@2.1.1
+- is-glob@4.0.3
+- is-property@1.0.2
+- jiti@2.7.0
+- js-yaml@4.3.2
+- json-buffer@3.0.1
+- json-schema-traverse@0.4.1
+- json-schema-traverse@1.0.0
+- json-stable-stringify-without-jsonify@1.0.1
+- keyv@4.5.4
+- levn@0.4.1
+- locate-path@6.0.0
+- lodash.merge@4.6.2
+- lodash@4.18.1
+- lru.min@1.1.5
+- magic-string@0.30.21
+- ms@2.1.3
+- mysql2@3.24.4
+- named-placeholders@1.1.6
+- nanoid@3.3.20
+- natural-compare@1.4.0
+- obug@2.2.1
+- ohash@2.0.12
+- optionator@0.9.4
+- p-limit@3.1.0
+- p-locate@5.0.0
+- parent-module@1.0.1
+- path-exists@4.0.0
+- path-key@3.1.1
+- pathe@2.0.3
+- perfect-debounce@2.1.0
+- pg-protocol@1.16.1
+- pg-types@2.2.0
+- picomatch@4.0.7
+- pkg-types@2.4.0
+- postcss@8.5.32
+- postgres-array@2.0.0
+- postgres-bytea@1.0.1
+- postgres-date@1.0.7
+- postgres-interval@1.2.0
+- prelude-ls@1.2.1
+- prettier@3.9.10
+- proper-lockfile@4.1.2
+- punycode@2.3.1
+- pure-rand@6.1.0
+- rc9@3.1.0
+- react-dom@19.3.1
+- react@19.3.1
+- readdirp@5.1.1
+- remeda@2.33.4
+- require-from-string@2.0.2
+- resolve-from@4.0.0
+- ret@0.5.1
+- retry@0.12.0
+- rolldown@1.2.15
+- safe-regex2@5.1.2
+- safer-buffer@2.1.2
+- scheduler@0.28.0
+- shebang-command@2.0.0
+- shebang-regex@3.0.0
+- sql-escaper@1.5.2
+- stackback@0.0.2
+- std-env@3.10.0
+- std-env@4.3.0
+- strip-json-comments@3.1.1
+- supports-color@7.2.0
+- tinybench@2.9.0
+- tinyexec@1.3.1
+- tinyglobby@0.2.17
+- tinyrainbow@3.2.0
+- ts-api-utils@2.5.0
+- tsx@4.23.15
+- type-check@0.4.0
+- typescript-eslint@8.72.1
+- undici-types@6.21.0
+- valibot@1.4.2
+- vite@8.3.5
+- vitest@4.1.12
+- why-is-node-running@2.3.0
+- word-wrap@1.2.5
+- xtend@4.0.2
+- yocto-queue@0.1.0
+- zeptomatch@2.1.0
+
+### MIT and ISC
+
+- @visx/vendor@4.0.0-alpha.0
+
+### Python-2.0
+
+- argparse@2.0.1
+
+### Unlicense
+
+- postgres@3.4.7
+- robust-predicates@3.0.3

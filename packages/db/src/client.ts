@@ -13,11 +13,23 @@ import { PrismaClient } from './generated/prisma/client.js';
  * 导致健康检查无法返回"失败"，而是直接崩溃 —— 这违背
  * "数据库连接失败时健康检查必须返回失败，不能永远返回 OK" 的要求。
  *
- * 全局缓存在开发模式下复用，避免热重载时不断新建连接池。
+ * 为什么全环境缓存（v1.2 修复）：
+ * 早期实现在 production 环境**不写入**全局缓存，导致每次调用
+ * `getPrismaClient()` 都会新建 PrismaClient —— 每次健康检查泄漏一个连接池，
+ * 长时间运行必然耗尽数据库连接。现在**所有环境**（含 production）
+ * 都复用同一实例。
  */
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
+
+/**
+ * 本模块作用域内的累计创建次数。
+ *
+ * 刻意**不放在 globalThis** 上：实例需要跨模块实例共享（dev 热重载），
+ * 但创建计数是诊断指标，应跟随模块实例，便于测试精确断言。
+ */
+let prismaCreations = 0;
 
 function createClient(): PrismaClient {
   const connectionString = process.env['DATABASE_URL'];
@@ -26,25 +38,38 @@ function createClient(): PrismaClient {
   }
 
   const adapter = new PrismaPg({ connectionString });
-  return new PrismaClient({
+  const client = new PrismaClient({
     adapter,
     log: process.env['NODE_ENV'] === 'development' ? ['warn', 'error'] : ['error'],
   });
-}
 
-/** 获取（必要时创建）Prisma 客户端实例。 */
-export function getPrismaClient(): PrismaClient {
-  if (globalForPrisma.prisma !== undefined) {
-    return globalForPrisma.prisma;
-  }
-  const client = createClient();
-  if (process.env['NODE_ENV'] !== 'production') {
-    globalForPrisma.prisma = client;
-  }
+  prismaCreations += 1;
   return client;
 }
 
-/** 断开数据库连接（若已创建实例）。 */
+/**
+ * 获取 Prisma 客户端实例。
+ *
+ * 全环境（含 production）返回**同一个**实例，绝不重复创建连接池。
+ */
+export function getPrismaClient(): PrismaClient {
+  if (globalForPrisma.prisma === undefined) {
+    globalForPrisma.prisma = createClient();
+  }
+  return globalForPrisma.prisma;
+}
+
+/**
+ * Prisma 客户端的可观测统计（用于测试与运维排障）。
+ *
+ * - `creations`：本模块实例内累计创建的 PrismaClient 数量。
+ *   正常情况下应恒为 1（无论调用多少次 `getPrismaClient()`）。
+ */
+export function getPrismaClientStats(): { readonly creations: number } {
+  return { creations: prismaCreations };
+}
+
+/** 断开数据库连接（若已创建实例）。进程退出前必须调用。 */
 export async function disconnectPrisma(): Promise<void> {
   if (globalForPrisma.prisma !== undefined) {
     await globalForPrisma.prisma.$disconnect();

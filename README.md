@@ -20,12 +20,15 @@
 | Docker + Compose | v2（`docker compose`） | 用于本地起四个服务                                                              |
 | PostgreSQL       | **16**                 | 容器镜像 `postgres:16-alpine`                                                   |
 
-版本统一由 `.nvmrc` / `.node-version` / `packageManager` 固定，CI 亦使用相同版本。
+版本统一由 `.nvmrc` / `.node-version` / `packageManager` 固定。
+**CI 使用 `corepack prepare pnpm@10.34.9 --activate` 安装与本地完全相同的 pnpm 版本**
+（`.github/workflows/ci.yml` 的 `PNPM_VERSION` 与 `packageManager` 保持一致）。
 
 ## 2. 安装依赖
 
 ```bash
-corepack enable                 # 启用 corepack，自动使用 packageManager 指定的 pnpm
+corepack enable                 # 启用 corepack，自动使用 packageManager 指定的 pnpm 10.34.9
+corepack prepare pnpm@10.34.9 --activate
 pnpm install --frozen-lockfile  # 按 lockfile 精确安装
 pnpm db:generate                # 生成 Prisma Client
 ```
@@ -106,11 +109,13 @@ pnpm db:status           # 查看迁移状态
 ## 6. 停止服务与查看日志
 
 ```bash
-pnpm compose:down        # 停止并移除容器（命名卷保留，数据不丢）
-pnpm compose:down -v     # 同时删除卷 —— 会丢失数据库数据，慎用
+pnpm compose:down        # 停止并移除容器与卷（会删除数据库数据，慎用）
 pnpm compose:logs        # 跟随查看全部服务日志
 pnpm compose:logs web    # 只看某个服务
 ```
+
+> `compose:down` 对应 `docker compose down -v --remove-orphans`，**会删除命名卷**。
+> 若只想停止容器并保留数据，请直接执行 `docker compose -f infra/docker-compose.yml down`。
 
 本地原生进程（非容器）方式：
 
@@ -120,34 +125,73 @@ pnpm dev                 # 同时启动 web / worker 开发模式
 
 ## 7. 运行测试与质量检查
 
+以下命令均为**可复现**的检查，CI 执行的是同一套命令：
+
 ```bash
 pnpm lint                # ESLint（类型感知规则）
 pnpm format:check        # Prettier 格式校验
 pnpm typecheck           # tsc --noEmit，全部包
 pnpm test                # Vitest 单元测试
 pnpm build               # 生成 Prisma Client + 构建全部包
-pnpm license:check       # 依赖许可证门禁（GPL/LGPL/AGPL/SSPL/未知 → 失败）
-pnpm license:report      # 生成 THIRD_PARTY_LICENSES.md
+pnpm license:check       # 生产依赖许可证门禁（GPL/LGPL/AGPL/SSPL/未知 → 失败）
+pnpm license:check:dev   # 开发依赖许可证门禁（同上，独立扫描）
+pnpm license:report      # 生成 THIRD_PARTY_LICENSES.md（生产依赖）
+pnpm license:report:dev  # 生成 THIRD_PARTY_LICENSES.dev.md（开发依赖）
 ```
 
-CI（`.github/workflows/ci.yml`）依次执行：
-`pnpm install --frozen-lockfile` → `pnpm db:generate` → `format:check` → `lint` →
-`typecheck` → `test` → `build` → `docker compose config` → `license:check` → `license:report`。
+### 容器与健康检查验证（需要 Docker）
+
+```bash
+pnpm verify:stack        # 完整流程：compose 校验 → 构建镜像 → 启动 → 健康检查 → 清理
+pnpm verify:health       # 仅验证四个健康检查端点（服务已在运行时）
+```
+
+`verify:stack` 与 CI 的 `docker` job 执行**同一套命令**，任一端点失败即以非零状态码退出。
+
+### CI 流程（`.github/workflows/ci.yml`）
+
+**job `verify`**（质量门禁）：
+`pnpm install --frozen-lockfile` → `pnpm db:generate` → `format:check`（构建前）→
+`lint` → `typecheck` → `test` → `build` → `format:check`（构建后）→
+构建后 Git 工作区洁净检查 → `docker compose config` → `license:check` + `license:check:dev` →
+`license:report` + `license:report:dev` → 上传两份许可证清单。
+
+**job `docker`**（容器验收）：
+`docker compose build` → `docker compose up -d --wait`（等待四个服务健康）→
+`scripts/verify-healthchecks.sh`（校验 web / worker / Caddy→web / Caddy→worker 四个端点）→
+输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
+
+> CI 中 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 的密码**保持一致**，
+> 避免"compose config 校验通过但数据库实际连接失败"。
+> 容器内 `NODE_ENV=production`。
+> 若 CI 环境无法运行 Docker，**不得**将该 job 标记为通过。
 
 ## 8. 许可证说明
 
 产品保持**封闭源码**。依赖准入规则见 `docs/05-architecture-and-licenses.md` §6：
 
 - **禁用**：GPL / LGPL / AGPL / SSPL / 未注明许可证 → CI 直接失败。
-- **允许**：MIT / Apache-2.0 / BSD / ISC 等宽松许可证 → 需在 `THIRD_PARTY_LICENSES.md` 保留声明。
-- **已人工审阅**：CC-BY-4.0（`caniuse-lite` 浏览器兼容数据集，要求署名，无 copyleft 传染）。
+- **允许**：MIT / Apache-2.0 / BSD / ISC 等宽松许可证 → 需在清单中保留声明。
+- **已人工审阅的例外**：必须**绑定具体包名与版本**（见 `scripts/license-check.mjs` 的
+  `REVIEWED_PACKAGES`），并写明审阅结论；清单中同步署名。
 
-本轮门禁实际拦截并已处理的两项：
+扫描范围覆盖**直接依赖与传递依赖**，生产与开发依赖分别扫描、分别出清单：
 
-| 依赖                          | 许可证                           | 处理方式                                                                           |
-| ----------------------------- | -------------------------------- | ---------------------------------------------------------------------------------- |
-| `@img/sharp-*`（26 个平台包） | Apache-2.0 AND LGPL-3.0-or-later | 加入 `pnpm.ignoredOptionalDependencies` 排除；Next.js 回退到内置 WASM 版 sharp     |
-| `elkjs`                       | EPL-2.0                          | 通过 `pnpm.overrides` 移除（来自 Next.js 可选的 `@visx` 图表依赖链，本项目不需要） |
+| 清单                          | 覆盖范围                                |
+| ----------------------------- | --------------------------------------- |
+| `THIRD_PARTY_LICENSES.md`     | 生产依赖（`pnpm licenses list --prod`） |
+| `THIRD_PARTY_LICENSES.dev.md` | 开发依赖（`pnpm licenses list --dev`）  |
+
+当前唯一的审阅例外：`caniuse-lite@1.0.30001820`（CC-BY-4.0，浏览器兼容数据集，
+要求署名、无 copyleft 传染）。
+
+门禁已拦截并处理的三项（均已**移除**，未登记为例外）：
+
+| 依赖                          | 许可证                           | 出现位置 | 处理方式                                                                       |
+| ----------------------------- | -------------------------------- | -------- | ------------------------------------------------------------------------------ |
+| `@img/sharp-*`（26 个平台包） | Apache-2.0 AND LGPL-3.0-or-later | 生产     | `pnpm.ignoredOptionalDependencies` 排除；Next.js 回退到内置 WASM 版 sharp      |
+| `elkjs`                       | EPL-2.0                          | 生产     | `pnpm.overrides` 移除（来自 Next.js 可选的 `@visx` 图表依赖链，本项目不需要）  |
+| `lightningcss`                | MPL-2.0                          | 开发     | `pnpm.overrides` 移除（来自 vite/vitest 的 CSS 处理器，本项目无 CSS 处理需求） |
 
 **InkOS / AI_NovelGenerator 等 AGPL/GPL 项目的代码未被复制、修改或以任何形式引入本仓库。**
 
@@ -163,6 +207,8 @@ CI（`.github/workflows/ci.yml`）依次执行：
 | web 返回 503                                 | 数据库不可达（**这是预期行为**）                               | 检查 postgres 容器状态与 `DATABASE_URL`                               |
 | `ACCOUNT_LIMIT_REACHED`                      | —                                                              | M1-A 阶段不涉及账号体系                                               |
 | 端口被占用                                   | 宿主机端口冲突                                                 | 修改 `.env` 中的 `WEB_PORT` / `WORKER_PORT` / `CADDY_HTTP_PORT` 等    |
+| `format:check` 报 `next-env.d.ts`            | Next 自动生成文件曾被格式化                                    | 该文件已加入 `.prettierignore`，不应出现此问题                        |
+| `compose up` 后 web 一直 unhealthy           | `DATABASE_URL` 与 `POSTGRES_PASSWORD` 密码不一致               | 两者保持一致（见 `scripts/verify-local.sh` 的导出变量）               |
 
 ## 10. 目录结构
 
@@ -180,11 +226,13 @@ CI（`.github/workflows/ci.yml`）依次执行：
 │   ├── docker-compose.yml   # postgres / web / worker / caddy
 │   └── docker/              # Dockerfile 与 Caddyfile
 ├── scripts/
-│   ├── license-check.mjs    # 许可证门禁
-│   └── verify-local.sh      # 本地端到端验证脚本
+│   ├── license-check.mjs        # 许可证门禁（--dev 扫描开发依赖）
+│   ├── verify-healthchecks.sh   # 四个健康检查端点验证（可移植）
+│   └── verify-local.sh          # 本地容器栈端到端验证（可移植，基于 compose）
 ├── docs/                    # 七份方案文档（产品/架构/验收/许可证）
-├── .github/workflows/ci.yml # CI
-└── THIRD_PARTY_LICENSES.md  # 生成的第三方许可证清单
+├── .github/workflows/ci.yml # CI（质量门禁 + 容器验收两个 job）
+├── THIRD_PARTY_LICENSES.md      # 生产依赖许可证清单（自动生成）
+└── THIRD_PARTY_LICENSES.dev.md  # 开发依赖许可证清单（自动生成）
 ```
 
 ## 11. 回滚
@@ -192,7 +240,7 @@ CI（`.github/workflows/ci.yml`）依次执行：
 ```bash
 git checkout <上一个提交> && pnpm install --frozen-lockfile
 docker compose -f infra/docker-compose.yml down
-docker compose -f infra/docker-compose.yml up -d
+docker compose -f infra/docker-compose.yml up -d --wait
 ```
 
 - 数据库数据保存在命名卷 `novel-pgdata` 中，`down` 不删数据，`down -v` 才删除。

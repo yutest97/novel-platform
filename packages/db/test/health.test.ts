@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { disconnectPrisma, getPrismaClient } from '../src/client.js';
 import { describeError, probeDatabase, withTimeout } from '../src/health.js';
 
 describe('数据库健康探测的错误处理', () => {
@@ -50,5 +51,77 @@ describe('数据库不可用时的健康检查行为', () => {
     const component = await probeDatabase(2000);
 
     expect(component.status).toBe('error');
+  });
+});
+
+describe('Prisma 客户端复用（生产连接泄漏回归测试）', () => {
+  const originalDatabaseUrl = process.env['DATABASE_URL'];
+  const originalNodeEnv = process.env['NODE_ENV'];
+
+  beforeEach(async () => {
+    // 每个用例前断开并复位，保证 creations 计数从确定状态开始。
+    await disconnectPrisma();
+    process.env['DATABASE_URL'] =
+      'postgresql://novel:novel@127.0.0.1:1/novel?schema=public&connect_timeout=1';
+  });
+
+  afterEach(async () => {
+    await disconnectPrisma();
+    if (originalDatabaseUrl === undefined) {
+      delete process.env['DATABASE_URL'];
+    } else {
+      process.env['DATABASE_URL'] = originalDatabaseUrl;
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env['NODE_ENV'];
+    } else {
+      process.env['NODE_ENV'] = originalNodeEnv;
+    }
+  });
+
+  it('production 环境下多次调用返回同一实例', () => {
+    process.env['NODE_ENV'] = 'production';
+
+    const first = getPrismaClient();
+    const second = getPrismaClient();
+    const third = getPrismaClient();
+
+    expect(first).toBe(second);
+    expect(second).toBe(third);
+  });
+
+  it('production 环境下连续多次健康检查只创建一次客户端', async () => {
+    process.env['NODE_ENV'] = 'production';
+
+    // 重置模块，得到全新的计数（从 0 开始），断言可精确化。
+    vi.resetModules();
+    const clientModule = await import('../src/client.js');
+    const healthModule = await import('../src/health.js');
+
+    expect(clientModule.getPrismaClientStats().creations).toBe(0);
+
+    for (let i = 0; i < 5; i += 1) {
+      await healthModule.probeDatabase(200);
+    }
+
+    // 5 次健康检查：首次创建客户端，其余 4 次复用同一实例 → 恰好创建 1 个。
+    expect(clientModule.getPrismaClientStats().creations).toBe(1);
+    expect(clientModule.getPrismaClient()).toBe(clientModule.getPrismaClient());
+
+    await clientModule.disconnectPrisma();
+  });
+
+  it('development 环境下同样复用同一实例', () => {
+    process.env['NODE_ENV'] = 'development';
+
+    expect(getPrismaClient()).toBe(getPrismaClient());
+  });
+
+  it('断开连接后允许重新创建', async () => {
+    const first = getPrismaClient();
+    await disconnectPrisma();
+
+    const second = getPrismaClient();
+    expect(second).not.toBe(first);
   });
 });

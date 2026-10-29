@@ -40,10 +40,11 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# 运行所需文件：standalone 输出 + 静态资源 + public
+# 运行所需文件：standalone 输出 + 静态资源
+# 注意：apps/web/public 目录当前不存在（Next 会在缺失时回退到根路径），
+# 因此不 COPY 该目录，避免构建失败。
 COPY --from=builder /app/apps/web/.next/standalone ./
 COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
-COPY --from=builder /app/apps/web/public ./apps/web/public
 
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]

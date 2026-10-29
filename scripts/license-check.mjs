@@ -3,14 +3,17 @@
  * 依赖许可证扫描（CI 门禁）。
  *
  * 规则（见 docs/05-architecture-and-licenses.md §6）：
- * - GPL / LGPL / AGPL / SSPL / 未知许可证 → **直接失败**（不允许闭源分发或有传染风险）。
- * - 其余宽松许可证（MIT / Apache-2.0 / BSD / ISC 等）→ 允许，但需在 NOTICE 中保留声明。
+ * - GPL / LGPL / AGPL / SSPL / 未注明许可证 → **直接失败**（不允许闭源分发或有传染风险）。
+ * - 其余宽松许可证（MIT / Apache-2.0 / BSD / ISC 等）→ 允许，但需在清单中保留声明。
+ * - 已人工审阅的例外 → 必须**绑定具体包名与版本**后放行，并记录审阅结论。
  *
- * 数据来源：`pnpm licenses list --prod --json`（pnpm 内置，专为 pnpm 符号链接布局设计）。
+ * 扫描范围：**直接依赖与传递依赖全部受检**，生产与开发分别扫描、分别出清单。
+ *   - 生产依赖：pnpm licenses list --prod
+ *   - 开发依赖：pnpm licenses list --dev
  *
  * 用法：
- *   node scripts/license-check.mjs           # 校验，发现禁用许可证则 exit 1
- *   node scripts/license-check.mjs --write   # 同时写出 THIRD_PARTY_LICENSES.md
+ *   node scripts/license-check.mjs [--dev]           # 校验
+ *   node scripts/license-check.mjs --write [--dev]   # 同时写出清单
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -19,7 +22,6 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
-const outputPath = resolve(repoRoot, 'THIRD_PARTY_LICENSES.md');
 
 /** 明确禁止的许可证标识（大小写不敏感，按子串匹配）。 */
 const FORBIDDEN_PATTERNS = ['AGPL', 'GPL', 'LGPL', 'SSPL', 'OSL', 'EUPL', 'PROPRIETARY'];
@@ -41,16 +43,17 @@ const ALLOWED_LICENSES = new Set([
 ]);
 
 /**
- * 已人工审阅、允许使用但**必须在 NOTICE 中署名**的许可证。
+ * 已人工审阅、允许使用的**具体包**（绑定包名与版本，不按许可证名称整体放行）。
  *
- * 每一条都必须写明审阅结论与依据；新增条目须经技术负责人确认。
+ * 键格式：`包名@版本`；值为审阅结论。
+ * 新增条目必须经技术负责人确认，并写明依据。
  * 依据 docs/05-architecture-and-licenses.md §6.2。
  */
-const REVIEWED_LICENSES = new Map([
+const REVIEWED_PACKAGES = new Map([
   [
-    'CC-BY-4.0',
-    'caniuse-lite：浏览器兼容性**数据集**（非可执行代码）。CC-BY-4.0 允许闭源分发，' +
-      '要求署名 → 已在 THIRD_PARTY_LICENSES.md 中署名。不存在 copyleft 传染。',
+    'caniuse-lite@1.0.30001820',
+    '浏览器兼容性**数据集**（非可执行代码），由 browserslist 引入。' +
+      'CC-BY-4.0 允许闭源分发，要求署名 → 已在清单中署名；不存在 copyleft 传染。',
   ],
 ]);
 
@@ -86,38 +89,65 @@ export function isAllowedLicense(license) {
   return parts.every((part) => ALLOWED_LICENSES.has(part));
 }
 
-/** 判定许可证是否属于"已人工审阅、需署名"的类别。 */
-export function isReviewedLicense(license) {
-  if (typeof license !== 'string') {
-    return false;
-  }
-  const parts = splitLicenseExpression(license.trim());
-  return parts.length > 0 && parts.every((part) => REVIEWED_LICENSES.has(part));
+/** 判定某个具体包是否已人工审阅。 */
+export function isReviewedPackage(name, version) {
+  return REVIEWED_PACKAGES.has(`${name}@${version}`);
 }
 
-function loadLicenses() {
-  const raw = execFileSync('pnpm', ['licenses', 'list', '--prod', '--json', '--recursive'], {
+/**
+ * 调用 pnpm licenses list。
+ *
+ * 为什么不使用 `shell: true`：会触发 Node 的 DEP0190 弃用警告，
+ * 且在 Windows 上引入命令注入面。
+ *
+ * 解析方式：
+ * 1. 优先用 `npm_execpath`（由 pnpm 注入，指向 pnpm 的 JS 入口），
+ *    以 `node <pnpm.cjs>` 的方式调用 —— 跨平台一致，无需 shell。
+ * 2. 回退到 PATH 中的 `pnpm`（Unix）/ `pnpm.cmd`（Windows）。
+ */
+function loadLicenses(dev) {
+  const args = ['licenses', 'list', '--json', '--recursive'];
+  args.push(dev ? '--dev' : '--prod');
+
+  const execPath = process.env['npm_execpath'];
+  if (execPath !== undefined && execPath.trim() !== '') {
+    const raw = execFileSync(process.execPath, [execPath, ...args], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return JSON.parse(raw);
+  }
+
+  const raw = execFileSync(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', args, {
     cwd: repoRoot,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    shell: true,
   });
   return JSON.parse(raw);
 }
 
 function main() {
+  const dev = process.argv.includes('--dev');
   const shouldWrite = process.argv.includes('--write');
+  const scope = dev ? '开发依赖' : '生产依赖';
+  const outputPath = resolve(
+    repoRoot,
+    dev ? 'THIRD_PARTY_LICENSES.dev.md' : 'THIRD_PARTY_LICENSES.md',
+  );
 
   if (!existsSync(resolve(repoRoot, 'node_modules'))) {
-    console.error('[license] 未找到 node_modules，请先执行 pnpm install --frozen-lockfile');
+    console.error(
+      `[license:${scope}] 未找到 node_modules，请先执行 pnpm install --frozen-lockfile`,
+    );
     process.exit(1);
   }
 
   let grouped;
   try {
-    grouped = loadLicenses();
+    grouped = loadLicenses(dev);
   } catch (error) {
-    console.error('[license] 扫描失败：', error instanceof Error ? error.message : error);
+    console.error(`[license:${scope}] 扫描失败：`, error instanceof Error ? error.message : error);
     process.exit(1);
   }
 
@@ -130,7 +160,6 @@ function main() {
           name: pkg.name,
           version,
           license: pkg.license ?? licenseKey,
-          repository: typeof pkg.repository === 'string' ? pkg.repository : '',
         });
       }
     }
@@ -138,10 +167,11 @@ function main() {
   entries.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 
   const forbidden = entries.filter((entry) => isForbiddenLicense(entry.license));
-  const reviewed = entries.filter(
+  const unreviewed = entries.filter(
     (entry) => !isForbiddenLicense(entry.license) && !isAllowedLicense(entry.license),
   );
-  const reviewedUnknown = reviewed.filter((entry) => !isReviewedLicense(entry.license));
+  const reviewed = unreviewed.filter((entry) => isReviewedPackage(entry.name, entry.version));
+  const unapproved = unreviewed.filter((entry) => !isReviewedPackage(entry.name, entry.version));
 
   if (shouldWrite) {
     const byLicense = new Map();
@@ -151,22 +181,25 @@ function main() {
       }
       byLicense.get(entry.license).push(`${entry.name}@${entry.version}`);
     }
-    const reviewedNotes = [...REVIEWED_LICENSES.entries()].map(
-      ([license, note]) => `- **${license}**：${note}`,
+    const reviewedNotes = reviewed.map(
+      (entry) =>
+        `- **${entry.name}@${entry.version}**（${entry.license}）：${
+          REVIEWED_PACKAGES.get(`${entry.name}@${entry.version}`) ?? ''
+        }`,
     );
     const lines = [
-      '# 第三方依赖许可证清单（THIRD-PARTY NOTICES）',
+      `# 第三方依赖许可证清单（THIRD-PARTY NOTICES）— ${scope}`,
       '',
       '> 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。',
-      '> 数据来源：`pnpm licenses list --prod --json --recursive`（仅生产依赖）。',
+      `> 数据来源：\`pnpm licenses list --json --recursive ${dev ? '--dev' : '--prod'}\`。`,
       '> 生成时间：' + new Date().toISOString(),
       '',
-      `生产依赖总数：**${entries.length}**`,
+      `**${scope}**总数：**${entries.length}**`,
       '',
       '本项目保持**封闭源码**。以下依赖均采用允许闭源分发的宽松许可证，',
       '其原始版权与许可证声明保留在各自包内（`node_modules/<包名>/LICENSE`）。',
       '',
-      '## 已人工审阅、需署名的依赖',
+      '## 已人工审阅的例外（绑定具体包与版本）',
       '',
       ...(reviewedNotes.length > 0 ? reviewedNotes : ['- （无）']),
       '',
@@ -182,11 +215,11 @@ function main() {
         ]),
     ];
     writeFileSync(outputPath, lines.join('\n'), 'utf8');
-    console.log(`[license] 已写出 ${outputPath}`);
+    console.log(`[license:${scope}] 已写出 ${outputPath}`);
   }
 
   if (forbidden.length > 0) {
-    console.error('\n[license] ✗ 发现被禁止的许可证（GPL/LGPL/AGPL/SSPL/未知）：');
+    console.error(`\n[license:${scope}] ✗ 发现被禁止的许可证（GPL/LGPL/AGPL/SSPL/未知）：`);
     for (const entry of forbidden) {
       console.error(`  - ${entry.name}@${entry.version} → ${entry.license}`);
     }
@@ -196,21 +229,22 @@ function main() {
     process.exit(1);
   }
 
-  if (reviewedUnknown.length > 0) {
-    console.error('\n[license] ✗ 发现未经审阅的许可证（不在白名单，也不在已审阅清单）：');
-    for (const entry of reviewedUnknown) {
+  if (unapproved.length > 0) {
+    console.error(`\n[license:${scope}] ✗ 发现未经审阅的许可证（不在白名单，也无逐包审阅记录）：`);
+    for (const entry of unapproved) {
       console.error(`  - ${entry.name}@${entry.version} → ${entry.license}`);
     }
     console.error(
-      '\n[license] 处理方式：移除该依赖，或经技术负责人审阅后加入 scripts/license-check.mjs 的 REVIEWED_LICENSES。',
+      '\n[license] 处理方式：移除该依赖，或经技术负责人审阅后在 scripts/license-check.mjs 的' +
+        ' REVIEWED_PACKAGES 中登记「包名@版本」后放行。',
     );
     process.exit(1);
   }
 
   const allowedCount = entries.length - reviewed.length;
   console.log(
-    `[license] ✓ 扫描通过：${entries.length} 个生产依赖 —— ${allowedCount} 个宽松许可` +
-      (reviewed.length > 0 ? `，${reviewed.length} 个已人工审阅（需在 NOTICE 署名）` : '') +
+    `[license:${scope}] ✓ 扫描通过：${entries.length} 个依赖 —— ${allowedCount} 个宽松许可` +
+      (reviewed.length > 0 ? `，${reviewed.length} 个已逐包审阅（需在清单中署名）` : '') +
       '；未发现 GPL/LGPL/AGPL/SSPL/未知许可证。',
   );
 }

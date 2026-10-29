@@ -1,17 +1,17 @@
-# 第三方依赖许可证清单（THIRD-PARTY NOTICES）
+# 第三方依赖许可证清单（THIRD-PARTY NOTICES）— 生产依赖
 
 > 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。
-> 数据来源：`pnpm licenses list --prod --json --recursive`（仅生产依赖）。
-> 生成时间：2026-10-29T12:10:53.037Z
+> 数据来源：`pnpm licenses list --json --recursive --prod`。
+> 生成时间：2026-10-29T12:35:05.531Z
 
-生产依赖总数：**174**
+**生产依赖**总数：**174**
 
 本项目保持**封闭源码**。以下依赖均采用允许闭源分发的宽松许可证，
 其原始版权与许可证声明保留在各自包内（`node_modules/<包名>/LICENSE`）。
 
-## 已人工审阅、需署名的依赖
+## 已人工审阅的例外（绑定具体包与版本）
 
-- **CC-BY-4.0**：caniuse-lite：浏览器兼容性**数据集**（非可执行代码）。CC-BY-4.0 允许闭源分发，要求署名 → 已在 THIRD_PARTY_LICENSES.md 中署名。不存在 copyleft 传染。
+- **caniuse-lite@1.0.30001820**（CC-BY-4.0）：浏览器兼容性**数据集**（非可执行代码），由 browserslist 引入。CC-BY-4.0 允许闭源分发，要求署名 → 已在清单中署名；不存在 copyleft 传染。
 
 ## 按许可证分组
 

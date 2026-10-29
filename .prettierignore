@@ -5,3 +5,6 @@ coverage
 pnpm-lock.yaml
 docs
 **/src/generated/**
+
+# Next.js 自动生成的文件（内容由 Next 决定，不参与格式门禁）
+apps/web/next-env.d.ts
