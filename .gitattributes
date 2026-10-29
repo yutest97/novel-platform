@@ -1,0 +1,19 @@
+# 统一行尾符：仓库内一律存 LF，检出时不做平台转换。
+#
+# 这保证 Prettier 的 endOfLine=lf 规则在 Windows / macOS / Linux 上结果一致，
+# 避免"本机通过、干净克隆失败"。
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary

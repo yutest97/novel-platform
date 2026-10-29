@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { config as loadEnv } from 'dotenv';
-import { defineConfig, env } from 'prisma/config';
+import { defineConfig } from 'prisma/config';
 
 /**
  * Prisma 7 配置文件。
@@ -29,6 +29,13 @@ export default defineConfig({
     seed: 'node prisma/seed.mjs',
   },
   datasource: {
-    url: env('DATABASE_URL'),
+    // Prisma 7 的 `env()` 在变量缺失时会直接抛错，这会让
+    // `prisma generate`（**不需要连接数据库**）在干净克隆 / CI 中失败。
+    // 因此这里对缺失情况回退到本地占位连接串：
+    //   - generate：只生成客户端，不需要真正连接，行为不受影响；
+    //   - migrate：真正执行迁移前由 packages/db 的脚本校验 DATABASE_URL 必须存在
+    //     （见 package.json 的 migrate 脚本），避免用占位串去连接而给出误导性错误。
+    url:
+      process.env['DATABASE_URL'] ?? 'postgresql://novel:novel@localhost:5432/novel?schema=public',
   },
 });

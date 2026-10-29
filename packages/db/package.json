@@ -18,9 +18,9 @@
   "scripts": {
     "build": "tsc --build tsconfig.build.json",
     "generate": "prisma generate",
-    "migrate": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy",
-    "migrate:status": "prisma migrate status",
+    "migrate": "node scripts/require-database-url.mjs && prisma migrate dev",
+    "migrate:deploy": "node scripts/require-database-url.mjs && prisma migrate deploy",
+    "migrate:status": "node scripts/require-database-url.mjs && prisma migrate status",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
