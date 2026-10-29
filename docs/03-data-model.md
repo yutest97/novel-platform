@@ -1,6 +1,6 @@
 # 03 数据模型（Data Model）
 
-- 版本：v1.1（方案稿，退回修订中，待技术负责人复审）
+- 版本：v1.2（方案稿，退回修订中，待技术负责人第三次复审）
 - 状态：**未获批准。**
 
 本文定义核心数据对象、字段、关系；重点说明**通用小说核心与玄幻规则包的边界**，以及数据隔离、版本化、任务持久化、事实闭环方案。
@@ -34,9 +34,11 @@ works (所属 author_id)  [不含题材专有列]
   │         ├─ chapter_candidates (候选/草稿区)  ★v1.1
   │         ├─ chapter_versions (仅正式版本)     ★v1.1
   │         ├─ review_reports (一致性检查)
-  │         └─ chapter_facts (候选/已接受事实)   ★v1.1
+  │         └─ chapter_facts (事实主表)          ★v1.1
+  │              ├─ fact_versions (事实版本)     ★v1.2
+  │              └─ fact_effects (结构化影响)    ★v1.2
   ├─ story_arcs (情节弧：主线/支线)
-  ├─ plot_threads (伏笔主表)                     ★v1.1 引用稳定 chapter_id
+  ├─ plot_threads (伏笔主表，含计划回收章)        ★v1.1
   │    └─ plot_thread_events (埋设/强化/回收)     ★v1.1
   ├─ timeline_events (时间线：区分叙事顺序与故事时间)  ★v1.1
   │    └─ causal_links (因果边)
@@ -74,7 +76,26 @@ rule_packages (题材规则包，系统级)
 | must_change_password | boolean | **独立布尔**，首登强改由它控制（v1.0 曾把 `must_change_password` 作为 status 枚举值，已修正） |
 | created_at / updated_at | timestamptz | |
 
-**账号上限口径**：`count(*)`（含 disabled）≤ 10；新建时用事务锁（`SELECT ... FOR UPDATE` 或 advisory lock）保证并发不突破（见 §5.2）。
+**账号上限口径**：`count(*)`（含 disabled）≤ 10；新建时用事务锁（`SELECT ... FOR UPDATE` 或 advisory lock）保证并发不突破（见 §6.1）。
+
+**sessions（会话表，v1.2 补充会话安全）**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| user_id | uuid FK→users | |
+| token_hash | text | 会话 token 的哈希（不存明文 token） |
+| absolute_expires_at | timestamptz | **绝对有效期**（默认 7 天） |
+| idle_expires_at | timestamptz | **空闲有效期**（默认 30 分钟；每次活动顺延） |
+| last_activity_at | timestamptz | 最后活动时间 |
+| created_at | timestamptz | |
+
+**会话安全策略（v1.2 新增，回应审查第 10 条）**：
+- Cookie：`HttpOnly + Secure + SameSite=Lax`。
+- **会话轮换**：登录成功、改密、提升权限后**轮换会话 ID**（旧会话失效，防会话固定攻击）。
+- **多设备上限**：单账号同时活跃会话 ≤ 5；超出时最旧会话被踢出。
+- 服务端可强制下线任一账号全部会话（`sessions` 按 user_id 批量失效）。
+- 修改数据的接口必须有 **Origin 校验或 CSRF token**（防跨站请求伪造，见 `05` §5）。
 
 ### 3.2 works（v1.1 删除题材专有列）
 
@@ -131,17 +152,19 @@ rule_packages (题材规则包，系统级)
 | char_count | int | |
 | parent_version_id | uuid nullable | 版本链（重写/恢复的父版本） |
 | source_task_id | uuid nullable | 来自哪个生成任务 |
-| source_candidate_id | uuid nullable | 若由候选采纳而来 |
+| source_candidate_id | uuid nullable **UNIQUE** | 若由候选采纳而来；**唯一约束**保证一个候选只对应一个正式版本 |
 | created_at | timestamptz | 不可变，不更新 |
 
-**采纳候选的事务流程（明确分配版本号）**：
+**采纳候选的事务流程（v1.2 修正：同时锁定候选行与章节行）**：
 1. 开启事务。
-2. `SELECT ... FOR UPDATE` 锁定该 chapter 行（防并发采纳）。
-3. 计算 `next_version_no = max(version_no) + 1`。
-4. 插入 `chapter_versions`（version_no = next_version_no，content 取自候选）。
-5. 更新候选 `status='adopted', adopted_version_id=<新版本 id>`。
-6. 提交事务。
-- 重复采纳同一候选：候选已 `adopted`，直接返回已有 `adopted_version_id`（幂等），不再插入新版本。
+2. `SELECT ... FOR UPDATE` 锁定该 **候选行**（chapter_candidates）与**章节行**（chapters）——两把锁，防并发采纳同一候选、也防并发采纳不同候选时版本号冲突。
+3. 校验候选 `status = 'pending'`；若已 `adopted` 或 `discarded` → 返回 `409`（`adopted` 也可幂等返回已有版本号，见下）。
+4. 计算 `next_version_no = max(version_no) + 1`。
+5. 插入 `chapter_versions`（version_no = next_version_no，content 取自候选，source_candidate_id = 候选 id）。
+6. 更新候选 `status='adopted', adopted_version_id=<新版本 id>`。
+7. 提交事务。
+- **并发采纳同一候选**：两个请求同时采纳同一候选，因候选行被 `FOR UPDATE` 锁定，后者在前者提交后重读，发现 `status='adopted'`，幂等返回已有版本号，**只产生一个正式版本**（source_candidate_id 唯一约束兜底）。
+- **并发采纳不同候选**：章节行被锁定，`next_version_no` 计算串行化，版本号不冲突。
 - 采纳 `discarded` 候选：返回 `409`。
 
 ### 3.5 entities + entity_attributes（题材解耦核心）
@@ -178,12 +201,19 @@ rule_packages (题材规则包，系统级)
 | story_arcs | work_id, title, kind(main/sub), description | 情节弧 |
 
 **plot_threads（伏笔主表）**：
-- `id, work_id, description, status(unresolved/resolved/abandoned)`。
+- `id, work_id, description, status(unresolved/resolved/abandoned), planned_resolve_chapter_id(uuid FK→chapters, nullable)`。
+- `planned_resolve_chapter_id` 引用**稳定章节 ID**（非章号），章节插入/重排后计划回收位置仍正确。
 - **不存 `planted_chapter` 章号**（章号会因插入调整而变化）。
 
 **plot_thread_events（伏笔事件，v1.1 新增）**：
 - `id, plot_thread_id, chapter_id(稳定 UUID), event_type(planted/reinforced/resolved/abandoned), note, created_at`。
-- 通过多条事件支持**多次埋设、强化、回收**；回收状态由事件回放得出。
+- 通过多条事件支持**多次埋设、强化、回收**。
+
+**伏笔状态判定规则（v1.2 明确）**：
+- `reinforced`（强化）**不等于已回收**，仅表示伏笔被再次提及/加强，`status` 仍为 `unresolved`。
+- 只有 `resolved`（回收）或**带理由的** `abandoned`（废弃，须填 note 说明原因）才视为**结束**。
+- `status` 由事件回放得出：出现过 `resolved` → `resolved`；出现过带理由 `abandoned` → `abandoned`；否则 `unresolved`。
+- 一致性检查（`03` §5.1 伏笔类）据此判定"未回收"。
 
 **timeline_events（v1.1 区分两种时间）**：
 - `id, work_id, event, involved_character_ids, chapter_id(叙事位置), story_time(故事世界时间，如"第一卷·第3日"或绝对纪年), story_order(故事世界顺序号)`。
@@ -196,14 +226,14 @@ rule_packages (题材规则包，系统级)
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid PK | |
-| request_id | uuid **NOT NULL UNIQUE** | 客户端生成，**始终非空**；同一次逻辑操作复用 |
-| idempotency_key | text **NOT NULL UNIQUE** | 服务端计算，作用域相关（见下） |
+| request_id | uuid **NOT NULL** | 客户端生成，**始终非空**；唯一约束为 `UNIQUE(user_id, request_id)`（见下） |
+| user_id | uuid FK→users | 任务发起者；与 request_id 组成幂等键 |
 | scope | enum('work','chapter','rewrite') | 作品级/章节级/重写级任务 |
 | work_id | uuid FK | |
 | chapter_id | uuid nullable | 作品级任务为 null |
 | task_type | enum(volume_outline/stage_goal/chapter_outline/beats/draft/rewrite/review/fact_extract) | |
 | status | enum(pending/running/succeeded/failed/cancelled) | |
-| input_hash | text | 入参指纹，用于区分"再次生成" |
+| input_hash | text | 入参指纹；**仅作审计与输入比较，不设唯一约束** |
 | locked_by | text nullable | 当前持有该任务的 Worker 实例 ID |
 | lease_until | timestamptz nullable | 租约到期时间 |
 | heartbeat_at | timestamptz nullable | 最后心跳 |
@@ -214,13 +244,16 @@ rule_packages (题材规则包，系统级)
 | progress | jsonb | 阶段步进 |
 | created_at / updated_at | timestamptz | |
 
-**幂等键设计（v1.1）**：
-- `request_id`：客户端为每次"逻辑操作"生成 UUID，**重复点击复用同一 request_id** → 命中唯一约束，返回已有任务，不产生新记录。
-- `idempotency_key`：由服务端计算，`scope + task_type + scope_target + input_hash` 哈希。**作用域**：
-  - `work` 级（卷纲、阶段目标）：`scope_target = work_id`。
-  - `chapter` 级（细纲、节拍、正文草稿、检查）：`scope_target = chapter_id`。
-  - `rewrite` 级（局部重写）：`scope_target = chapter_id + 选中范围指纹`。
-- **区分"重复点击"与"用户再次生成"**：重复点击 = 同 request_id，幂等返回；用户明确再次生成 = 新 request_id + 新 input_hash，产生新任务（若 input_hash 未变但用户点"重新生成"，前端生成新 request_id 即可）。
+**幂等键设计（v1.2 修正）**：
+- `request_id`：客户端为每次"逻辑操作"生成 UUID，**按用户唯一**，唯一约束为 `UNIQUE(user_id, request_id)`。同一用户的**同一次逻辑操作**（重复点击、网络重发、并发重复提交）复用同一 `request_id` → 命中唯一约束，返回已有任务，**阻止并发重复提交**。
+- `input_hash`：入参指纹，**只作审计与输入比较字段，不设全局唯一约束**。
+- **区分"重复点击"与"用户再次生成"**：
+  - 重复点击 = 同 `user_id` + 同 `request_id`，幂等返回已有任务。
+  - 用户明确再次生成 = **新开 `request_id`，即使 `input_hash` 相同，也允许创建新任务**（不因 input 未变而拦截）。
+- **作用域**（用于业务校验与任务分类，不参与唯一约束）：
+  - `work` 级（卷纲、阶段目标）：`chapter_id = null`。
+  - `chapter` 级（细纲、节拍、正文草稿、检查）：`chapter_id` 非空。
+  - `rewrite` 级（局部重写）：`chapter_id` 非空 + 选中范围指纹记录于 `request_payload`。
 
 **队列与租约（v1.1）**：
 - Worker 用 `SELECT ... FOR UPDATE SKIP LOCKED` 抢 `pending` 任务，抢到后写 `locked_by + lease_until + heartbeat_at`。
@@ -241,37 +274,70 @@ rule_packages (题材规则包，系统级)
 
 `rule_impl_ref` 指向检查器实现（代码内注册），规则包 JSON 描述"哪些检查启用、参数如何"。**题材逻辑进规则包 + 检查器插件，不进核心表**。
 
-### 3.10 chapter_facts（v1.1 事实闭环）
+### 3.10 chapter_facts + fact_versions + fact_effects（v1.2 补全可执行事实回写模型）
+
+**chapter_facts（事实主表，一条事实一个概念）**：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid PK | |
 | work_id | uuid FK | |
 | chapter_id | uuid FK | 来源章节 |
-| source_version_id | uuid FK→chapter_versions | **来源版本**（哪个正式版本提取的） |
 | fact_type | enum(realm_change/resource_change/item_transfer/character_state/knowledge_change/plot_event) | |
-| fact_text | text | 事实描述 |
-| source_quote | text | 原文证据 |
-| entity_ids | jsonb | 涉及实体 |
-| status | enum('candidate','accepted','rejected') | 候选/已接受/已拒绝 |
+| fact_text | text | 事实的自然语言描述（供展示） |
+| status | enum('candidate','accepted','rejected','stale') | 候选/已接受/已拒绝/**已失效** |
 | reviewer_id | uuid nullable | **审核人**（作者本人） |
 | reviewed_at | timestamptz nullable | |
 | created_at | timestamptz | |
 
-### 3.11 knowledge_marks（v1.1 认知指向 fact 版本）
+**fact_versions（事实版本，v1.2 新增）**：事实内容与证据不可变，每次修订追加新版本。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| fact_id | uuid FK→chapter_facts | 所属事实 |
+| version_no | int | 事实内递增，`(fact_id, version_no)` 唯一 |
+| fact_text | text | 该版本的事实正文 |
+| source_quote | text | 原文证据 |
+| source_version_id | uuid FK→chapter_versions | 来自哪个正式章节版本 |
+| entity_ids | jsonb | 涉及实体 |
+| status | enum('candidate','accepted','rejected','stale','superseded') | 该版本的状态 |
+| reviewer_id | uuid nullable | 该版本审核人 |
+| reviewed_at | timestamptz nullable | |
+| created_at | timestamptz | 不可变 |
+
+> `chapter_facts.status` 由**最新版本**的状态决定；历史版本保留各自状态（`superseded` 表示被更新版本取代）。`knowledge_marks.fact_version` 必须指向**实际存在的 fact_versions 行**（外键约束）。
+
+**fact_effects（事实的结构化影响，v1.2 新增）**：作者确认的是"事实 + 结构化影响"，不只是自然语言。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| fact_version_id | uuid FK→fact_versions | 由哪个事实版本产生 |
+| effect_type | enum(entity_attr_change/resource_change/item_transfer/knowledge_change/timeline_add/plot_event) | 影响类型 |
+| target_entity_id | uuid FK→entities | 目标实体（人物/物品/资源/势力…） |
+| target_path | text | 目标字段路径（如 `realm_level`、`item.holder`、`resource.balance`） |
+| old_value | jsonb nullable | 变更前值 |
+| new_value | jsonb nullable | 变更后值 |
+| delta | jsonb nullable | 增量（资源/物品类使用，如 `{"amount": -500}`） |
+| created_at | timestamptz | |
+
+**作者确认流程（v1.2 明确）**：系统提取时同时产出 `fact_versions`（候选）+ 对应的 `fact_effects`（候选影响）。作者逐条确认时，看到的是**自然语言事实 + 结构化影响**（如"灵石 −500，当前余额 0"），确认后 `fact_effects` 生效并触发状态回写。作者可**修正影响**（改 old/new/delta）后再确认，确认的是最终结构化影响，而非仅有自然语言。
+
+### 3.11 knowledge_marks（认知指向事实版本）
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid PK | |
 | work_id | uuid FK | |
 | character_id | uuid FK→entities | 认知主体 |
-| fact_id | uuid FK→chapter_facts | **明确指向 fact_id**（非模糊引用） |
-| fact_version | int | **指向该事实的版本**（事实可修订） |
+| fact_id | uuid FK→chapter_facts | 指向事实 |
+| fact_version | uuid FK→fact_versions | **指向实际存在的事实版本**（外键，非模糊 int） |
 | known | boolean | 知道/不知道 |
 | source | text | 认知来源（章节/设定/事件） |
 | created_at | timestamptz | |
 
-> v1.0 的 `fact_ref` 模糊引用已修正为 `fact_id + fact_version` 的明确指向。
+> v1.1 的 `fact_version int` 已修正为 `fact_version uuid FK→fact_versions`，保证指向真实存在的事实版本行。
 
 ---
 
@@ -304,7 +370,7 @@ rule_packages (题材规则包，系统级)
 | 物品（item） | 回放 `item_events`，若某物品同时被两人持有、或正文使用但流水无 `obtained` 前置事件 → 报"物品归属矛盾" |
 | 认知（knowledge） | 若某人物在正文中"知道"了某 fact，但 `knowledge_marks` 中该人物对该 `fact_id` 的 `known=false` 且无更新 → 报"认知越界" |
 | 时间线（timeline） | 若 `causal_links` 存在"果早于因"（`story_order(果) < story_order(因)`）→ 报"时序矛盾"；叙事顺序与故事时间不一致时分别标注 |
-| 伏笔（foreshadow） | 若 `plot_thread_events` 中伏笔被 `planted` 但到当前进度仍无 `resolved/reinforced`，且 `planned_resolve` 章节已过 → 报"伏笔未回收" |
+| 伏笔（foreshadow） | 若 `plot_threads.status = unresolved` 且 `planned_resolve_chapter_id` 对应的章节在当前进度之后仍未出现 `resolved`/带理由 `abandoned` 事件 → 报"伏笔未回收"；`reinforced` 不视为回收 |
 
 ### 5.2 判定依据
 
@@ -355,18 +421,34 @@ rule_packages (题材规则包，系统级)
 - 设定：`entity_versions` 快照；章节生成时记录当时 `entity_versions` 的版本号。
 - diff：正式版本间全文 diff（服务端计算，前端渲染高亮）。
 
-## 8. 事实闭环与状态回写一致性（v1.1 新增）
+## 8. 事实闭环与状态回写一致性（v1.2 修正顺序与失效规则）
 
-1. 章节定稿（有正式版本）→ 触发 `fact_extract` 任务 → 产出**候选事实**（status=candidate，附 source_version_id 与原文证据）。
-2. 作者**接受/拒绝**（写 reviewer_id、reviewed_at）。
-3. 接受的事实触发**一致性回写**，以下内容在**同一数据库事务**提交：
-   - `chapter_facts` 状态 → accepted；
-   - 人物状态变更 → 写 `entity_attributes` 新快照 + `entity_versions`；
-   - 资源状态变更 → 追加 `resource_ledgers`（含 seq_no）；
-   - 物品状态变更 → 追加 `item_events`（含 seq_no）。
-4. **回写失败**：事务整体回滚，事实保持 candidate 或回退，无半写。
-5. **重复回写**：以 `(fact_id, fact_version)` 幂等，不重复追加流水。
-6. **待确认事实是否阻塞下一章**：默认**不阻塞**（策略可配），生成前提示"有 N 条事实待确认"。
+### 8.1 提取时机（v1.2 修正，回应审查第 3 条）
+
+- **最终正文版本确定后再提取事实**：事实提取（`fact_extract`）只在章节存在**正式版本**且作者点击"定稿/提取事实"后触发；生成草稿或候选阶段**不提取事实**。
+- 提取基于**当前正式版本**（`source_version_id` 指向该版本），产出候选 `fact_versions` + 候选 `fact_effects`。
+
+### 8.2 接受与回写
+
+1. 作者**接受/拒绝**每个候选事实版本（写 `reviewer_id`、`reviewed_at`）。作者可先**修正结构化影响**（fact_effects 的 old/new/delta）再确认。
+2. 接受的事实触发**一致性回写**，以下内容在**同一数据库事务**提交：
+   - `fact_versions` 状态 → accepted（`chapter_facts.status` 同步为最新版本状态）；
+   - 按 `fact_effects` 写目标实体：人物状态 → `entity_attributes` 新快照 + `entity_versions`；资源 → 追加 `resource_ledgers`（含 seq_no）；物品 → 追加 `item_events`（含 seq_no）；认知 → 写/更新 `knowledge_marks`（指向 fact_version）。
+3. **回写失败**：事务整体回滚，事实版本保持 candidate，无半写。
+4. **重复回写**：以 `fact_version_id` 幂等，不重复追加流水。
+
+### 8.3 正式版本变更后的事实失效、重提与回滚（v1.2 新增）
+
+- **正文修改导致事实失效**：当某章节的**正式版本被新版本取代**（人工编辑保存、局部重写应用、采纳新候选），系统**自动**将该章节旧版本派生的、已 accepted 的 `fact_versions` 标记为 `stale`，其 `chapter_facts.status` 同步为 `stale`。
+- **重提**：作者对章节再次"提取事实"，基于新正式版本产出**新的候选事实版本**（version_no 递增），旧版本保留为 `stale`。
+- **重新确认后恢复**：新候选被接受 → 事实恢复有效（`accepted`），并按其 `fact_effects` 重新回写状态（必要时以冲正/新事件校正资源与物品流水）。
+- **回滚**：若作者发现错误，可将某事实版本标记 `rejected` 或冲正其已回写的流水（走 §3.6 冲正机制），不改历史。
+
+### 8.4 下一章上下文使用规则（v1.2 明确）
+
+- **生成下一章时，只使用 `accepted` 且未 `stale` 的事实**作为上下文；`candidate` / `rejected` / `stale` / `superseded` 的事实**不得进入后续章节上下文**。
+- 上下文检索按 `fact_versions.status = 'accepted'` 过滤，并取每个 `fact_id` 的**最新有效版本**。
+- 待确认事实是否阻塞下一章：默认**不阻塞**（策略可配），生成前提示"有 N 条事实待确认"。
 
 ---
 
