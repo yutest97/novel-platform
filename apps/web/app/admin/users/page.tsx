@@ -11,7 +11,7 @@
  */
 
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { OneTimeSecret } from '@/components/one-time-secret';
@@ -23,6 +23,7 @@ import {
   statusLabel,
   type AdminUser,
 } from '@/lib/api';
+import { handleSessionError } from '@/lib/session-errors';
 import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
 
 interface ListResponse {
@@ -66,6 +67,8 @@ export default function AdminUsersPage(): React.ReactElement {
   const [createBusy, setCreateBusy] = useState(false);
 
   const [oneTime, setOneTime] = useState<OneTimeState | null>(null);
+  // 弹窗关闭后再刷新列表：弹窗打开期间重渲染会替换触发按钮节点，导致焦点无法回归
+  const refreshAfterModalRef = useRef(false);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [rowBusyId, setRowBusyId] = useState<string | null>(null);
@@ -76,6 +79,10 @@ export default function AdminUsersPage(): React.ReactElement {
       setUsers((body as ListResponse).users);
       setListError('');
     } catch (caught) {
+      // 会话类错误（未登录/停用/待改密）必须立即跳转，不能只显示错误文本
+      if (handleSessionError(caught, router)) {
+        return;
+      }
       setListError(messageOf(caught));
     }
   }, []);
@@ -106,9 +113,9 @@ export default function AdminUsersPage(): React.ReactElement {
       const created = body as CreateResponse;
       setCreateEmail('');
       setCreatePassword('');
-      await loadUsers();
 
       if (created.initialPassword !== undefined) {
+        refreshAfterModalRef.current = true;
         setOneTime({
           title: '作者账号已创建',
           secret: created.initialPassword,
@@ -116,9 +123,13 @@ export default function AdminUsersPage(): React.ReactElement {
             '这是服务器生成的初始密码，只会显示这一次。请立即复制并交给作者；关闭后无法再次查看，只能重置密码。',
         });
       } else {
+        await loadUsers();
         setNotice('作者账号已创建。你设置了初始密码，系统不会再次显示它；对方首次登录需要改密。');
       }
     } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
       setActionError(messageOf(caught));
     } finally {
       setCreateBusy(false);
@@ -135,9 +146,9 @@ export default function AdminUsersPage(): React.ReactElement {
         body: {},
       });
       const result = body as ResetResponse;
-      await loadUsers();
 
       if (result.newPassword !== undefined) {
+        refreshAfterModalRef.current = true;
         setOneTime({
           title: '新密码已生成',
           secret: result.newPassword,
@@ -145,9 +156,13 @@ export default function AdminUsersPage(): React.ReactElement {
             '该账号的旧会话已全部失效，对方需要用此密码重新登录并再次改密。密码只会显示这一次。',
         });
       } else {
+        await loadUsers();
         setNotice('密码已重置，对方的旧会话已全部失效。');
       }
     } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
       setActionError(messageOf(caught));
     } finally {
       setRowBusyId(null);
@@ -163,6 +178,9 @@ export default function AdminUsersPage(): React.ReactElement {
       setNotice(status === 'disabled' ? '账号已停用，其所有会话已失效。' : '账号已启用。');
       await loadUsers();
     } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
       setActionError(messageOf(caught));
     } finally {
       setRowBusyId(null);
@@ -366,6 +384,10 @@ export default function AdminUsersPage(): React.ReactElement {
           notice={oneTime.notice}
           onConfirm={() => {
             setOneTime(null);
+            if (refreshAfterModalRef.current) {
+              refreshAfterModalRef.current = false;
+              void loadUsers();
+            }
           }}
         />
       )}

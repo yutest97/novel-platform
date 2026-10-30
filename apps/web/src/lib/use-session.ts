@@ -3,17 +3,21 @@
 /**
  * 会话守卫 Hook。
  *
- * 规则（M1-B3）：
+ * 规则（M1-B3 / REV-01）：
  * - 认证只依赖 HttpOnly Cookie：这里只请求 `/api/auth/me`，不读取任何令牌；
- * - 未登录 → /login；账号停用 → /login?reason=disabled；
- *   首登未改密 → /change-password；角色不符 → /workspace；
- * - 客户端跳转只是体验层，服务端接口仍是最终权限边界。
+ * - 会话类错误统一交给 `handleSessionError`（未登录 / 停用 / 待改密），
+ *   并发失败时只跳转一次；
+ * - 依据最近一次 `idleExpiresAt` / `absoluteExpiresAt` 设置自动退出计时器；
+ * - 页面重新可见（visibilitychange）或重新获得焦点时重新校验会话。
+ *
+ * 客户端跳转只是体验层，服务端接口仍是最终权限边界。
  */
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { ApiError, fetchSession, type SessionInfo, type SessionUser } from './api';
+import { fetchSession, type SessionInfo, type SessionUser } from './api';
+import { handleSessionError } from './session-errors';
 
 /** 会话状态。 */
 export type SessionState =
@@ -24,6 +28,9 @@ export function homeFor(user: Pick<SessionUser, 'role'>): string {
   return user.role === 'admin' ? '/admin/users' : '/workspace';
 }
 
+/** setTimeout 允许的最大延迟（超过会立即触发）。 */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /**
  * 要求已登录（可选要求管理员）。
  *
@@ -31,46 +38,83 @@ export function homeFor(user: Pick<SessionUser, 'role'>): string {
  */
 export function useRequireSession(options: { role?: 'admin' } = {}): SessionState {
   const router = useRouter();
-  const [state, setState] = useState<SessionState>({ status: 'loading' });
-  // 解构出原始值，作为 effect 依赖（options 对象每次渲染都是新引用）
   const requiredRole = options.role;
+  const [state, setState] = useState<SessionState>({ status: 'loading' });
+  // 到期跳转只做一次，避免计时器与重校验同时触发
+  const expiringRef = useRef(false);
 
-  useEffect(() => {
-    let active = true;
+  const expire = useCallback((): void => {
+    if (expiringRef.current) {
+      return;
+    }
+    expiringRef.current = true;
+    router.replace('/login?reason=expired');
+  }, [router]);
 
-    void fetchSession()
-      .then((session) => {
-        if (!active) {
-          return;
-        }
+  const revalidate = useCallback(
+    async (initial: boolean): Promise<void> => {
+      try {
+        const session = await fetchSession();
         if (requiredRole === 'admin' && session.user.role !== 'admin') {
           router.replace('/workspace');
           return;
         }
         setState({ status: 'ready', session });
-      })
-      .catch((error: unknown) => {
-        if (!active) {
+      } catch (error) {
+        if (handleSessionError(error, router)) {
           return;
         }
-        const code = error instanceof ApiError ? error.code : 'INTERNAL_ERROR';
-        if (code === 'UNAUTHENTICATED') {
-          router.replace('/login');
-        } else if (code === 'ACCOUNT_DISABLED') {
-          router.replace('/login?reason=disabled');
-        } else if (code === 'PASSWORD_CHANGE_REQUIRED') {
-          router.replace('/change-password');
-        } else if (code === 'FORBIDDEN') {
-          router.replace('/workspace');
-        } else {
+        if (initial) {
           router.replace('/login?reason=error');
         }
-      });
+      }
+    },
+    [requiredRole, router],
+  );
 
-    return () => {
-      active = false;
+  // 首次校验
+  useEffect(() => {
+    void revalidate(true);
+  }, [revalidate]);
+
+  // 重新可见 / 重新获得焦点时校验（防止后台标签页里会话已过期）
+  useEffect(() => {
+    const check = (): void => {
+      if (document.visibilityState === 'visible') {
+        void revalidate(false);
+      }
     };
-  }, [requiredRole, router]);
+    document.addEventListener('visibilitychange', check);
+    window.addEventListener('focus', check);
+    return () => {
+      document.removeEventListener('visibilitychange', check);
+      window.removeEventListener('focus', check);
+    };
+  }, [revalidate]);
+
+  // 到期自动退出：取空闲与绝对到期时间中较早的一个
+  useEffect(() => {
+    if (state.status !== 'ready') {
+      return;
+    }
+    const idle = Date.parse(state.session.session.idleExpiresAt);
+    const absolute = Date.parse(state.session.session.absoluteExpiresAt);
+    const deadline = Math.min(idle, absolute);
+    if (Number.isNaN(deadline)) {
+      return;
+    }
+
+    const delay = deadline - Date.now();
+    if (delay <= 0) {
+      expire();
+      return;
+    }
+
+    const timer = setTimeout(expire, Math.min(delay, MAX_TIMEOUT_MS));
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [state, expire]);
 
   return state;
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
@@ -34,6 +34,30 @@ const AUTHOR_EMAIL = `e2e-author-${Date.now().toString(36)}@example.test`;
 // 写接口要求 Origin；Playwright 的 page.request 默认不带，需要显式补上与站点一致的来源
 const ORIGIN = process.env['BASE_URL'] ?? 'https://localhost:8443';
 
+/**
+ * 本次运行用到的**全部**口令（管理员初始口令、改密后的口令、
+ * 服务器生成的一次性初始口令/重置口令）都记在这里。
+ *
+ * 用途：Playwright 失败时生成的 `error-context.md`（可访问性快照）
+ * 会原样包含输入框的值与页面文本，可能带出可用口令。
+ * CI 在上传 artifact 之前用本文件的内容做一次全量扫描并删除命中文件。
+ *
+ * 该文件**不入仓库**（见 .gitignore），CI 扫描后即被删除。
+ */
+const secretLedger = resolve(process.cwd(), '.e2e-secrets.txt');
+
+/** 记录一个口令，供 CI 扫描失败产物时剔除。 */
+function recordSecret(value: string): void {
+  if (value.length < 4) {
+    return;
+  }
+  try {
+    appendFileSync(secretLedger, `${value}\n`, { encoding: 'utf8' });
+  } catch {
+    // 记录失败不影响用例本身；CI 侧仍会扫描已知的管理员口令
+  }
+}
+
 let authorInitialPassword = '';
 let authorResetPassword = '';
 let adminContext: BrowserContext;
@@ -41,11 +65,31 @@ let adminPage: Page;
 
 test.describe.configure({ mode: 'serial' });
 
+/** 以给定账号登录（成功后由页面守卫决定落地页）。 */
+async function loginAs(page: Page, email: string, password: string): Promise<void> {
+  await page.goto('/login');
+  await page.getByLabel('邮箱').fill(email);
+  await page.getByLabel('密码').fill(password);
+  await page.getByRole('button', { name: '登录' }).click();
+  await expect(page).not.toHaveURL(/\/login$/);
+}
+
+/** 当前焦点是否在 role=dialog 内。 */
+async function focusInsideDialog(page: Page): Promise<boolean> {
+  return page.evaluate(() => document.activeElement?.closest('[role="dialog"]') !== null);
+}
+
 test.beforeAll(async ({ browser }) => {
   if (ADMIN_EMAIL === '' || ADMIN_INITIAL_PASSWORD === '') {
     throw new Error('E2E 需要 ADMIN_EMAIL / ADMIN_INITIAL_PASSWORD（一次性管理员凭据）');
   }
   mkdirSync(screenshotDir, { recursive: true });
+  // 清掉上一次运行遗留的口令清单
+  rmSync(secretLedger, { force: true });
+  recordSecret(ADMIN_INITIAL_PASSWORD);
+  recordSecret(ADMIN_NEW_PASSWORD);
+  recordSecret(AUTHOR_PASSWORD);
+  recordSecret(AUTHOR_PASSWORD_2);
 
   adminContext = await browser.newContext({ ignoreHTTPSErrors: true });
   adminPage = await adminContext.newPage();
@@ -94,6 +138,8 @@ test('4. 新建作者：一次性密码弹窗出现且可复制', async () => {
 
   const secret = dialog.getByTestId('one-time-secret');
   authorInitialPassword = (await secret.innerText()).trim();
+  // 服务器生成的一次性口令也记入口令清单（失败快照里可能出现）
+  recordSecret(authorInitialPassword);
   expect(authorInitialPassword.length).toBeGreaterThanOrEqual(20);
 
   // 截图前把口令区域模糊处理：仓库里不允许出现任何真实可用的测试口令
@@ -185,6 +231,7 @@ test('9. 管理员重置作者密码：旧会话立即失效', async ({ browser 
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(/旧会话已全部失效/)).toBeVisible();
   authorResetPassword = (await dialog.getByTestId('one-time-secret').innerText()).trim();
+  recordSecret(authorResetPassword);
   expect(authorResetPassword.length).toBeGreaterThanOrEqual(20);
   await dialog.getByRole('button', { name: '我已保存' }).click();
 
@@ -241,6 +288,191 @@ test('12. 退出登录后刷新仍保持未登录', async ({ page }) => {
   // 独立浏览器上下文也确认未登录访问会被重定向
   await page.goto('/admin/users');
   await expect(page).toHaveURL(/\/login/);
+});
+
+test('13. 弹窗键盘行为：背景 inert、Tab 循环、Esc 不关闭、焦点回归', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await loginAs(page, ADMIN_EMAIL, ADMIN_NEW_PASSWORD);
+  await page.goto('/admin/users');
+  await expect(page.getByTestId('users-table')).toBeVisible();
+
+  // --- ConfirmDialog：取消按钮保留、焦点回归 ---
+  const row = page.getByTestId('user-row').filter({ hasText: AUTHOR_EMAIL });
+  const disableTrigger = row.getByRole('button', { name: '停用' });
+  await disableTrigger.click();
+
+  const confirmDialog = page.getByRole('dialog');
+  await expect(confirmDialog).toBeVisible();
+  await expect(confirmDialog.getByRole('button', { name: '取消' })).toBeVisible();
+  // 背景被设为 inert（模态隔离）
+  await expect(page.locator('#app-root')).toHaveAttribute('inert', '');
+
+  // Tab / Shift+Tab 始终留在弹窗内
+  for (let index = 0; index < 4; index += 1) {
+    await page.keyboard.press('Tab');
+  }
+  expect(await focusInsideDialog(page)).toBe(true);
+  await page.keyboard.press('Shift+Tab');
+  expect(await focusInsideDialog(page)).toBe(true);
+
+  await confirmDialog.getByRole('button', { name: '取消' }).click();
+  await expect(confirmDialog).toHaveCount(0);
+  // 关闭后焦点回到触发按钮
+  await expect(disableTrigger).toBeFocused();
+  // inert 已解除
+  await expect(page.locator('#app-root')).not.toHaveAttribute('inert', '');
+
+  // --- OneTimeSecret：Esc 不关闭、焦点在「我已保存」 ---
+  // 用"新建作者"触发的弹窗（避免重置已有账号的密码影响后续用例）
+  await page.getByTestId('create-email').fill(`e2e-kbd-${Date.now().toString(36)}@example.test`);
+  await page.getByTestId('create-submit').click();
+  const secretDialog = page.getByRole('dialog');
+  await expect(secretDialog).toBeVisible();
+  await expect(secretDialog.getByRole('button', { name: '我已保存' })).toBeFocused();
+
+  await page.keyboard.press('Escape');
+  await expect(secretDialog).toBeVisible();
+  // 点击遮罩也不关闭
+  await page.mouse.click(5, 5);
+  await expect(secretDialog).toBeVisible();
+
+  await secretDialog.getByRole('button', { name: '我已保存' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  await context.close();
+});
+
+test('14. 会话临近到期：自动退出到登录页', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await loginAs(page, ADMIN_EMAIL, ADMIN_NEW_PASSWORD);
+
+  // 测试注入：让 /api/auth/me 返回"3 秒后到期"的会话（不修改任何生产阈值）
+  await context.route('**/api/auth/me', async (route) => {
+    const response = await route.fetch();
+    if (response.status() !== 200) {
+      await route.fulfill({ response });
+      return;
+    }
+    const json = (await response.json()) as {
+      session: { absoluteExpiresAt: string; idleExpiresAt: string };
+    };
+    const soon = new Date(Date.now() + 3000).toISOString();
+    json.session = { absoluteExpiresAt: soon, idleExpiresAt: soon };
+    await route.fulfill({ response, json });
+  });
+
+  await page.goto('/workspace');
+  await expect(page.getByTestId('workspace-email')).toBeVisible();
+
+  // 到期后应自动跳转登录页，并带上 expired 提示
+  await expect(page).toHaveURL(/\/login\?reason=expired/, { timeout: 20_000 });
+  await expect(page.getByTestId('login-error')).toHaveText('会话已过期，请重新登录');
+
+  await context.close();
+});
+
+test('15. 管理员页清除 Cookie 后执行操作：跳回登录页', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await loginAs(page, ADMIN_EMAIL, ADMIN_NEW_PASSWORD);
+  await page.goto('/admin/users');
+  await expect(page.getByTestId('users-table')).toBeVisible();
+
+  // 让 Cookie 失效，然后点一个管理操作
+  await context.clearCookies();
+  const row = page.getByTestId('user-row').filter({ hasText: AUTHOR_EMAIL });
+  await row.getByRole('button', { name: '重置密码' }).click();
+
+  await expect(page).toHaveURL(/\/login/, { timeout: 20_000 });
+  await context.close();
+});
+
+test('16. 作者工作台清除 Cookie 后重新获得焦点：跳回登录页', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await loginAs(page, AUTHOR_EMAIL, AUTHOR_PASSWORD_2);
+  await page.goto('/workspace');
+  await expect(page.getByTestId('workspace-email')).toHaveText(AUTHOR_EMAIL);
+
+  await context.clearCookies();
+  // 模拟页面重新获得焦点（真实浏览器里由标签页切回触发）
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('focus'));
+  });
+
+  await expect(page).toHaveURL(/\/login/, { timeout: 20_000 });
+  await context.close();
+});
+
+test('17. 手机宽度 390×844：登录、表格滚动、弹窗可操作', async ({ browser }) => {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  const page = await context.newPage();
+
+  await page.goto('/login');
+  await page.getByLabel('邮箱').fill(ADMIN_EMAIL);
+  await page.getByLabel('密码').fill(ADMIN_NEW_PASSWORD);
+  await page.screenshot({ path: shot('mobile-login'), fullPage: false });
+
+  await page.getByRole('button', { name: '登录' }).click();
+  await expect(page).toHaveURL(/\/admin\/users/);
+  await expect(page.getByTestId('users-table')).toBeVisible();
+
+  // 表格在 .table-wrap 内横向滚动，body 不被撑破
+  const metrics = await page.evaluate(() => {
+    const wrap = document.querySelector('.table-wrap');
+    return {
+      wrapScrollWidth: wrap instanceof HTMLElement ? wrap.scrollWidth : 0,
+      wrapClientWidth: wrap instanceof HTMLElement ? wrap.clientWidth : 0,
+      docScrollWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(metrics.wrapScrollWidth).toBeGreaterThan(metrics.wrapClientWidth);
+  expect(metrics.docScrollWidth).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+
+  await page.screenshot({ path: shot('mobile-admin'), fullPage: false });
+
+  // 触控目标：主按钮高度足够
+  const submitBox = await page.getByTestId('create-submit').boundingBox();
+  expect(submitBox?.height ?? 0).toBeGreaterThanOrEqual(40);
+
+  // 新建作者 → 弹窗完整显示、按钮可点
+  await page.getByTestId('create-email').fill(`e2e-mobile-${Date.now().toString(36)}@example.test`);
+  await page.getByTestId('create-submit').click();
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  const box = await dialog.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect(box?.y ?? -1).toBeGreaterThanOrEqual(0);
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(391);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(845);
+
+  const copyBox = await dialog.getByRole('button', { name: '复制' }).boundingBox();
+  expect(copyBox?.height ?? 0).toBeGreaterThanOrEqual(36);
+  const confirmBox = await dialog.getByRole('button', { name: '我已保存' }).boundingBox();
+  expect(confirmBox?.height ?? 0).toBeGreaterThanOrEqual(36);
+
+  // 截图前模糊口令区域
+  await page.addStyleTag({
+    content: '[data-testid="one-time-secret"]{filter:blur(7px);user-select:none}',
+  });
+  await page.screenshot({ path: shot('mobile-one-time-password'), fullPage: false });
+
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await dialog.getByRole('button', { name: '复制' }).click();
+  await expect(page.getByText('已复制到剪贴板')).toBeVisible();
+  await dialog.getByRole('button', { name: '我已保存' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  await context.close();
 });
 
 test('14. 第 11 个账号：页面提示账号上限', async () => {

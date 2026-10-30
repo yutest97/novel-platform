@@ -20,8 +20,11 @@ export default defineConfig({
   use: {
     baseURL: process.env['BASE_URL'] ?? 'https://localhost:8443',
     ignoreHTTPSErrors: true,
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    // 用例会输入口令并展示一次性口令：不保留任何自动失败产物（trace/截图/视频），
+    // 避免明文口令落进 test-results。页面截图一律由用例手动作业并做模糊处理。
+    trace: 'off',
+    screenshot: 'off',
+    video: 'off',
     locale: 'zh-CN',
     ...devices['Desktop Chrome'],
   },

@@ -264,6 +264,12 @@
 | AT-ADM-3 | **账号上限** | 总数 ≤10（含 disabled）；并发创建不突破；超限 `409 USER_LIMIT_REACHED`；无删除接口 |
 | AT-ADM-4 | **重置密码 / 停用启用** | 重置后旧会话立即失效且必须改密；停用立即失效、启用后可登录；最后管理员保护仍生效 |
 | AT-ADM-5 | **管理接口授权** | actor 取自会话；作者 / 停用管理员 / 首登未改密管理员一律 403；写接口校验 Origin |
+| AT-UI-1 | **会话失效统一处理** | 管理接口返回 `UNAUTHENTICATED` / `ACCOUNT_DISABLED` / `PASSWORD_CHANGE_REQUIRED` 时页面**立即跳转**（`/login`、`/login?reason=disabled`、`/change-password`），不是只显示错误文本；并发失败只跳一次 |
+| AT-UI-2 | **会话自动退出** | 依据 `idleExpiresAt` / `absoluteExpiresAt`（较早者）设置自动退出计时器，到期跳 `/login?reason=expired` |
+| AT-UI-3 | **重新可见重校验** | `visibilitychange` / 窗口重新获得焦点时重新调用 `/api/auth/me`；清除 Cookie 后下一次交互即回登录页 |
+| AT-UI-4 | **弹窗模态隔离** | 弹窗打开时背景为 `inert`；Tab / Shift+Tab 只在弹窗内循环；关闭后焦点回到触发按钮；一次性口令弹窗不可用 Escape / 遮罩 / 关闭按钮关闭 |
+| AT-UI-5 | **手机宽度可用** | 390×844 下登录可提交、表格在 `.table-wrap` 内横向滚动且不撑破 body、一次性口令弹窗完整显示且按钮可点、触控目标 ≥40px |
+| AT-UI-6 | **失败产物无明文口令** | 关闭 trace / 截图 / 视频自动产物；上传 artifact 前扫描并删除含明文口令的失败产物 |
 
 ---
 

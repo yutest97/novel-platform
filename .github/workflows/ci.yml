@@ -289,6 +289,14 @@ jobs:
           ADMIN_INITIAL_PASSWORD: ${{ steps.e2ecreds.outputs.password }}
         run: pnpm --filter @novel/web exec playwright test
 
+      # 失败产物（error-context.md）的可访问性快照会包含密码框的值，
+      # 因此上传前必须扫描并剔除含明文口令的文件。
+      - name: 扫描并剔除失败产物中的明文口令
+        if: always()
+        env:
+          SECRET_VALUES: ${{ steps.e2ecreds.outputs.password }}
+        run: bash scripts/verify-no-plaintext-secrets.sh
+
       - name: 上传 E2E 截图与失败产物
         if: always()
         uses: actions/upload-artifact@v4

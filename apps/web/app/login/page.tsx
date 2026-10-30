@@ -33,6 +33,8 @@ export default function LoginPage(): React.ReactElement {
     const reason = new URLSearchParams(window.location.search).get('reason');
     if (reason === 'disabled') {
       setError('账号已停用，请联系管理员');
+    } else if (reason === 'expired') {
+      setError('会话已过期，请重新登录');
     } else if (reason === 'error') {
       setError('会话校验失败，请重新登录');
     }

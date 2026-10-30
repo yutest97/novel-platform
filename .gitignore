@@ -60,3 +60,5 @@ infra/docker/caddy/*.key
 apps/web/test-results
 apps/web/playwright-report
 apps/web/.playwright
+# E2E 运行期口令清单（供 CI 扫描失败产物；绝不入库）
+apps/web/.e2e-secrets.txt

@@ -219,6 +219,34 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
 - 守卫：未登录 → `/login`；账号停用 → `/login?reason=disabled`；
   首登未改密 → `/change-password`；作者访问管理页 → `/workspace`。
 
+### 会话失效与弹窗行为（REV-01）
+
+会话失效的统一处理集中在 `apps/web/src/lib/session-errors.ts`：
+
+| 接口返回                   | 前端行为                          |
+| -------------------------- | --------------------------------- |
+| `UNAUTHENTICATED`          | 立即跳转 `/login`                 |
+| `ACCOUNT_DISABLED`         | 立即跳转 `/login?reason=disabled` |
+| `PASSWORD_CHANGE_REQUIRED` | 立即跳转 `/change-password`       |
+
+- 管理页的列表 / 创建 / 重置 / 停启用请求一旦命中上述错误，**立即跳转**，
+  不会只显示一行错误文本；
+- 同一时刻多个并发请求同时失败时只跳转一次（1.5 秒去重窗口）；
+- 工作台与管理页依据最近一次 `/api/auth/me` 返回的 `idleExpiresAt` /
+  `absoluteExpiresAt`（取较早者）设置**自动退出**计时器，到期跳
+  `/login?reason=expired`；
+- 页面 `visibilitychange` 恢复可见或窗口重新获得焦点时，重新调用
+  `/api/auth/me` 校验会话；因此清除 Cookie 后下一次交互即回到登录页。
+
+弹窗（`ModalShell`）的模态隔离：
+
+- 通过 Portal 渲染到 `body`，同时把应用根节点 `#app-root` 设为 `inert`，
+  背景既不可点击也不可聚焦；
+- `Tab` / `Shift+Tab` 只在弹窗内循环；
+- 关闭后焦点回到打开弹窗的按钮；
+- `OneTimeSecret` 仍**不能**通过 Escape、遮罩点击或关闭按钮关闭，
+  只有「我已保存」可关闭；`ConfirmDialog` 保留「取消」按钮，焦点默认落在取消上。
+
 ### 浏览器 E2E（Playwright Chromium）
 
 ```bash
@@ -228,11 +256,25 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖：未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、刷新不可回看、
-作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、启用后可登录、
-退出后保持未登录、第 11 个账号的上限提示。
+覆盖（16 个用例）：未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
+刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
+启用后可登录、退出后保持未登录、第 11 个账号的上限提示，
+以及 **REV-01** 新增的：弹窗背景 `inert` + Tab 循环 + Esc 不关闭 + 焦点回归、
+会话临近到期自动退出、管理员页清除 Cookie 后执行操作跳回登录页、
+作者工作台清除 Cookie 后重新获得焦点跳回登录页、390×844 手机宽度下的
+登录 / 表格横向滚动 / 一次性口令弹窗可操作。
+
+移动端截图：`docs/screenshots/m1b3-mobile-login.png`、`m1b3-mobile-admin.png`、
+`m1b3-mobile-one-time-password.png`（一次性口令区域同样做模糊处理）。
+
 CI 的 `docker` job 会另建 `novel_e2e` 数据库并把 web 重建指向它，
-用运行时生成的凭据跑同一套用例，并把截图与失败产物作为 artifact 上传。
+用运行时生成的凭据跑同一套用例。
+
+**失败产物保护**：Playwright 的 `error-context.md`（可访问性快照）会原样包含
+密码输入框的值，因此配置里关闭了 trace / 截图 / 视频自动产物；E2E 运行期把用到的
+全部口令记入 `apps/web/.e2e-secrets.txt`（不入仓库），CI 在上传 artifact 之前
+运行 `scripts/verify-no-plaintext-secrets.sh`，扫描并**删除**任何含明文口令的产物，
+保证上传内容里不含可用口令。
 
 ## 5. 健康检查地址
 

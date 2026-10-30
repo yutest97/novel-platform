@@ -12,7 +12,10 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>): React.ReactElement {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        {/* 弹窗通过 Portal 渲染到 body，并把 #app-root 设为 inert 实现模态隔离 */}
+        <div id="app-root">{children}</div>
+      </body>
     </html>
   );
 }

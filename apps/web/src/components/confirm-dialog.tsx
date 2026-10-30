@@ -2,9 +2,13 @@
 
 /**
  * 通用确认对话框（用于停用账号等破坏性操作）。
+ *
+ * REV-01：焦点限制在弹窗内、关闭后回到触发按钮；保留「取消」按钮。
  */
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
+
+import { ModalShell } from './modal-shell';
 
 export interface ConfirmDialogProps {
   readonly title: string;
@@ -27,36 +31,31 @@ export function ConfirmDialog({
 }: ConfirmDialogProps): React.ReactElement {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
-
+  // 焦点默认落在「取消」上，避免误触破坏性操作。
   return (
-    <div className="modal-backdrop">
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-        <h2 id="confirm-title">{title}</h2>
-        <p>{message}</p>
-        <div className="row-actions" style={{ justifyContent: 'flex-end', marginTop: '1.25rem' }}>
-          <button
-            ref={cancelRef}
-            type="button"
-            className="btn-secondary"
-            onClick={onCancel}
-            disabled={busy}
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            className={danger ? 'btn-danger' : 'btn-secondary'}
-            onClick={onConfirm}
-            disabled={busy}
-            aria-busy={busy}
-          >
-            {busy ? '处理中…' : confirmLabel}
-          </button>
-        </div>
+    <ModalShell labelledBy="confirm-title" initialFocusRef={cancelRef}>
+      <h2 id="confirm-title">{title}</h2>
+      <p>{message}</p>
+      <div className="row-actions" style={{ justifyContent: 'flex-end', marginTop: '1.25rem' }}>
+        <button
+          ref={cancelRef}
+          type="button"
+          className="btn-secondary"
+          onClick={onCancel}
+          disabled={busy}
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          className={danger ? 'btn-danger' : 'btn-secondary'}
+          onClick={onConfirm}
+          disabled={busy}
+          aria-busy={busy}
+        >
+          {busy ? '处理中…' : confirmLabel}
+        </button>
       </div>
-    </div>
+    </ModalShell>
   );
 }

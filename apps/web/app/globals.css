@@ -314,6 +314,31 @@ tbody tr:last-child td {
   .page {
     padding: 1.25rem 0.75rem 3rem;
   }
+
+  /* 触控目标：主要按钮至少 44px，小按钮不低于 40px */
+  button {
+    min-height: 44px;
+  }
+
+  .btn-small {
+    min-height: 40px;
+    padding: 0.45rem 0.7rem;
+  }
+
+  /* 弹窗在窄屏可滚动，且不超出视口 */
+  .modal {
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+
+  .secret {
+    flex-wrap: wrap;
+  }
+
+  .secret code {
+    width: 100%;
+    flex: 1 1 100%;
+  }
 }
 
 .visually-hidden {
