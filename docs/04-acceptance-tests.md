@@ -270,6 +270,9 @@
 | AT-UI-4 | **弹窗模态隔离** | 弹窗打开时背景为 `inert`；Tab / Shift+Tab 只在弹窗内循环；关闭后焦点回到触发按钮；一次性口令弹窗不可用 Escape / 遮罩 / 关闭按钮关闭 |
 | AT-UI-5 | **手机宽度可用** | 390×844 下登录可提交、表格在 `.table-wrap` 内横向滚动且不撑破 body、一次性口令弹窗完整显示且按钮可点、触控目标 ≥40px |
 | AT-UI-6 | **失败产物无明文口令** | 关闭 trace / 截图 / 视频自动产物；上传 artifact 前扫描并删除含明文口令的失败产物 |
+| AT-UI-7 | **活跃会话续期** | 管理页的列表加载 / 创建作者 / 重置密码 / 停用启用成功后重新读取会话并用**新的** `idleExpiresAt`/`absoluteExpiresAt` 重置自动退出计时器；到期时间未变化时不重置（不产生重复计时器）；不刷新会话时到期仍跳 `/login?reason=expired`；**不修改服务端任何有效期配置** |
+| AT-UI-8 | **改密页会话错误** | `ACCOUNT_DISABLED` → `/login?reason=disabled`；`UNAUTHENTICATED` → `/login`；`PASSWORD_CHANGE_REQUIRED` → 保持改密页并给出提示 |
+| AT-UI-9 | **口令清单写入失败必须中止** | 口令清单写入失败时 E2E 直接失败（不得静默 catch）；清单文件既不入仓库也不进镜像上下文 |
 
 ---
 

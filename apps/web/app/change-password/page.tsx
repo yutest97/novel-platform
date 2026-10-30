@@ -13,6 +13,7 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 import { ApiError, apiRequest, messageOf, type SessionUser } from '@/lib/api';
+import { handleSessionError } from '@/lib/session-errors';
 import { homeFor } from '@/lib/use-session';
 
 interface ChangePasswordResponse {
@@ -53,8 +54,14 @@ export default function ChangePasswordPage(): React.ReactElement {
       // 服务端已吊销旧会话并下发新 Cookie，这里直接进入角色首页
       router.replace(homeFor(user));
     } catch (caught) {
-      if (caught instanceof ApiError && caught.code === 'UNAUTHENTICATED') {
-        router.replace('/login');
+      // 首登必须改密：留在改密页，不跳转
+      if (caught instanceof ApiError && caught.code === 'PASSWORD_CHANGE_REQUIRED') {
+        setError('请先完成首次改密');
+        setBusy(false);
+        return;
+      }
+      // 未登录 → /login；账号已停用 → /login?reason=disabled（统一会话错误处理）
+      if (handleSessionError(caught, router)) {
         return;
       }
       setError(messageOf(caught));

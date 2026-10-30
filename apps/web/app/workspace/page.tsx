@@ -13,7 +13,7 @@ import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
 
 export default function WorkspacePage(): React.ReactElement {
   const router = useRouter();
-  const state = useRequireSession();
+  const { state } = useRequireSession();
 
   if (state.status === 'loading') {
     return (

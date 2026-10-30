@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
+
+import { recordSecret, resetSecretLedger } from './secret-ledger';
 
 /**
  * M1-B3 浏览器 E2E：账号系统全流程。
@@ -34,30 +36,6 @@ const AUTHOR_EMAIL = `e2e-author-${Date.now().toString(36)}@example.test`;
 // 写接口要求 Origin；Playwright 的 page.request 默认不带，需要显式补上与站点一致的来源
 const ORIGIN = process.env['BASE_URL'] ?? 'https://localhost:8443';
 
-/**
- * 本次运行用到的**全部**口令（管理员初始口令、改密后的口令、
- * 服务器生成的一次性初始口令/重置口令）都记在这里。
- *
- * 用途：Playwright 失败时生成的 `error-context.md`（可访问性快照）
- * 会原样包含输入框的值与页面文本，可能带出可用口令。
- * CI 在上传 artifact 之前用本文件的内容做一次全量扫描并删除命中文件。
- *
- * 该文件**不入仓库**（见 .gitignore），CI 扫描后即被删除。
- */
-const secretLedger = resolve(process.cwd(), '.e2e-secrets.txt');
-
-/** 记录一个口令，供 CI 扫描失败产物时剔除。 */
-function recordSecret(value: string): void {
-  if (value.length < 4) {
-    return;
-  }
-  try {
-    appendFileSync(secretLedger, `${value}\n`, { encoding: 'utf8' });
-  } catch {
-    // 记录失败不影响用例本身；CI 侧仍会扫描已知的管理员口令
-  }
-}
-
 let authorInitialPassword = '';
 let authorResetPassword = '';
 let adminContext: BrowserContext;
@@ -85,7 +63,7 @@ test.beforeAll(async ({ browser }) => {
   }
   mkdirSync(screenshotDir, { recursive: true });
   // 清掉上一次运行遗留的口令清单
-  rmSync(secretLedger, { force: true });
+  resetSecretLedger();
   recordSecret(ADMIN_INITIAL_PASSWORD);
   recordSecret(ADMIN_NEW_PASSWORD);
   recordSecret(AUTHOR_PASSWORD);
@@ -380,6 +358,9 @@ test('15. 管理员页清除 Cookie 后执行操作：跳回登录页', async ({
   await page.goto('/admin/users');
   await expect(page.getByTestId('users-table')).toBeVisible();
 
+  // 等列表加载与随后的会话续期请求都结束，避免清除 Cookie 时还有请求在途
+  await page.waitForLoadState('networkidle');
+
   // 让 Cookie 失效，然后点一个管理操作
   await context.clearCookies();
   const row = page.getByTestId('user-row').filter({ hasText: AUTHOR_EMAIL });
@@ -471,6 +452,144 @@ test('17. 手机宽度 390×844：登录、表格滚动、弹窗可操作', asyn
   await expect(page.getByText('已复制到剪贴板')).toBeVisible();
   await dialog.getByRole('button', { name: '我已保存' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  await context.close();
+});
+
+test('18. 活跃会话续期：管理操作成功后重置到期计时器', async ({ browser }) => {
+  // 本用例要跨越两个到期时间点，单独放宽超时
+  test.setTimeout(120_000);
+
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await loginAs(page, ADMIN_EMAIL, ADMIN_NEW_PASSWORD);
+
+  let meCalls = 0;
+  // 续期后的到期时间必须**固定**：否则页面上任何一次额外的 /me 调用
+  // （例如窗口重新获得焦点）都会把到期时间往后推，用例将永远等不到到期。
+  let renewedDeadline: number | null = null;
+
+  await context.route('**/api/auth/me', async (route) => {
+    const response = await route.fetch();
+    if (response.status() !== 200) {
+      await route.fulfill({ response });
+      return;
+    }
+    const json = (await response.json()) as {
+      session: { absoluteExpiresAt: string; idleExpiresAt: string };
+    };
+    meCalls += 1;
+
+    let at: string;
+    if (meCalls >= 3) {
+      // 第三次起 = 已经执行过一次成功的管理操作，返回**较长**的到期时间
+      renewedDeadline ??= Date.now() + 12_000;
+      at = new Date(renewedDeadline).toISOString();
+    } else {
+      // 首次与列表加载后的刷新：4 秒后到期（较短）
+      at = new Date(Date.now() + 4_000).toISOString();
+    }
+    json.session = { absoluteExpiresAt: at, idleExpiresAt: at };
+    await route.fulfill({ response, json });
+  });
+
+  await page.goto('/admin/users');
+  await expect(page.getByTestId('users-table')).toBeVisible();
+
+  // 在第一次到期之前执行一次成功的管理操作（显式初始密码 → 无一次性口令弹窗）
+  const explicitPassword = `E2e-Renew-${randomUUID()}`;
+  recordSecret(explicitPassword);
+  await page.getByTestId('create-email').fill(`e2e-renew-${Date.now().toString(36)}@example.test`);
+  await page.getByTestId('create-password').fill(explicitPassword);
+  await page.getByTestId('create-submit').click();
+  await expect(page.getByTestId('admin-notice')).toContainText('作者账号已创建', {
+    timeout: 15_000,
+  });
+
+  // 断言确实发生过续期：/me 被调用到第 3 次以后
+  expect(meCalls).toBeGreaterThanOrEqual(3);
+
+  // 等待超过**第一次**的到期时间（4 秒）：续期后不应被错误踢出
+  await page.waitForTimeout(6_000);
+  await expect(page).toHaveURL(/\/admin\/users/);
+  await expect(page.getByTestId('users-table')).toBeVisible();
+
+  // 继续等待到**新的**到期时间到达：此时应正常退出
+  await expect(page).toHaveURL(/\/login\?reason=expired/, { timeout: 40_000 });
+
+  await context.close();
+});
+
+test('19. 改密页：服务端返回 ACCOUNT_DISABLED 时跳 /login?reason=disabled', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await context.route('**/api/auth/change-password', async (route) => {
+    await route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'ACCOUNT_DISABLED', message: '账号已停用' } }),
+    });
+  });
+
+  await page.goto('/change-password');
+  await page.getByLabel('当前密码').fill('whatever-password-1');
+  await page.getByLabel('新密码', { exact: true }).fill('brand-new-password-1');
+  await page.getByLabel('确认新密码').fill('brand-new-password-1');
+  await page.getByRole('button', { name: '提交' }).click();
+
+  await expect(page).toHaveURL(/\/login\?reason=disabled/, { timeout: 20_000 });
+  await expect(page.getByTestId('login-error')).toHaveText('账号已停用，请联系管理员');
+
+  await context.close();
+});
+
+test('20. 改密页：服务端返回 UNAUTHENTICATED 时跳 /login', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await context.route('**/api/auth/change-password', async (route) => {
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: '未登录' } }),
+    });
+  });
+
+  await page.goto('/change-password');
+  await page.getByLabel('当前密码').fill('whatever-password-1');
+  await page.getByLabel('新密码', { exact: true }).fill('brand-new-password-1');
+  await page.getByLabel('确认新密码').fill('brand-new-password-1');
+  await page.getByRole('button', { name: '提交' }).click();
+
+  await expect(page).toHaveURL(/\/login(\?|$)/, { timeout: 20_000 });
+
+  await context.close();
+});
+
+test('21. 改密页：服务端返回 PASSWORD_CHANGE_REQUIRED 时保持改密页', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await context.route('**/api/auth/change-password', async (route) => {
+    await route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'PASSWORD_CHANGE_REQUIRED', message: '首次登录必须先修改密码' },
+      }),
+    });
+  });
+
+  await page.goto('/change-password');
+  await page.getByLabel('当前密码').fill('whatever-password-1');
+  await page.getByLabel('新密码', { exact: true }).fill('brand-new-password-1');
+  await page.getByLabel('确认新密码').fill('brand-new-password-1');
+  await page.getByRole('button', { name: '提交' }).click();
+
+  // 保持改密页并给出提示
+  await expect(page).toHaveURL(/\/change-password/);
+  await expect(page.getByTestId('change-password-error')).toHaveText('请先完成首次改密');
 
   await context.close();
 });

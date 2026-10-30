@@ -55,7 +55,7 @@ interface ConfirmState {
 
 export default function AdminUsersPage(): React.ReactElement {
   const router = useRouter();
-  const state = useRequireSession({ role: 'admin' });
+  const { state, refreshSession } = useRequireSession({ role: 'admin' });
 
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [listError, setListError] = useState('');
@@ -78,6 +78,8 @@ export default function AdminUsersPage(): React.ReactElement {
       const { body } = await apiRequest('/api/admin/users');
       setUsers((body as ListResponse).users);
       setListError('');
+      // 列表加载成功 = 管理员仍在活跃使用：刷新会话到期时间（滑动续期）
+      void refreshSession();
     } catch (caught) {
       // 会话类错误（未登录/停用/待改密）必须立即跳转，不能只显示错误文本
       if (handleSessionError(caught, router)) {
@@ -85,7 +87,7 @@ export default function AdminUsersPage(): React.ReactElement {
       }
       setListError(messageOf(caught));
     }
-  }, []);
+  }, [refreshSession, router]);
 
   useEffect(() => {
     if (state.status === 'ready') {
@@ -113,6 +115,7 @@ export default function AdminUsersPage(): React.ReactElement {
       const created = body as CreateResponse;
       setCreateEmail('');
       setCreatePassword('');
+      void refreshSession();
 
       if (created.initialPassword !== undefined) {
         refreshAfterModalRef.current = true;
@@ -146,6 +149,7 @@ export default function AdminUsersPage(): React.ReactElement {
         body: {},
       });
       const result = body as ResetResponse;
+      void refreshSession();
 
       if (result.newPassword !== undefined) {
         refreshAfterModalRef.current = true;
@@ -176,6 +180,7 @@ export default function AdminUsersPage(): React.ReactElement {
         body: { status },
       });
       setNotice(status === 'disabled' ? '账号已停用，其所有会话已失效。' : '账号已启用。');
+      void refreshSession();
       await loadUsers();
     } catch (caught) {
       if (handleSessionError(caught, router)) {
@@ -238,7 +243,7 @@ export default function AdminUsersPage(): React.ReactElement {
         </p>
       )}
       {notice === '' ? null : (
-        <p className="alert alert--ok" role="status">
+        <p className="alert alert--ok" role="status" data-testid="admin-notice">
           {notice}
         </p>
       )}

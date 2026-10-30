@@ -29,6 +29,9 @@ logs
 *.log
 *.sqlite
 
+# E2E 运行期口令清单（严禁进入镜像上下文）
+apps/web/.e2e-secrets.txt
+
 # 文档（不参与运行时）
 docs
 *.md

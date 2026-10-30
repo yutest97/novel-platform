@@ -238,6 +238,18 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
 - 页面 `visibilitychange` 恢复可见或窗口重新获得焦点时，重新调用
   `/api/auth/me` 校验会话；因此清除 Cookie 后下一次交互即回到登录页。
 
+**活跃会话续期（REV-02）**：`useRequireSession` 除了返回会话状态，还提供
+`refreshSession()`。管理页在**列表加载成功、创建作者成功、重置密码成功、
+停用/启用成功**之后调用它：重新读取 `/api/auth/me`，用新的
+`idleExpiresAt` / `absoluteExpiresAt` 重置自动退出计时器。服务端在每次校验时
+本身就会滑动空闲有效期，因此活跃的管理员不会被误踢出；若到期时间没有变化，
+前端**不更新状态**（避免重复计时器与无谓重渲染）。不触发续期时，到期依旧
+跳 `/login?reason=expired`。**服务端有效期配置未做任何修改。**
+
+**改密页的错误处理**：`/change-password` 统一走 `handleSessionError`：
+`ACCOUNT_DISABLED` → `/login?reason=disabled`，`UNAUTHENTICATED` → `/login`，
+`PASSWORD_CHANGE_REQUIRED` 则**保持改密页**并提示「请先完成首次改密」。
+
 弹窗（`ModalShell`）的模态隔离：
 
 - 通过 Portal 渲染到 `body`，同时把应用根节点 `#app-root` 设为 `inert`，
@@ -275,6 +287,10 @@ CI 的 `docker` job 会另建 `novel_e2e` 数据库并把 web 重建指向它，
 全部口令记入 `apps/web/.e2e-secrets.txt`（不入仓库），CI 在上传 artifact 之前
 运行 `scripts/verify-no-plaintext-secrets.sh`，扫描并**删除**任何含明文口令的产物，
 保证上传内容里不含可用口令。
+
+口令清单的写入**失败即抛错**（`apps/web/e2e/secret-ledger.ts`）：清单是这条保证的
+唯一依据，静默失败会让 CI 上传出可用口令。清单文件既不在 `.gitignore` 也在
+`.dockerignore` 中排除，不会进入仓库或镜像上下文。
 
 ## 5. 健康检查地址
 
