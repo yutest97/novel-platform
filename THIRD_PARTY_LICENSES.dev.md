@@ -2,9 +2,9 @@
 
 > 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。
 > 数据来源：`pnpm licenses list --json --recursive --dev`。
-> 生成时间：2026-10-29T17:16:17.364Z
+> 生成时间：2026-10-30T11:46:06.534Z
 
-**开发依赖**总数：**284**
+**开发依赖**总数：**292**
 
 本项目保持**封闭源码**。以下依赖均采用允许闭源分发的宽松许可证，
 其原始版权与许可证声明保留在各自包内（`node_modules/<包名>/LICENSE`）。
@@ -30,6 +30,7 @@
 - @humanfs/types@0.15.0
 - @humanwhocodes/module-importer@1.0.1
 - @humanwhocodes/retry@0.4.3
+- @playwright/test@1.64.1
 - @prisma/config@7.10.1
 - @prisma/debug@7.10.1
 - @prisma/debug@7.2.0
@@ -46,6 +47,8 @@
 - eslint-visitor-keys@5.0.1
 - expect-type@1.4.0
 - long@5.3.2
+- playwright-core@1.64.1
+- playwright@1.64.1
 - prisma@7.10.1
 - typescript@5.9.3
 
@@ -99,6 +102,7 @@
 - siginfo@2.0.0
 - signal-exit@3.0.7
 - signal-exit@4.1.0
+- split2@4.2.0
 - which@2.0.2
 
 ### MIT
@@ -260,8 +264,12 @@
 - path-key@3.1.1
 - pathe@2.0.3
 - perfect-debounce@2.1.0
+- pg-connection-string@2.14.1
+- pg-pool@3.14.0
 - pg-protocol@1.16.1
 - pg-types@2.2.0
+- pg@8.16.3
+- pgpass@1.0.5
 - picomatch@4.0.7
 - pkg-types@2.4.0
 - postcss@8.5.32

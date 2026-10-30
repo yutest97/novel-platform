@@ -2,9 +2,9 @@
 
 > 本文件由 `pnpm license:report` 自动生成，请勿手工编辑。
 > 数据来源：`pnpm licenses list --json --recursive --prod`。
-> 生成时间：2026-10-29T17:16:15.917Z
+> 生成时间：2026-10-30T11:46:05.169Z
 
-**生产依赖**总数：**176**
+**生产依赖**总数：**179**
 
 本项目保持**封闭源码**。以下依赖均采用允许闭源分发的宽松许可证，
 其原始版权与许可证声明保留在各自包内（`node_modules/<包名>/LICENSE`）。
@@ -24,6 +24,7 @@
 - @electric-sql/pglite-socket@0.1.3
 - @electric-sql/pglite-tools@0.3.3
 - @electric-sql/pglite@0.4.3
+- @playwright/test@1.64.1
 - @prisma/adapter-pg@7.10.1
 - @prisma/client-runtime-utils@7.10.1
 - @prisma/client@7.10.1
@@ -43,6 +44,8 @@
 - baseline-browser-mapping@2.11.34
 - detect-libc@2.1.2
 - long@5.3.2
+- playwright-core@1.64.1
+- playwright@1.64.1
 - prisma@7.10.1
 - sharp@0.35.5
 - typescript@5.9.3

@@ -237,6 +237,68 @@ jobs:
           set -euo pipefail
           bash scripts/verify-auth-smoke.sh
 
+      # ---------- 浏览器 E2E（M1-B3） ----------
+      - name: 生成 E2E 一次性凭据
+        id: e2ecreds
+        run: |
+          set -euo pipefail
+          EMAIL="e2e-admin-${GITHUB_RUN_ID}@example.test"
+          PASSWORD="E2e-$(openssl rand -hex 16)"
+          echo "::add-mask::$PASSWORD"
+          {
+            echo "email=$EMAIL"
+            echo "password=$PASSWORD"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 为 E2E 准备独立数据库并让 web 指向它
+        env:
+          E2E_DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel_e2e?schema=public
+          ADMIN_EMAIL: ${{ steps.e2ecreds.outputs.email }}
+          ADMIN_INITIAL_PASSWORD: ${{ steps.e2ecreds.outputs.password }}
+        run: |
+          set -euo pipefail
+          # E2E 使用与烟测**不同**的数据库，避免账号上限（10）被烟测数据占满
+          docker compose -f infra/docker-compose.yml exec -T postgres \
+            psql -U novel -d postgres -c 'CREATE DATABASE novel_e2e'
+          DATABASE_URL="$E2E_DATABASE_URL" pnpm db:deploy
+          DATABASE_URL="$E2E_DATABASE_URL" pnpm admin:create
+          # 用同一个 compose 项目重建 web，仅把 DATABASE_URL 指向 E2E 库
+          DATABASE_URL="$E2E_DATABASE_URL" \
+            docker compose -f infra/docker-compose.yml up -d --force-recreate --no-deps web
+          for _ in $(seq 1 60); do
+            code="$(curl -sS -k --ipv4 --resolve localhost:8443:127.0.0.1 \
+                      -o /dev/null -w '%{http_code}' --max-time 10 \
+                      https://localhost:8443/api/healthz || true)"
+            if [ "$code" = "200" ]; then
+              echo "[e2e] web 已指向 E2E 数据库"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::重建后的 web 未在预期时间内健康"
+          docker compose -f infra/docker-compose.yml logs web --tail 100 || true
+          exit 1
+
+      - name: 安装 Playwright 浏览器（失败即失败，不允许跳过）
+        run: pnpm --filter @novel/web exec playwright install --with-deps chromium
+
+      - name: 浏览器 E2E（真实 Chromium，经 Caddy HTTPS）
+        env:
+          BASE_URL: https://localhost:8443
+          ADMIN_EMAIL: ${{ steps.e2ecreds.outputs.email }}
+          ADMIN_INITIAL_PASSWORD: ${{ steps.e2ecreds.outputs.password }}
+        run: pnpm --filter @novel/web exec playwright test
+
+      - name: 上传 E2E 截图与失败产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: |
+            docs/screenshots
+            apps/web/test-results
+          if-no-files-found: warn
+
       - name: 输出容器状态与日志
         if: always()
         run: |

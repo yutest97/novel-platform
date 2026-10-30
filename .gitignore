@@ -55,3 +55,8 @@ infra/docker/caddy/*.key
 .dv-*/
 .dl-*/
 .deploy-*/
+
+# Playwright 产物（E2E 截图会提交到 docs/screenshots，其余不入库）
+apps/web/test-results
+apps/web/playwright-report
+apps/web/.playwright

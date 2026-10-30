@@ -199,6 +199,41 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
 审计动作：`admin.user_created`、`admin.password_reset`、`user.disabled`、`user.enabled`
 （detail 只含邮箱、角色、状态变化、mustChangePassword 等非敏感信息）。
 
+### 页面（M1-B3）
+
+| 页面               | 说明                                                               |
+| ------------------ | ------------------------------------------------------------------ |
+| `/login`           | 中文登录页；无注册入口；失败统一文案；429 提示稍后重试             |
+| `/change-password` | 首登/被重置后强制改密；前端校验两次一致；成功后进入角色首页        |
+| `/workspace`       | 作者工作台：邮箱、角色、会话有效期、退出；仅一句"下一阶段开放"占位 |
+| `/admin/users`     | 管理员账号管理：列表、新建作者、重置密码、停用/启用、退出          |
+
+前端安全：
+
+- 认证只依赖 **HttpOnly Cookie**，前端不读取、不存储令牌；密码只存在于组件内存，
+  不写 URL / localStorage / sessionStorage / 日志；
+- 所有写请求走同源 `fetch`，由浏览器自动带 `Origin`；
+- 不渲染任何服务端 HTML 字符串（无 `innerHTML`），错误只按**稳定错误码**映射中文文案；
+- 一次性口令用**不可关闭**的弹窗展示（仅"我已保存"可关闭），关闭即清空状态；
+  刷新后无法再从接口取回；口令区域在截图时会被模糊，入库存档的截图不含可用口令；
+- 守卫：未登录 → `/login`；账号停用 → `/login?reason=disabled`；
+  首登未改密 → `/change-password`；作者访问管理页 → `/workspace`。
+
+### 浏览器 E2E（Playwright Chromium）
+
+```bash
+# 需要先有一个干净数据库 + 一次性管理员，并让应用指向它
+BASE_URL=https://localhost:8443 \
+ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
+  pnpm --filter @novel/web exec playwright test
+```
+
+覆盖：未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、刷新不可回看、
+作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、启用后可登录、
+退出后保持未登录、第 11 个账号的上限提示。
+CI 的 `docker` job 会另建 `novel_e2e` 数据库并把 web 重建指向它，
+用运行时生成的凭据跑同一套用例，并把截图与失败产物作为 artifact 上传。
+
 ## 5. 健康检查地址
 
 | 端点                                   | 返回内容                             | 失败语义                    |
