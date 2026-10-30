@@ -279,8 +279,12 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
 移动端截图：`docs/screenshots/m1b3-mobile-login.png`、`m1b3-mobile-admin.png`、
 `m1b3-mobile-one-time-password.png`（一次性口令区域同样做模糊处理）。
 
-CI 的 `docker` job 会另建 `novel_e2e` 数据库并把 web 重建指向它，
-用运行时生成的凭据跑同一套用例。
+CI 的 `docker` job 会另建一个独立数据库（库名含 `run_id` 与 `run_attempt`，
+重跑不会撞上已存在的库）并把 web 重建指向它，用运行时生成的凭据跑同一套用例。
+
+> **两个连接串**：宿主机上的迁移与建号用 `127.0.0.1:5432`（端口映射），
+> 容器内的 web 必须用服务名 `postgres:5432` —— 容器里的 `127.0.0.1` 指向容器自己，
+> 两者不能混用。健康检查前会打印容器内实际生效的（脱敏）连接串作为诊断。
 
 **失败产物保护**：Playwright 的 `error-context.md`（可访问性快照）会原样包含
 密码输入框的值，因此配置里关闭了 trace / 截图 / 视频自动产物；E2E 运行期把用到的

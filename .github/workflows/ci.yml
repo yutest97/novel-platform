@@ -250,21 +250,51 @@ jobs:
             echo "password=$PASSWORD"
           } >> "$GITHUB_OUTPUT"
 
+      # E2E 必须用**两个**连接串：
+      # - 宿主机上的 Prisma（db:deploy / admin:create）经端口映射连 127.0.0.1；
+      # - 容器内的 web 必须连服务名 `postgres`（容器里 127.0.0.1 指向自己）。
+      # 之前两者共用一个连接串，导致容器内 web 去连 127.0.0.1:5432 而失败。
       - name: 为 E2E 准备独立数据库并让 web 指向它
         env:
-          E2E_DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel_e2e?schema=public
+          # 库名带 run id 与 attempt：重试/重跑不会撞上已存在的库
+          E2E_DB_NAME: novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}
+          E2E_HOST_DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public
+          E2E_WEB_DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public
           ADMIN_EMAIL: ${{ steps.e2ecreds.outputs.email }}
           ADMIN_INITIAL_PASSWORD: ${{ steps.e2ecreds.outputs.password }}
         run: |
           set -euo pipefail
-          # E2E 使用与烟测**不同**的数据库，避免账号上限（10）被烟测数据占满
-          docker compose -f infra/docker-compose.yml exec -T postgres \
-            psql -U novel -d postgres -c 'CREATE DATABASE novel_e2e'
-          DATABASE_URL="$E2E_DATABASE_URL" pnpm db:deploy
-          DATABASE_URL="$E2E_DATABASE_URL" pnpm admin:create
-          # 用同一个 compose 项目重建 web，仅把 DATABASE_URL 指向 E2E 库
-          DATABASE_URL="$E2E_DATABASE_URL" \
-            docker compose -f infra/docker-compose.yml up -d --force-recreate --no-deps web
+          # 必须用**数组**：bash 的变量展开不做分词，
+          # "$COMPOSE exec ..." 会把整串当成一个命令名而失败。
+          COMPOSE=(docker compose -f infra/docker-compose.yml)
+
+          # E2E 使用与烟测**不同**的数据库，避免账号上限（10）被烟测数据占满。
+          # 创建前先检查是否已存在：失败重试时不能因为 "already exists" 再次失败。
+          exists="$("${COMPOSE[@]}" exec -T postgres psql -U novel -d postgres -tAc \
+            "SELECT 1 FROM pg_database WHERE datname='$E2E_DB_NAME'" | tr -d '[:space:]')"
+          if [ "$exists" = "1" ]; then
+            echo "[e2e] 数据库 $E2E_DB_NAME 已存在，跳过创建"
+          else
+            "${COMPOSE[@]}" exec -T postgres psql -U novel -d postgres \
+              -c "CREATE DATABASE \"$E2E_DB_NAME\""
+            echo "[e2e] 已创建数据库 $E2E_DB_NAME"
+          fi
+
+          # 宿主机上的迁移与建号走**宿主机**连接串（127.0.0.1:5432）
+          DATABASE_URL="$E2E_HOST_DATABASE_URL" pnpm db:deploy
+          DATABASE_URL="$E2E_HOST_DATABASE_URL" pnpm admin:create
+
+          # 重建 web 时只传**容器内**连接串（postgres:5432）
+          DATABASE_URL="$E2E_WEB_DATABASE_URL" \
+            "${COMPOSE[@]}" up -d --force-recreate --no-deps web
+
+          # 诊断：确认容器内 web 真正拿到的 DATABASE_URL（脱敏）
+          echo "[e2e] 容器内 web 实际使用的 DATABASE_URL："
+          "${COMPOSE[@]}" exec -T web sh -lc \
+            'node -e "console.log(process.env.DATABASE_URL.replace(/:[^:@/]+@/, \":***@\"))"' \
+            || echo "::error::无法读取容器内 DATABASE_URL"
+
+          # TLS 健康检查必须返回 200
           for _ in $(seq 1 60); do
             code="$(curl -sS -k --ipv4 --resolve localhost:8443:127.0.0.1 \
                       -o /dev/null -w '%{http_code}' --max-time 10 \
@@ -275,8 +305,11 @@ jobs:
             fi
             sleep 2
           done
-          echo "::error::重建后的 web 未在预期时间内健康"
-          docker compose -f infra/docker-compose.yml logs web --tail 100 || true
+
+          echo "::error::重建后的 web 未在预期时间内健康（最后状态码 ${code:-none}）"
+          "${COMPOSE[@]}" ps || true
+          "${COMPOSE[@]}" logs web --tail 100 || true
+          "${COMPOSE[@]}" logs postgres --tail 100 || true
           exit 1
 
       - name: 安装 Playwright 浏览器（失败即失败，不允许跳过）
