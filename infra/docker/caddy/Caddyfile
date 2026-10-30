@@ -11,6 +11,11 @@
 #   - 端口 443 是**容器内**监听端口，由 compose 映射为宿主机 8443；
 #   - 主机名 localhost 用于签发 internal 证书与匹配请求 Host（Caddy 匹配时忽略端口）。
 #
+# 全局选项用 `auto_https disable_redirects`，**不能**用 `auto_https off`：
+# `off` 会把证书自动化一并关闭，导致 `tls internal` 也不签发叶子证书，
+# 握手仍然报 internal error。`disable_redirects` 只关掉 80→443 的自动跳转，
+# 保留证书签发，因此 :80 的健康检查入口可以继续工作（不会被 308 到 https）。
+#
 # 客户端 IP 传递（REV-01）：
 # - `header_up X-Real-IP {remote_host}`：由 Caddy 写入**真实**对端地址，
 #   并覆盖客户端自带的同名头。应用只信任这一个头（见 packages/auth/src/origin.ts）。
@@ -19,7 +24,7 @@
 # - 应用**不读取** X-Forwarded-For，因此伪造该头无法绕过按 IP 的登录限流。
 {
 	admin off
-	auto_https off
+	auto_https disable_redirects
 }
 
 :80 {

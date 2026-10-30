@@ -142,6 +142,19 @@ describe('IP 头信任策略', () => {
     // HTTP 入口保留（四个健康检查端点走 8080）
     expect(caddyfile).toMatch(/^:80\s*\{/m);
   });
+
+  it('Caddyfile 使用 auto_https disable_redirects（auto_https off 会连证书签发一起关闭）', () => {
+    const caddyfile = readFileSync(resolve(repoRoot, 'infra/docker/caddy/Caddyfile'), 'utf8');
+    // 只看生效配置行：注释里会说明为什么不能用 auto_https off。
+    const active = caddyfile
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+
+    expect(active).toContain('auto_https disable_redirects');
+    // `auto_https off` 会让 tls internal 也不签发叶子证书，握手仍报 internal error
+    expect(active).not.toMatch(/auto_https\s+off\b/);
+  });
 });
 
 describe('AuthError 越权语义', () => {
