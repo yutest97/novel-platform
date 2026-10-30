@@ -281,16 +281,30 @@ pnpm verify:health       # 仅验证四个健康检查端点（服务已在运�
 DATABASE_URL='postgresql://novel:密码@127.0.0.1:5432/novel?schema=public' pnpm db:deploy
 ADMIN_EMAIL='smoke@example.test' ADMIN_INITIAL_PASSWORD='Smoke-Pass-2026' pnpm admin:create
 
-# 2) 经 Caddy HTTPS 走一遍登录 → /me → 退出
-BASE=https://127.0.0.1:8443 \
+# 2) 先确认 Caddy 的 HTTPS 入口可握手（失败时看 docker compose logs caddy --tail 100）
+curl -k --ipv4 --resolve localhost:8443:127.0.0.1 \
+  https://localhost:8443/api/healthz
+
+# 3) 经 Caddy HTTPS 走一遍登录 → 强制改密 → /me → 退出
+BASE=https://localhost:8443 \
 ADMIN_EMAIL='smoke@example.test' ADMIN_INITIAL_PASSWORD='Smoke-Pass-2026' \
   bash scripts/verify-auth-smoke.sh
 ```
 
 脚本断言：登录 200 + Cookie 含 `HttpOnly/Secure/SameSite=Lax/Path=/`、
-响应体不含明文口令、`/me` 200、退出后 `Max-Age=0`、退出后 `/me` 401。
+响应体不含明文口令、首登 `403 PASSWORD_CHANGE_REQUIRED` → 强制改密并轮换会话、
+`/me` 200、退出后 `Max-Age=0`、退出后 `/me` 401。
 CI 的 `docker` job 还会额外 `docker compose exec web node -e` 直接加载
 `@node-rs/argon2` 完成一次 hash/verify，证明镜像内原生模块可用。
+
+> **关于 `-k` 与 `--resolve`**：`-k` **只**用于忽略 Caddy **internal 自签 CA** 的
+> 信任问题；它不改变 Cookie 属性，HTTPS 下脚本仍强制断言 `Secure`。
+> `--resolve localhost:8443:127.0.0.1 --ipv4` 用于把 localhost 明确解析到 IPv4 环回
+> （compose 端口只绑定 `127.0.0.1`），避免 localhost 先解析到 `::1` 导致握手失败。
+> 生产环境必须使用受信任证书并保持 `AUTH_COOKIE_SECURE=true`——
+> **任何情况下都不要为了"让请求通过"而在生产关闭 Secure**。
+> 本地若确需用 http 调试，才叠加 `infra/docker-compose.dev.yml`（它会把
+> `AUTH_COOKIE_SECURE` 设为 `false`），且该模式不能用于验收。
 
 ### 容器镜像的可移植性设计
 

@@ -5,6 +5,12 @@
 # - 仅监听 80/443，由 compose 绑定到宿主机回环地址 8080/8443。
 # - 不做任何公网部署配置。
 #
+# HTTPS 站点必须写**明确主机名**（TLS-FIX-01）：
+# 只写 `:443` 时没有可用于签发/选择证书的站点名，握手会失败并返回
+# `tlsv1 alert internal error`（curl 35）。因此写作 `https://localhost:443`：
+#   - 端口 443 是**容器内**监听端口，由 compose 映射为宿主机 8443；
+#   - 主机名 localhost 用于签发 internal 证书与匹配请求 Host（Caddy 匹配时忽略端口）。
+#
 # 客户端 IP 传递（REV-01）：
 # - `header_up X-Real-IP {remote_host}`：由 Caddy 写入**真实**对端地址，
 #   并覆盖客户端自带的同名头。应用只信任这一个头（见 packages/auth/src/origin.ts）。
@@ -48,7 +54,7 @@
 	}
 }
 
-:443 {
+https://localhost:443 {
 	tls internal
 
 	handle /api/healthz* {

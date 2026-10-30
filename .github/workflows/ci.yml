@@ -145,8 +145,9 @@ jobs:
       # 否则 compose config 校验会通过，但数据库实际连接失败。
       DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public
       NODE_ENV: production
-      # 容器内经 Caddy 的 HTTPS 入口访问，因此期望来源就是该地址。
-      APP_ORIGIN: https://127.0.0.1:8443
+      # 容器内经 Caddy 的 HTTPS 入口访问；站点名显式写为 localhost（见 Caddyfile），
+      # 因此期望来源就是 https://localhost:8443。
+      APP_ORIGIN: https://localhost:8443
       # 一次性烟测账号（仅存在于本次 CI 的内存/临时卷中，运行结束即销毁）。
       ADMIN_EMAIL: ci-smoke@example.test
       ADMIN_INITIAL_PASSWORD: Ci-Smoke-Pass-2026
@@ -212,10 +213,26 @@ jobs:
           pnpm db:deploy
           pnpm admin:create
 
+      - name: TLS 前置检查（Caddy internal 证书 + HTTPS 健康检查）
+        env:
+          BASE: https://localhost:8443
+        run: |
+          set -euo pipefail
+          # 先用 --resolve/--ipv4 明确连 IPv4 环回，确认 Caddy 的 HTTPS 端点可握手。
+          # 只要不是 200（含 curl 35 这类 TLS 失败），立即失败并打印 Caddy 日志。
+          code="$(curl -sS -k --ipv4 --resolve localhost:8443:127.0.0.1 \
+                    -o /dev/null -w '%{http_code}' --max-time 20 "$BASE/api/healthz" || true)"
+          if [ "$code" != "200" ]; then
+            echo "::error::Caddy HTTPS 健康检查未返回 200（实际：${code:-curl 失败}）"
+            docker compose -f infra/docker-compose.yml logs caddy --tail 100 || true
+            exit 1
+          fi
+          echo "[tls] Caddy HTTPS 健康检查 200 ✓"
+
       - name: 登录烟测（经 Caddy HTTPS）
         env:
-          BASE: https://127.0.0.1:8443
-          ORIGIN: https://127.0.0.1:8443
+          BASE: https://localhost:8443
+          ORIGIN: https://localhost:8443
         run: |
           set -euo pipefail
           bash scripts/verify-auth-smoke.sh

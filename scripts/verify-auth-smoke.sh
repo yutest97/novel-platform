@@ -5,16 +5,22 @@
 # 在四个容器健康之后执行，验证"真实容器内"的认证链路：
 #   login（容器内 argon2 校验）→ Set-Cookie 属性 → /me 200 → logout → /me 401
 #
-# 用法（默认走 Caddy 的 HTTPS 入口，自签证书 → 需要 -k）：
-#   BASE=https://127.0.0.1:8443 \
+# 用法（默认走 Caddy 的 HTTPS 入口；自签 internal CA → 需要 -k）：
+#   BASE=https://localhost:8443 \
 #   ADMIN_EMAIL=ci-admin@example.test \
 #   ADMIN_INITIAL_PASSWORD='…' \
 #     bash scripts/verify-auth-smoke.sh
 #
+# 关于 `-k`：**仅**用于忽略 Caddy internal 自签 CA 的信任问题，
+# 与 Cookie 的 Secure 属性无关；HTTPS 下仍强制断言 Set-Cookie 带 Secure。
+#
+# 关于 `--resolve/--ipv4`：把 localhost 明确解析到 IPv4 环回，
+# 避免 localhost 先解析到 ::1、而 compose 端口只绑定 127.0.0.1 时握手失败。
+#
 # 任一步不符合预期即以非零码退出（CI 必须因此失败）。
 set -euo pipefail
 
-BASE="${BASE:-https://127.0.0.1:8443}"
+BASE="${BASE:-https://localhost:8443}"
 ORIGIN="${ORIGIN:-$BASE}"
 EMAIL="${ADMIN_EMAIL:?需要 ADMIN_EMAIL}"
 PASSWORD="${ADMIN_INITIAL_PASSWORD:?需要 ADMIN_INITIAL_PASSWORD}"
@@ -25,7 +31,16 @@ HEADERS="$WORKDIR/headers.txt"
 BODY="$WORKDIR/body.json"
 trap 'rm -rf "$WORKDIR" 2>/dev/null || true' EXIT
 
+# 从 BASE 中取出 host:port，供 --resolve 使用（仅本机回环场景）。
+HOSTPORT="${BASE#*://}"
+HOSTPORT="${HOSTPORT%%/*}"
+HOST_ONLY="${HOSTPORT%%:*}"
+
 CURL=(curl -sS -k --max-time 30)
+if [ "$HOST_ONLY" = "localhost" ] || [ "$HOST_ONLY" = "127.0.0.1" ]; then
+  RESOLVE_IP="${RESOLVE_IP:-127.0.0.1}"
+  CURL+=(--ipv4 --resolve "${HOSTPORT}:${RESOLVE_IP}")
+fi
 
 fail() {
   echo "[smoke] ✗ $*" >&2

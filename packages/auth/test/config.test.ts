@@ -131,6 +131,17 @@ describe('IP 头信任策略', () => {
     expect(caddyfile).toContain('header_up X-Real-IP {remote_host}');
     expect(caddyfile).toContain('header_up X-Forwarded-For {remote_host}');
   });
+
+  it('Caddyfile 的 HTTPS 站点使用明确主机名，且保留 :80 健康检查入口', () => {
+    const caddyfile = readFileSync(resolve(repoRoot, 'infra/docker/caddy/Caddyfile'), 'utf8');
+
+    // 裸 `:443` 没有站点名 → 无证书可签发 → 握手报 tlsv1 alert internal error。
+    expect(caddyfile).toContain('https://localhost:443 {');
+    expect(caddyfile).not.toMatch(/^:443\s*\{/m);
+    expect(caddyfile).toContain('tls internal');
+    // HTTP 入口保留（四个健康检查端点走 8080）
+    expect(caddyfile).toMatch(/^:80\s*\{/m);
+  });
 });
 
 describe('AuthError 越权语义', () => {
