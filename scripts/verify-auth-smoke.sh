@@ -51,13 +51,14 @@ fail() {
 }
 
 request() {
-  # $1=方法 $2=路径 $3=是否带 Cookie(jar|no) $4=是否带 JSON body $5=body
+  # $1=方法 $2=路径 $3=是否带 Cookie(jar|no) $4=是否带 JSON body $5=body $6=jar 文件(可选)
   local method="$1" path="$2" use_jar="$3" with_body="${4:-no}" payload="${5:-}"
+  local jar_file="${6:-$JAR}"
   # -c 保存 Cookie、-b 发送 Cookie：两者都需要，否则登录拿到的会话不会进入后续请求。
-  local args=("${CURL[@]}" -o "$BODY" -D "$HEADERS" -c "$JAR" -w '%{http_code}' -X "$method" "$BASE$path")
+  local args=("${CURL[@]}" -o "$BODY" -D "$HEADERS" -c "$jar_file" -w '%{http_code}' -X "$method" "$BASE$path")
   args+=(-H "origin: $ORIGIN")
   if [ "$use_jar" = "jar" ]; then
-    args+=(-b "$JAR")
+    args+=(-b "$jar_file")
   fi
   if [ "$with_body" = "yes" ]; then
     args+=(-H 'content-type: application/json' -d "$payload")
@@ -117,5 +118,89 @@ echo "[smoke] ✓ 退出 200 且清除 Cookie"
 STATUS="$(request GET /api/auth/me jar)"
 [ "$STATUS" = "401" ] || fail "退出后 /me 应返回 401，实际 $STATUS"
 echo "[smoke] ✓ 退出后 /me 401"
+
+# ================= M1-B2 管理接口烟测 =================
+AUTHOR_JAR="$WORKDIR/author-cookies.txt"
+ANON_JAR="$WORKDIR/anon-cookies.txt"
+
+# 从响应体中取第一个字段值（本脚本只用于取 id / 口令这类简单字段）
+json_field() {
+  grep -o "\"$1\":\"[^\"]*\"" "$BODY" | head -1 | cut -d'"' -f4
+}
+
+# ---------- 5. 管理员用改密后的口令重新登录 ----------
+STATUS="$(request POST /api/auth/login jar yes "{\"email\":\"$EMAIL\",\"password\":\"$NEW_PASSWORD\"}")"
+[ "$STATUS" = "200" ] || fail "管理员改密后重新登录失败（$STATUS）"
+echo "[smoke] ✓ 管理员重新登录"
+
+# ---------- 6. 创建作者（服务器生成一次性口令） ----------
+AUTHOR_EMAIL="smoke-author-$(date +%s)@example.test"
+STATUS="$(request POST /api/admin/users jar yes "{\"email\":\"$AUTHOR_EMAIL\"}")"
+case "$STATUS" in 200|201) ;; *) fail "创建作者应返回 201，实际 $STATUS" ;; esac
+if grep -qi 'passwordHash' "$BODY"; then fail "创建响应包含 passwordHash"; fi
+AUTHOR_ID="$(json_field id)"
+INITIAL_PASSWORD="$(json_field initialPassword)"
+[ -n "$AUTHOR_ID" ] || fail "创建响应缺少 user.id"
+[ -n "$INITIAL_PASSWORD" ] || fail "创建响应缺少一次性 initialPassword"
+[ "${#INITIAL_PASSWORD}" -ge 20 ] || fail "初始口令长度不足 20"
+echo "[smoke] ✓ 创建作者 201，一次性口令长度 ${#INITIAL_PASSWORD}，响应无哈希"
+
+# ---------- 7. 列表：作者存在且无 passwordHash ----------
+STATUS="$(request GET /api/admin/users jar no "" "$JAR")"
+[ "$STATUS" = "200" ] || fail "账号列表应返回 200，实际 $STATUS"
+grep -q "$AUTHOR_EMAIL" "$BODY" || fail "账号列表中没有新建的作者"
+if grep -qi 'passwordHash\|tokenHash\|argon2' "$BODY"; then fail "账号列表泄露敏感字段"; fi
+echo "[smoke] ✓ 列表包含作者且无哈希字段"
+
+# ---------- 8. 作者首次登录并改密 ----------
+STATUS="$(request POST /api/auth/login jar yes "{\"email\":\"$AUTHOR_EMAIL\",\"password\":\"$INITIAL_PASSWORD\"}" "$AUTHOR_JAR")"
+[ "$STATUS" = "200" ] || fail "作者首次登录失败（$STATUS）"
+AUTHOR_NEW_PASSWORD="${SMOKE_AUTHOR_NEW_PASSWORD:-$INITIAL_PASSWORD-a}"
+STATUS="$(request POST /api/auth/change-password jar yes "{\"currentPassword\":\"$INITIAL_PASSWORD\",\"newPassword\":\"$AUTHOR_NEW_PASSWORD\"}" "$AUTHOR_JAR")"
+[ "$STATUS" = "200" ] || fail "作者首登改密失败（$STATUS）"
+echo "[smoke] ✓ 作者首登改密成功"
+
+# ---------- 9. 管理员重置作者密码 → 作者旧会话失效 ----------
+STATUS="$(request POST "/api/admin/users/$AUTHOR_ID/reset-password" jar yes '{}' "$JAR")"
+[ "$STATUS" = "200" ] || fail "重置作者密码失败（$STATUS）"
+if grep -qi 'passwordHash' "$BODY"; then fail "重置响应包含 passwordHash"; fi
+RESET_PASSWORD="$(json_field newPassword)"
+[ -n "$RESET_PASSWORD" ] || fail "重置响应缺少一次性 newPassword"
+
+STATUS="$(request GET /api/auth/me jar no "" "$AUTHOR_JAR")"
+[ "$STATUS" = "401" ] || fail "重置后作者旧会话应 401，实际 $STATUS"
+echo "[smoke] ✓ 重置密码成功，作者旧会话 401"
+
+# ---------- 10. 停用作者 → 作者登录 403 ----------
+STATUS="$(request PATCH "/api/admin/users/$AUTHOR_ID/status" jar yes '{"status":"disabled"}' "$JAR")"
+[ "$STATUS" = "200" ] || fail "停用作者失败（$STATUS）"
+STATUS="$(request POST /api/auth/login nologin yes "{\"email\":\"$AUTHOR_EMAIL\",\"password\":\"$RESET_PASSWORD\"}" "$ANON_JAR")"
+[ "$STATUS" = "403" ] || fail "停用后作者登录应 403，实际 $STATUS"
+echo "[smoke] ✓ 停用后作者登录 403"
+
+# ---------- 11. 启用作者 → 可重新登录 ----------
+STATUS="$(request PATCH "/api/admin/users/$AUTHOR_ID/status" jar yes '{"status":"active"}' "$JAR")"
+[ "$STATUS" = "200" ] || fail "启用作者失败（$STATUS）"
+STATUS="$(request POST /api/auth/login nologin yes "{\"email\":\"$AUTHOR_EMAIL\",\"password\":\"$RESET_PASSWORD\"}" "$ANON_JAR")"
+[ "$STATUS" = "200" ] || fail "启用后作者应能登录，实际 $STATUS"
+echo "[smoke] ✓ 启用后作者可登录"
+
+# ---------- 12. 账号上限：创建到 10 个后第 11 个失败 ----------
+LIMIT_HIT=0
+for index in $(seq 1 15); do
+  STATUS="$(request POST /api/admin/users jar yes "{\"email\":\"smoke-bulk-${index}-$(date +%s%N)@example.test\"}" "$JAR")"
+  if [ "$STATUS" = "409" ]; then
+    grep -q 'USER_LIMIT_REACHED' "$BODY" || fail "上限错误码不是 USER_LIMIT_REACHED"
+    LIMIT_HIT=1
+    break
+  fi
+  [ "$STATUS" = "201" ] || fail "批量创建返回意外状态 $STATUS"
+done
+[ "$LIMIT_HIT" = "1" ] || fail "创建到上限后仍未返回 USER_LIMIT_REACHED"
+
+STATUS="$(request GET /api/admin/users jar no "" "$JAR")"
+ACCOUNT_COUNT="$(grep -o '\"id\":\"' "$BODY" | wc -l | tr -d ' ')"
+[ "$ACCOUNT_COUNT" -le 10 ] || fail "账号总数超过 10（实际 $ACCOUNT_COUNT）"
+echo "[smoke] ✓ 账号上限生效：当前 ${ACCOUNT_COUNT} 个账号，第 11 个被拒"
 
 echo "[smoke] 全部通过。"

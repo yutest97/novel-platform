@@ -17,6 +17,8 @@ export type AuthErrorCode =
   | 'VALIDATION_FAILED'
   | 'FORBIDDEN'
   | 'LAST_ADMIN_PROTECTED'
+  | 'EMAIL_TAKEN'
+  | 'USER_LIMIT_REACHED'
   | 'NOT_FOUND';
 
 /** 错误码 → HTTP 状态码。 */
@@ -30,6 +32,8 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   VALIDATION_FAILED: 400,
   FORBIDDEN: 403,
   LAST_ADMIN_PROTECTED: 403,
+  EMAIL_TAKEN: 409,
+  USER_LIMIT_REACHED: 409,
   NOT_FOUND: 404,
 };
 
@@ -47,6 +51,10 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   FORBIDDEN: '没有权限执行该操作',
   // 稳定的专用错误码：不允许停用最后一个可用管理员
   LAST_ADMIN_PROTECTED: '不能停用最后一个可用管理员',
+  // 稳定冲突错误：邮箱已被占用（不区分大小写，因为入库前已规范化）
+  EMAIL_TAKEN: '该邮箱已被占用',
+  // 稳定冲突错误：账号总数已达上限
+  USER_LIMIT_REACHED: '账号数量已达上限',
   NOT_FOUND: '资源不存在',
 };
 

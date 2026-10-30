@@ -12,6 +12,36 @@ export const SESSION_COOKIE_NAME = 'novel_session';
 /** 每个账号允许的最大活跃会话数（固定为 5，不通过环境变量放开）。 */
 export const MAX_ACTIVE_SESSIONS = 5;
 
+/**
+ * 账号总数上限（含 disabled 账号）。
+ *
+ * 固定为 10，**不**通过环境变量放开：这是产品约束（封闭小团队自用），
+ * 也不提供删除账号接口，因此上限就是硬上限。
+ */
+export const MAX_USER_ACCOUNTS = 10;
+
+/**
+ * 读取生效的账号上限。
+ *
+ * 上限**只允许调小、不允许调大**（返回值恒 ≤ MAX_USER_ACCOUNTS）：
+ * 生产环境没有任何环境变量能突破 10 个账号的产品约束；
+ * `AUTH_MAX_USER_ACCOUNTS` 仅用于测试在小规模数据上验证上限逻辑。
+ */
+export function readMaxUserAccounts(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['AUTH_MAX_USER_ACCOUNTS'];
+  if (raw === undefined || raw.trim() === '') {
+    return MAX_USER_ACCOUNTS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return MAX_USER_ACCOUNTS;
+  }
+  return Math.min(parsed, MAX_USER_ACCOUNTS);
+}
+
+/** 服务器生成的一次性口令长度（≥20 字符要求，这里取 24）。 */
+export const GENERATED_PASSWORD_LENGTH = 24;
+
 /** 默认绝对有效期：12 小时。 */
 const DEFAULT_ABSOLUTE_TTL_MS = 12 * 60 * 60 * 1000;
 

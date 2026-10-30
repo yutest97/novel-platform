@@ -31,17 +31,38 @@ const globalForPrisma = globalThis as unknown as {
  */
 let prismaCreations = 0;
 
+/**
+ * 创建一个**不受单例缓存管理**的 Prisma 客户端。
+ *
+ * 用途：集成测试需要在独立 PostgreSQL schema 上验证"全局计数"类约束
+ * （例如账号总数上限），这些测试必须拥有干净的数据空间。
+ * 生产代码请一律使用 `getPrismaClient()`，以免泄漏连接池。
+ *
+ * @param options.connectionString 连接串（不含 schema 参数）
+ * @param options.schema 目标 schema（通过 `search_path` 生效）
+ */
+export function createPrismaClient(options: {
+  connectionString: string;
+  schema?: string;
+}): PrismaClient {
+  const adapter = new PrismaPg({
+    connectionString: options.connectionString,
+    ...(options.schema === undefined ? {} : { options: `-c search_path=${options.schema}` }),
+  });
+
+  return new PrismaClient({
+    adapter,
+    log: process.env['NODE_ENV'] === 'development' ? ['warn', 'error'] : ['error'],
+  });
+}
+
 function createClient(): PrismaClient {
   const connectionString = process.env['DATABASE_URL'];
   if (connectionString === undefined || connectionString.trim() === '') {
     throw new Error('缺少必需的环境变量：DATABASE_URL');
   }
 
-  const adapter = new PrismaPg({ connectionString });
-  const client = new PrismaClient({
-    adapter,
-    log: process.env['NODE_ENV'] === 'development' ? ['warn', 'error'] : ['error'],
-  });
+  const client = createPrismaClient({ connectionString });
 
   prismaCreations += 1;
   return client;

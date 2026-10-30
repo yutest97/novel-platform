@@ -21,6 +21,7 @@ export type AuditDb = Pick<PrismaClient, 'auditLog'>;
 /** 审计动作常量（与 docs 中的动作命名保持一致）。 */
 export const AUDIT_ACTIONS = {
   ADMIN_CREATED: 'admin.created',
+  ADMIN_USER_CREATED: 'admin.user_created',
   LOGIN_SUCCEEDED: 'auth.login_succeeded',
   LOGIN_FAILED: 'auth.login_failed',
   LOGOUT: 'auth.logout',

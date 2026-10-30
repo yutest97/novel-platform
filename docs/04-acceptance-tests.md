@@ -259,6 +259,11 @@
 | AT-AUTH-17 | **限流抗伪造来源** | 伪造 `X-Forwarded-For` 不影响限流计数；仅信任 Caddy 覆盖的 `X-Real-IP` |
 | AT-AUTH-18 | **最后管理员保护** | 停用唯一的 active admin 返回 `403 LAST_ADMIN_PROTECTED`；两个管理员并发互相停用后恰好保留 1 个 active admin |
 | AT-AUTH-19 | **管理员治理事务** | 授权在事务内取固定 advisory lock 后重读 actor；首登未改密的管理员执行管理操作被拒，且无业务修改与审计 |
+| AT-ADM-1 | **账号列表** | 字段仅 id/email/role/status/mustChangePassword/createdAt/updatedAt；无 passwordHash / 令牌 / 审计详情 |
+| AT-ADM-2 | **创建作者** | role 固定 author；未提供口令时服务器生成 ≥20 字符并只返回一次；显式提供时不回显；重复邮箱 `409 EMAIL_TAKEN` |
+| AT-ADM-3 | **账号上限** | 总数 ≤10（含 disabled）；并发创建不突破；超限 `409 USER_LIMIT_REACHED`；无删除接口 |
+| AT-ADM-4 | **重置密码 / 停用启用** | 重置后旧会话立即失效且必须改密；停用立即失效、启用后可登录；最后管理员保护仍生效 |
+| AT-ADM-5 | **管理接口授权** | actor 取自会话；作者 / 停用管理员 / 首登未改密管理员一律 403；写接口校验 Origin |
 
 ---
 

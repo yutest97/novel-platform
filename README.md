@@ -167,6 +167,38 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
 数据表（本轮仅这三张）：`users`、`sessions`、`audit_logs`。
 不包含 works / chapters / facts 等 M2/M6 业务表。
 
+### 管理接口（M1-B2）
+
+仅管理员可用；actor 一律来自**当前会话**，不接受客户端传入 actorId。
+所有写操作在 `runAdminGovernance` 事务内（固定 advisory lock → 重读 actor →
+读目标/计数 → 写入 → 审计）完成。
+
+| 接口                                  | 方法  | 说明                                     |
+| ------------------------------------- | ----- | ---------------------------------------- |
+| `/api/admin/users`                    | GET   | 账号列表（创建时间正序，不分页）         |
+| `/api/admin/users`                    | POST  | 创建作者账号（role 固定 `author`）       |
+| `/api/admin/users/:id/reset-password` | POST  | 重置指定账号密码                         |
+| `/api/admin/users/:id/status`         | PATCH | 停用 / 启用（`status=active\|disabled`） |
+
+约定：
+
+- 列表字段固定为 `id / email / role / status / mustChangePassword / createdAt / updatedAt`，
+  永不返回 `passwordHash`、会话令牌或审计详情。
+- 创建：`{ email, initialPassword? }`。未提供口令时服务器生成 ≥20 字符高熵口令，
+  **只在本次 201 响应中出现一次**；管理员显式提供口令时**不回显**。
+  邮箱统一小写，重复返回 `409 EMAIL_TAKEN`。
+- 重置：`{ newPassword? }`，同上的一次性口令规则；重置后 `mustChangePassword=true`
+  并吊销该账号全部会话。
+- 停用：立即吊销该账号全部会话；继续执行最后管理员保护
+  （停用唯一 active admin → `403 LAST_ADMIN_PROTECTED`）。
+- 账号总数上限 **10（含 disabled）**：在事务内 `count + insert`，并发创建也无法突破；
+  超限返回 `409 USER_LIMIT_REACHED`。**不提供删除账号接口**。
+- 未登录 `401`；非管理员 / 停用管理员 / 首登未改密管理员 `403`；
+  写接口缺少或伪造 `Origin` → `403 INVALID_ORIGIN`。
+
+审计动作：`admin.user_created`、`admin.password_reset`、`user.disabled`、`user.enabled`
+（detail 只含邮箱、角色、状态变化、mustChangePassword 等非敏感信息）。
+
 ## 5. 健康检查地址
 
 | 端点                                   | 返回内容                             | 失败语义                    |
@@ -364,7 +396,9 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 `docker compose build` → `docker compose up -d --wait`（等待四个服务健康）→
 `scripts/verify-healthchecks.sh`（校验 web / worker / Caddy→web / Caddy→worker 四个端点）→
 容器内加载 `@node-rs/argon2` 做一次 hash/verify → 对容器数据库 `pnpm db:deploy` +
-`pnpm admin:create` → `scripts/verify-auth-smoke.sh`（经 Caddy HTTPS 完成登录/`me`/退出）→
+`pnpm admin:create` → `scripts/verify-auth-smoke.sh`
+（经 Caddy HTTPS 完成：登录 → 强制改密 → 创建作者 → 列表校验 → 作者首登改密 →
+重置密码 → 停用/启用 → 账号上限）→
 输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
 
 > CI 的 docker job 使用 `COMPOSE_PROJECT_NAME=novel-ci-<run_id>` 独立项目名，

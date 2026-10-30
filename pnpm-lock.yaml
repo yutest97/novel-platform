@@ -120,6 +120,12 @@ importers:
       '@types/node':
         specifier: 22.20.5
         version: 22.20.5
+      '@types/pg':
+        specifier: 8.15.6
+        version: 8.15.6
+      pg:
+        specifier: 8.16.3
+        version: 8.16.3
       typescript:
         specifier: 5.9.3
         version: 5.9.3

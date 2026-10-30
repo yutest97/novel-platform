@@ -8,9 +8,11 @@
  *   用于"账号不存在"分支的等时处理。
  */
 
+import { randomInt } from 'node:crypto';
+
 import { hash, verify } from '@node-rs/argon2';
 
-import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from './config.js';
+import { GENERATED_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from './config.js';
 import { AuthError } from './errors.js';
 
 /**
@@ -90,4 +92,21 @@ export function assertPasswordPolicy(password: string, currentPassword?: string)
   if (currentPassword !== undefined && password === currentPassword) {
     throw new AuthError('VALIDATION_FAILED', '新密码不能与当前密码相同');
   }
+}
+
+/**
+ * 生成一次性初始口令。
+ *
+ * - 长度默认 24（要求 ≥20），字符集为大小写字母 + 数字 + 少量符号；
+ * - 使用 `crypto.randomInt` 逐字符取样（拒绝无偏），熵约 24×log2(70) ≈ 147 位；
+ * - 该口令**只在创建/重置的响应体中出现一次**，不落库明文、不写日志与审计。
+ */
+export function generateInitialPassword(length: number = GENERATED_PASSWORD_LENGTH): string {
+  const size = Math.max(length, 20);
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_+=%@#';
+  let result = '';
+  for (let index = 0; index < size; index += 1) {
+    result += alphabet[randomInt(0, alphabet.length)];
+  }
+  return result;
 }

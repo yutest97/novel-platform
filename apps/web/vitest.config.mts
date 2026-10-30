@@ -17,5 +17,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
+    // 这些用例共享同一个 PostgreSQL：并行跑不同文件会互相影响
+    //（例如统计账号总数、依赖登录限流计数），因此串行执行。
+    fileParallelism: false,
   },
 });

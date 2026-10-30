@@ -15,7 +15,7 @@ import type { Prisma, PrismaClient } from '@novel/db';
 
 import { AUDIT_ACTIONS, writeAuditLog } from './audit.js';
 import { AuthError } from './errors.js';
-import { assertPasswordPolicy, hashPassword } from './password.js';
+import { assertPasswordPolicy, generateInitialPassword, hashPassword } from './password.js';
 import { toPublicUser, type PublicUser } from './sessions.js';
 import type { RequestMeta } from './types.js';
 
@@ -312,34 +312,40 @@ export async function setUserStatus(
  *
  * 同样走管理员治理事务（锁 → 事务内重读 actor → 事务内读目标 → 更新 → 吊销 → 审计）。
  * 重置后：mustChangePassword 置为 true，吊销该账号全部会话。
+ *
+ * 未提供 `newPassword` 时由服务器生成一次性口令并随返回值带回
+ * （**只在这一次响应中出现**，不落库明文、不写日志与审计）。
  */
-export async function adminResetPassword(
+export async function resetUserPassword(
   db: PrismaClient,
   input: {
     actorId: string;
     userId: string;
-    newPassword: string;
+    newPassword?: string | undefined;
     meta: RequestMeta;
   },
-): Promise<void> {
-  assertAcceptableInitialPassword(input.newPassword);
+): Promise<{ user: PublicUser; newPassword: string | null }> {
+  const providedPassword = input.newPassword;
+  const newPassword = providedPassword ?? generateInitialPassword();
+  assertAcceptableInitialPassword(newPassword);
 
-  return runAdminGovernance(db, input.actorId, async (tx) => {
+  // 哈希在事务外完成：argon2 约几十毫秒，不应长时间持有治理锁。
+  const passwordHash = await hashPassword(newPassword);
+
+  const user = await runAdminGovernance(db, input.actorId, async (tx) => {
     if (!UUID_PATTERN.test(input.userId)) {
       throw new AuthError('NOT_FOUND', '账号不存在');
     }
 
     const target = await tx.user.findUnique({
       where: { id: input.userId },
-      select: { id: true },
+      select: { id: true, email: true },
     });
     if (target === null) {
       throw new AuthError('NOT_FOUND', '账号不存在');
     }
 
-    const passwordHash = await hashPassword(input.newPassword);
-
-    await tx.user.update({
+    const updated = await tx.user.update({
       where: { id: input.userId },
       data: { passwordHash, mustChangePassword: true },
     });
@@ -350,9 +356,28 @@ export async function adminResetPassword(
       actorId: input.actorId,
       targetType: 'user',
       targetId: input.userId,
-      detail: { mustChangePassword: true, sessionsRevoked: true },
+      // 只记录非敏感信息：邮箱、是否必须改密、是否吊销了会话。
+      detail: { email: target.email, mustChangePassword: true, sessionsRevoked: true },
       ip: input.meta.ip,
       userAgent: input.meta.userAgent,
     });
+
+    return toPublicUser(updated);
   });
+
+  // 管理员自己输入的新口令不回显；只有服务器生成的口令才一次性返回。
+  return { user, newPassword: providedPassword === undefined ? newPassword : null };
+}
+
+/** 兼容旧签名：不关心一次性口令的调用方（内部/测试）可直接用它。 */
+export async function adminResetPassword(
+  db: PrismaClient,
+  input: {
+    actorId: string;
+    userId: string;
+    newPassword: string;
+    meta: RequestMeta;
+  },
+): Promise<void> {
+  await resetUserPassword(db, { ...input, newPassword: input.newPassword });
 }
