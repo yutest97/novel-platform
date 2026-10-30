@@ -52,10 +52,14 @@ export {
   adminResetPassword,
   assertAcceptableInitialPassword,
   assertValidEmail,
+  countOtherActiveAdmins,
   createInitialAdmin,
   findUserByEmail,
+  lockAdminGovernance,
   normalizeEmail,
   requireActiveAdmin,
+  requireActiveAdminInTx,
+  runAdminGovernance,
   setUserStatus,
 } from './users.js';
-export type { CreatedAdmin } from './users.js';
+export type { CreatedAdmin, UserReader } from './users.js';

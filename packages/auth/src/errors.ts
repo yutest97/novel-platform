@@ -16,6 +16,7 @@ export type AuthErrorCode =
   | 'RATE_LIMITED'
   | 'VALIDATION_FAILED'
   | 'FORBIDDEN'
+  | 'LAST_ADMIN_PROTECTED'
   | 'NOT_FOUND';
 
 /** 错误码 → HTTP 状态码。 */
@@ -28,6 +29,7 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   RATE_LIMITED: 429,
   VALIDATION_FAILED: 400,
   FORBIDDEN: 403,
+  LAST_ADMIN_PROTECTED: 403,
   NOT_FOUND: 404,
 };
 
@@ -43,6 +45,8 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   VALIDATION_FAILED: '请求参数不合法',
   // 越权与"操作者不存在"使用同一文案，避免泄露账号是否存在。
   FORBIDDEN: '没有权限执行该操作',
+  // 稳定的专用错误码：不允许停用最后一个可用管理员
+  LAST_ADMIN_PROTECTED: '不能停用最后一个可用管理员',
   NOT_FOUND: '资源不存在',
 };
 

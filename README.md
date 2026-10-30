@@ -148,8 +148,12 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
   并发建会话使用 `pg_advisory_xact_lock` 串行化，避免并发下突破上限。
 - **每次请求都重新查库**校验账号状态与 `must_change_password`，不信任 Cookie 内容。
 - 停用账号：立即吊销其全部会话，且后续请求返回 403。
-- 管理员操作（停用/启用、重置密码）统一走 `requireActiveAdmin`：
-  **作者 / 已停用管理员 / 不存在的操作者一律 403**，且业务数据不变。
+- 管理员操作（停用/启用、重置密码）统一走**管理员治理事务**：
+  事务开始先取固定 `pg_advisory_xact_lock`，再**在事务内重新读取** actor
+  （存在 / `active` / `role=admin` / 已改密），随后才读目标、更新、吊销会话、写审计。
+  作者 / 已停用管理员 / 不存在的操作者 / 首登未改密的管理员一律 403，且无任何副作用。
+- **最后管理员保护**：停用 active admin 前统计其他 active admin，为 0 时返回稳定的
+  `403 LAST_ADMIN_PROTECTED`；两个管理员并发互相停用后仍恰好保留 1 个 active admin。
 - 登录失败使用统一文案，账号不存在时也执行一次等时 argon2 校验，避免时序侧信道。
 - 限流额度在**进入数据库查询与 argon2 校验之前**同步预留：
   并发 20 次错误登录时只有 5 次会真正进入完整校验，其余立即 429。
@@ -254,6 +258,10 @@ pnpm license:report:dev  # 生成 THIRD_PARTY_LICENSES.dev.md（开发依赖）
 >
 > 缺少 `DATABASE_URL` 时集成测试会**直接失败**（而不是静默跳过），
 > 以免在没有数据库的情况下显示为通过。CI 通过 `postgres` service 提供该数据库。
+>
+> **测试串行执行**：根脚本为 `pnpm -r --workspace-concurrency=1 test`。
+> auth 包的故障注入测试会临时在 `audit_logs` 上挂触发器（使 INSERT 抛错），
+> 若与 web 的接口测试并行访问同一数据库会互相干扰，因此 workspace 之间必须串行。
 
 ### 容器与健康检查验证（需要 Docker）
 

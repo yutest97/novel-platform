@@ -257,6 +257,8 @@
 | AT-AUTH-15 | **管理员授权** | 作者 / 已停用管理员 / 不存在的 actor 调用管理员操作 → `403`，且业务数据不变 |
 | AT-AUTH-16 | **审计原子性** | 审计写入失败时业务修改回滚（不出现"改了但没审计"） |
 | AT-AUTH-17 | **限流抗伪造来源** | 伪造 `X-Forwarded-For` 不影响限流计数；仅信任 Caddy 覆盖的 `X-Real-IP` |
+| AT-AUTH-18 | **最后管理员保护** | 停用唯一的 active admin 返回 `403 LAST_ADMIN_PROTECTED`；两个管理员并发互相停用后恰好保留 1 个 active admin |
+| AT-AUTH-19 | **管理员治理事务** | 授权在事务内取固定 advisory lock 后重读 actor；首登未改密的管理员执行管理操作被拒，且无业务修改与审计 |
 
 ---
 

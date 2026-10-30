@@ -1,14 +1,17 @@
 /**
  * 账号相关的写操作：初始管理员、停用/启用、管理员重置密码。
  *
- * 两条硬约束（REV-01）：
- * 1. **授权**：所有管理员操作必须先经过 `requireActiveAdmin`，
- *    作者 / 已停用的管理员 / 不存在的操作者一律拒绝。
- * 2. **原子性**：业务修改与 audit_logs 写入在同一事务内完成；
- *    审计写失败时业务修改必须回滚（不留下"改了但没审计"的状态）。
+ * 三条硬约束（REV-01 / REV-02）：
+ * 1. **授权**：管理员写操作一律走 `runAdminGovernance`，
+ *    在事务内取固定 advisory lock 后**重新读取** actor 再判定
+ *    （存在 / active / admin / 已改密）。
+ * 2. **原子性**：业务修改、会话吊销与 audit_logs 写入在同一事务内完成；
+ *    审计写失败时业务修改必须回滚。
+ * 3. **最后管理员保护**：停用 active admin 前统计其他可用管理员，
+ *    为 0 时返回稳定错误 `LAST_ADMIN_PROTECTED`，且不产生任何副作用。
  */
 
-import type { PrismaClient } from '@novel/db';
+import type { Prisma, PrismaClient } from '@novel/db';
 
 import { AUDIT_ACTIONS, writeAuditLog } from './audit.js';
 import { AuthError } from './errors.js';
@@ -84,15 +87,34 @@ export async function findUserByEmail(db: PrismaClient, email: string) {
 }
 
 /**
- * 统一的管理员授权检查。
+ * 管理员治理的固定 advisory lock 键。
  *
- * 依次校验：actor 存在 → status=active → role=admin。
- * 任一条不满足都抛出错误，**不返回任何业务数据**。
- *
- * 注意：三种失败原因对外都表现为 403（"操作者不存在"也用 FORBIDDEN，
- * 避免通过错误码探测某个 id 是否为真实账号）。
+ * 取固定值（而非按 actor/目标哈希）是刻意的：
+ * 「最后一个可用管理员」这类约束是**全局**的，只有把所有管理员治理操作
+ * 串行化到同一把锁，并发互相停用时才可能得到正确结果。
+ * 键值写成字面量常量，不参与任何字符串拼接。
  */
-export async function requireActiveAdmin(db: PrismaClient, actorId: string): Promise<PublicUser> {
+const ADMIN_GOVERNANCE_LOCK_KEY = 7212076401n;
+
+/** 单条 SQL 的锁语句（pg_advisory_xact_lock 返回 void，Prisma 无法反序列化，
+ *  故用子查询返回整数，避免 P2010 UnsupportedNativeDataType）。 */
+const ADMIN_GOVERNANCE_LOCK_SQL = `SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(${ADMIN_GOVERNANCE_LOCK_KEY.toString()}::bigint)) AS lock_acquired`;
+
+/** 在事务内获取管理员治理锁。 */
+export async function lockAdminGovernance(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$queryRawUnsafe(ADMIN_GOVERNANCE_LOCK_SQL);
+}
+
+/** 仅需 user 委托的最小数据库能力（PrismaClient 与 TransactionClient 都满足）。 */
+export type UserReader = Pick<PrismaClient, 'user'>;
+
+/**
+ * 管理员授权检查的核心实现。
+ *
+ * 依次校验：actor 存在 → status=active → role=admin → mustChangePassword=false。
+ * 首登未改密的管理员不能执行任何管理操作。
+ */
+async function assertActiveAdmin(db: UserReader, actorId: string): Promise<PublicUser> {
   if (typeof actorId !== 'string' || !UUID_PATTERN.test(actorId)) {
     throw new AuthError('FORBIDDEN', '操作者无效');
   }
@@ -111,8 +133,58 @@ export async function requireActiveAdmin(db: PrismaClient, actorId: string): Pro
   if (actor.role !== 'admin') {
     throw new AuthError('FORBIDDEN', '需要管理员权限');
   }
+  // 首登未改密的管理员：必须先自己改密，才能操作他人。
+  if (actor.mustChangePassword) {
+    throw new AuthError('PASSWORD_CHANGE_REQUIRED', '管理员必须先修改初始密码');
+  }
 
   return toPublicUser(actor);
+}
+
+/**
+ * 事务内的管理员授权检查（**必须**在事务内、拿到治理锁之后调用）。
+ */
+export const requireActiveAdminInTx = assertActiveAdmin;
+
+/**
+ * 只读的管理员授权检查（**不允许**据此继续执行写操作）。
+ *
+ * 任何写操作都必须走 `runAdminGovernance`，在事务内重新读取 actor ——
+ * 否则会出现"事务外判定通过、事务内 actor 已被停用"的时间窗口。
+ */
+export const requireActiveAdmin = assertActiveAdmin;
+
+/**
+ * 管理员治理事务。
+ *
+ * 顺序固定为：开事务 → 取固定 advisory lock → **在事务内重新读取并校验 actor**
+ * → 由回调读取目标、执行更新/吊销会话/写审计。
+ * 任何一步抛错都会让整个事务回滚（不留下"改了没审计"或"审计了没改"）。
+ */
+export async function runAdminGovernance<T>(
+  db: PrismaClient,
+  actorId: string,
+  work: (tx: Prisma.TransactionClient, actor: PublicUser) => Promise<T>,
+): Promise<T> {
+  return db.$transaction(async (tx) => {
+    await lockAdminGovernance(tx);
+    const actor = await requireActiveAdminInTx(tx, actorId);
+    return work(tx, actor);
+  });
+}
+
+/**
+ * 统计"除 targetId 之外"的可用管理员数量。
+ *
+ * 用于最后管理员保护：停用某个 active admin 前必须确认还有别人可用。
+ */
+export async function countOtherActiveAdmins(
+  tx: Prisma.TransactionClient,
+  targetId: string,
+): Promise<number> {
+  return tx.user.count({
+    where: { role: 'admin', status: 'active', id: { not: targetId } },
+  });
 }
 
 /** 初始管理员的创建结果。 */
@@ -176,10 +248,10 @@ export async function createInitialAdmin(
 /**
  * 停用 / 启用账号。
  *
- * 前置授权：`requireActiveAdmin`。
+ * 全程在管理员治理事务内完成：固定 advisory lock → 事务内重读 actor →
+ * 事务内读目标 → 最后管理员检查 → 更新 → 吊销会话 → 写审计。
  * 停用时立即吊销该账号全部会话（配合每次请求的状态校验，
  * 保证停用后不能继续使用任何已有 Cookie）。
- * 状态变更、会话吊销与审计在同一事务内完成。
  */
 export async function setUserStatus(
   db: PrismaClient,
@@ -190,21 +262,27 @@ export async function setUserStatus(
     meta: RequestMeta;
   },
 ): Promise<PublicUser> {
-  await requireActiveAdmin(db, input.actorId);
+  return runAdminGovernance(db, input.actorId, async (tx) => {
+    if (!UUID_PATTERN.test(input.userId)) {
+      throw new AuthError('NOT_FOUND', '账号不存在');
+    }
 
-  if (!UUID_PATTERN.test(input.userId)) {
-    throw new AuthError('NOT_FOUND', '账号不存在');
-  }
+    const target = await tx.user.findUnique({
+      where: { id: input.userId },
+      select: { id: true, role: true, status: true },
+    });
+    if (target === null) {
+      throw new AuthError('NOT_FOUND', '账号不存在');
+    }
 
-  const existing = await db.user.findUnique({
-    where: { id: input.userId },
-    select: { status: true },
-  });
-  if (existing === null) {
-    throw new AuthError('NOT_FOUND', '账号不存在');
-  }
+    // 最后管理员保护：只有在"确实会因为这次操作减少可用管理员"时才检查。
+    if (input.status === 'disabled' && target.role === 'admin' && target.status === 'active') {
+      const others = await countOtherActiveAdmins(tx, target.id);
+      if (others === 0) {
+        throw new AuthError('LAST_ADMIN_PROTECTED');
+      }
+    }
 
-  const updated = await db.$transaction(async (tx) => {
     const user = await tx.user.update({
       where: { id: input.userId },
       data: { status: input.status },
@@ -220,23 +298,20 @@ export async function setUserStatus(
       actorId: input.actorId,
       targetType: 'user',
       targetId: input.userId,
-      detail: { from: existing.status, to: input.status },
+      detail: { from: target.status, to: input.status },
       ip: input.meta.ip,
       userAgent: input.meta.userAgent,
     });
 
-    return user;
+    return toPublicUser(user);
   });
-
-  return toPublicUser(updated);
 }
 
 /**
  * 管理员重置他人密码。
  *
- * 前置授权：`requireActiveAdmin`。
+ * 同样走管理员治理事务（锁 → 事务内重读 actor → 事务内读目标 → 更新 → 吊销 → 审计）。
  * 重置后：mustChangePassword 置为 true，吊销该账号全部会话。
- * 密码更新、会话吊销与审计在同一事务内完成。
  */
 export async function adminResetPassword(
   db: PrismaClient,
@@ -247,21 +322,23 @@ export async function adminResetPassword(
     meta: RequestMeta;
   },
 ): Promise<void> {
-  await requireActiveAdmin(db, input.actorId);
-
-  if (!UUID_PATTERN.test(input.userId)) {
-    throw new AuthError('NOT_FOUND', '账号不存在');
-  }
-
-  const existing = await db.user.findUnique({ where: { id: input.userId }, select: { id: true } });
-  if (existing === null) {
-    throw new AuthError('NOT_FOUND', '账号不存在');
-  }
-
   assertAcceptableInitialPassword(input.newPassword);
-  const passwordHash = await hashPassword(input.newPassword);
 
-  await db.$transaction(async (tx) => {
+  return runAdminGovernance(db, input.actorId, async (tx) => {
+    if (!UUID_PATTERN.test(input.userId)) {
+      throw new AuthError('NOT_FOUND', '账号不存在');
+    }
+
+    const target = await tx.user.findUnique({
+      where: { id: input.userId },
+      select: { id: true },
+    });
+    if (target === null) {
+      throw new AuthError('NOT_FOUND', '账号不存在');
+    }
+
+    const passwordHash = await hashPassword(input.newPassword);
+
     await tx.user.update({
       where: { id: input.userId },
       data: { passwordHash, mustChangePassword: true },
