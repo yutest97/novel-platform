@@ -922,6 +922,15 @@ test('22. 功法分区：境界门槛引用境界，删除被引用的境界 409
   await expect(technique.getByTestId('technique-attr-type')).toHaveText('功法');
   await expect(technique.getByTestId('technique-attr-realmRequirement')).toHaveText('炼气');
 
+  // 截图必须在**物品与功法两张卡片同时存在**时拍（人工检查用）
+  await createInSection(page, 'item', '玄铁重剑', async () => {
+    await page.getByTestId('item-new-category').selectOption('weapon');
+    await page.getByTestId('item-new-quality').selectOption('earth');
+  });
+  await expect(page.getByTestId('item-item').filter({ hasText: '玄铁重剑' })).toHaveCount(1);
+  await expect(page.getByTestId('technique-item').filter({ hasText: '青元剑诀' })).toHaveCount(1);
+  await page.screenshot({ path: shotM2b2('item-technique-settings'), fullPage: true });
+
   // 删除被功法引用的境界 → 409，摘要里列出「功法 · 青元剑诀」
   await page
     .getByTestId('realm-item')
@@ -959,8 +968,6 @@ test('22. 功法分区：境界门槛引用境界，删除被引用的境界 409
       .getByTestId('technique-attr-realmRequirement'),
   ).toHaveText('—');
 
-  await page.screenshot({ path: shotM2b2('item-technique-settings'), fullPage: true });
-
   await context.close();
 });
 
@@ -994,7 +1001,10 @@ test('23. 移动端 390×844：可创建物品与功法，五分区不撑破视�
   }));
   expect(metrics.docWidth).toBeLessThanOrEqual(metrics.viewport + 1);
 
-  await page.screenshot({ path: shotM2b2('item-technique-mobile'), fullPage: false });
+  // 截图范围内必须同时有物品卡片与功法卡片：窄屏一屏放不下两个分区，因此用整页截图
+  await expect(page.getByTestId('item-item').filter({ hasText: '玄铁盾' })).toHaveCount(1);
+  await expect(page.getByTestId('technique-item').filter({ hasText: '龟息功' })).toHaveCount(1);
+  await page.screenshot({ path: shotM2b2('item-technique-mobile'), fullPage: true });
 
   await context.close();
 });

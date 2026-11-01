@@ -352,7 +352,7 @@ M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），�
 | F-WRK-04 | AT-SET-4/5/8（人物设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-05 | AT-SET-4/8（势力设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-06 | AT-SET-1/2/6/10（境界体系）、AT-FLOW-1、AT-CONT-3 |
-| F-WRK-07 | AT-FLOW-1（物品）、AT-CHK-4 |
+| F-WRK-07 | AT-SET-13/14/15（物品名称/类别/品质/获取方式已交付，持有人待 B3-B）、AT-FLOW-1、AT-CHK-4 |
 | F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 |
 | F-WRK-09 | AT-SET-11/13/15（**已完成**）、AT-FLOW-1（功法） |
 | F-WRK-11 | AT-CHK-4（物品流水）——**未交付：B3-B（item_events）** |
