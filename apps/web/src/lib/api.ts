@@ -20,6 +20,8 @@ export type ApiErrorCode =
   | 'LAST_ADMIN_PROTECTED'
   | 'EMAIL_TAKEN'
   | 'USER_LIMIT_REACHED'
+  | 'WORK_TITLE_TAKEN'
+  | 'INVALID_RULE_PACKAGE'
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR';
 
@@ -36,7 +38,9 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   LAST_ADMIN_PROTECTED: '不能停用最后一个可用管理员',
   EMAIL_TAKEN: '该邮箱已被占用',
   USER_LIMIT_REACHED: '账号数量已达上限（10 个）',
-  NOT_FOUND: '目标账号不存在',
+  WORK_TITLE_TAKEN: '你已创建过同名作品，请换一个标题',
+  INVALID_RULE_PACKAGE: '题材不可用',
+  NOT_FOUND: '目标不存在',
   INTERNAL_ERROR: '服务内部错误，请稍后重试',
 };
 
@@ -166,4 +170,69 @@ export function formatDateTime(iso: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+}
+
+/* ---------------------------------------------------------------- 作品（M2-A） */
+
+/** 作品列表项。 */
+export interface WorkSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly targetChapters: number;
+  readonly targetWordsPerChapter: number;
+  readonly genreRulePackage: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** 作品设定。 */
+export interface WorkSetting {
+  readonly settingKey: string;
+  readonly settingValue: unknown;
+  readonly schemaRef: string;
+  readonly updatedAt: string;
+}
+
+/** 作品详情。 */
+export interface WorkDetail extends WorkSummary {
+  readonly settings: readonly WorkSetting[];
+}
+
+/** 题材规则包。 */
+export interface RulePackage {
+  readonly code: string;
+  readonly name: string;
+  readonly version: string;
+  readonly active: boolean;
+}
+
+/** 读取当前作者的作品列表。 */
+export async function fetchWorks(): Promise<WorkSummary[]> {
+  const { body } = await apiRequest('/api/works');
+  return (body as { works: WorkSummary[] }).works;
+}
+
+/** 创建作品。 */
+export async function createWork(input: {
+  title: string;
+  summary?: string;
+  targetChapters?: number;
+  targetWordsPerChapter?: number;
+  genreRulePackage: string;
+}): Promise<WorkSummary> {
+  const { body } = await apiRequest('/api/works', { method: 'POST', body: input });
+  return (body as { work: WorkSummary }).work;
+}
+
+/** 读取作品详情。 */
+export async function fetchWork(workId: string): Promise<WorkDetail> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}`);
+  return (body as { work: WorkDetail }).work;
+}
+
+/** 读取可用题材（仅启用中的规则包）。 */
+export async function fetchRulePackages(): Promise<RulePackage[]> {
+  const { body } = await apiRequest('/api/works/rule-packages');
+  return (body as { rulePackages: RulePackage[] }).rulePackages;
 }

@@ -54,6 +54,9 @@ importers:
       '@novel/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@novel/works':
+        specifier: workspace:*
+        version: link:../../packages/works
       next:
         specifier: 16.4.3
         version: 16.4.3(@playwright/test@1.64.1)(@types/node@22.20.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -169,6 +172,31 @@ importers:
 
   packages/shared:
     devDependencies:
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 4.1.12
+        version: 4.1.12(@types/node@22.20.5)(vite@8.3.5(@types/node@22.20.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  packages/works:
+    dependencies:
+      '@novel/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@novel/db':
+        specifier: workspace:*
+        version: link:../db
+    devDependencies:
+      '@types/node':
+        specifier: 22.20.5
+        version: 22.20.5
+      '@types/pg':
+        specifier: 8.15.6
+        version: 8.15.6
+      pg:
+        specifier: 8.16.3
+        version: 8.16.3
       typescript:
         specifier: 5.9.3
         version: 5.9.3

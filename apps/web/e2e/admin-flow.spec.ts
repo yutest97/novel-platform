@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
+import { writeAdminPassword } from './shared-credentials.js';
 import { recordSecret, resetSecretLedger } from './secret-ledger';
 
 /**
@@ -103,6 +104,9 @@ test('3. 改密成功后管理员进入 /admin/users', async () => {
 
   await expect(adminPage).toHaveURL(/\/admin\/users/);
   await expect(adminPage.getByRole('heading', { name: '账号管理' })).toBeVisible();
+
+  // 共享改密后的口令：后续 spec 文件（作品流程、账号上限）需要用它登录管理员
+  writeAdminPassword(ADMIN_NEW_PASSWORD);
   await expect(adminPage.getByTestId('users-table')).toBeVisible();
 });
 
@@ -341,8 +345,10 @@ test('14. 会话临近到期：自动退出到登录页', async ({ browser }) =>
     await route.fulfill({ response, json });
   });
 
-  await page.goto('/workspace');
-  await expect(page.getByTestId('workspace-email')).toBeVisible();
+  // 注意：/workspace 仅限作者（M2-A 起），管理员页面同样带自动退出计时器，
+  // 因此在 /admin/users 上验证"会话临近到期 → 自动退出"。
+  await page.goto('/admin/users');
+  await expect(page.getByTestId('users-table')).toBeVisible();
 
   // 到期后应自动跳转登录页，并带上 expired 提示
   await expect(page).toHaveURL(/\/login\?reason=expired/, { timeout: 20_000 });
@@ -592,45 +598,4 @@ test('21. 改密页：服务端返回 PASSWORD_CHANGE_REQUIRED 时保持改密�
   await expect(page.getByTestId('change-password-error')).toHaveText('请先完成首次改密');
 
   await context.close();
-});
-
-test('14. 第 11 个账号：页面提示账号上限', async () => {
-  // 重新登录管理员（上一步已退出）
-  await adminPage.getByLabel('邮箱').fill(ADMIN_EMAIL);
-  await adminPage.getByLabel('密码').fill(ADMIN_NEW_PASSWORD);
-  await adminPage.getByRole('button', { name: '登录' }).click();
-  await expect(adminPage).toHaveURL(/\/admin\/users/);
-
-  // 通过接口快速补齐到 10 个账号（管理员 + 作者 + 8 个）
-  const listResponse = await adminPage.request.get('/api/admin/users');
-  const list = (await listResponse.json()) as { users: { email: string }[] };
-  const missing = 10 - list.users.length;
-  for (let index = 0; index < missing; index += 1) {
-    const response = await adminPage.request.post('/api/admin/users', {
-      headers: { origin: ORIGIN },
-      data: { email: `e2e-bulk-${index}-${Date.now().toString(36)}@example.test` },
-    });
-    expect(response.status()).toBe(201);
-  }
-
-  await adminPage.reload();
-  await expect(adminPage.getByTestId('users-table')).toBeVisible();
-
-  // 页面出现上限提示
-  await expect(adminPage.getByText('账号数量已达上限（10 个），无法继续创建。')).toBeVisible();
-
-  // 仍尝试第 11 个：服务端返回稳定错误码，页面显示中文提示
-  await adminPage
-    .getByTestId('create-email')
-    .fill(`e2e-over-${Date.now().toString(36)}@example.test`);
-  await adminPage.getByTestId('create-submit').click();
-  await expect(adminPage.getByTestId('action-error')).toHaveText('账号数量已达上限（10 个）');
-
-  const overLimit = await adminPage.request.post('/api/admin/users', {
-    headers: { origin: ORIGIN },
-    data: { email: `e2e-over-api-${Date.now().toString(36)}@example.test` },
-  });
-  expect(overLimit.status()).toBe(409);
-  const overLimitBody = (await overLimit.json()) as { error: { code: string } };
-  expect(overLimitBody.error.code).toBe('USER_LIMIT_REACHED');
 });

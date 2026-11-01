@@ -47,11 +47,14 @@ export interface RequireSession {
 }
 
 /**
- * 要求已登录（可选要求管理员）。
+ * 要求已登录（可选要求特定角色）。
  *
  * 返回 `loading` 时页面应渲染骨架，避免闪烁未授权内容。
+ *
+ * @param options.role 指定角色时，角色不符会被送回该角色的首页：
+ *   管理员 → /admin/users，作者 → /workspace。
  */
-export function useRequireSession(options: { role?: 'admin' } = {}): RequireSession {
+export function useRequireSession(options: { role?: 'admin' | 'author' } = {}): RequireSession {
   const router = useRouter();
   const requiredRole = options.role;
   const [state, setState] = useState<SessionState>({ status: 'loading' });
@@ -70,8 +73,8 @@ export function useRequireSession(options: { role?: 'admin' } = {}): RequireSess
     async (initial: boolean): Promise<void> => {
       try {
         const session = await fetchSession();
-        if (requiredRole === 'admin' && session.user.role !== 'admin') {
-          router.replace('/workspace');
+        if (requiredRole !== undefined && session.user.role !== requiredRole) {
+          router.replace(homeFor(session.user));
           return;
         }
         setState({ status: 'ready', session });
@@ -98,8 +101,8 @@ export function useRequireSession(options: { role?: 'admin' } = {}): RequireSess
   const refreshSession = useCallback(async (): Promise<void> => {
     try {
       const session = await fetchSession();
-      if (requiredRole === 'admin' && session.user.role !== 'admin') {
-        router.replace('/workspace');
+      if (requiredRole !== undefined && session.user.role !== requiredRole) {
+        router.replace(homeFor(session.user));
         return;
       }
       setState((previous) => {

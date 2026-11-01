@@ -29,6 +29,8 @@ export const AUDIT_ACTIONS = {
   USER_DISABLED: 'user.disabled',
   USER_ENABLED: 'user.enabled',
   ADMIN_PASSWORD_RESET: 'admin.password_reset',
+  WORK_CREATED: 'work.created',
+  WORK_UPDATED: 'work.updated',
 } as const;
 
 /** 审计动作类型。 */

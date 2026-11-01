@@ -1,0 +1,35 @@
+{
+  "name": "@novel/works",
+  "version": "0.1.0",
+  "private": true,
+  "description": "小说作品核心：作品、题材规则包与作品设定（M2-A）",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@novel/auth": "workspace:*",
+    "@novel/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/pg": "8.15.6",
+    "pg": "8.16.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12"
+  }
+}

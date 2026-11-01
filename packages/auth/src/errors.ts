@@ -19,6 +19,8 @@ export type AuthErrorCode =
   | 'LAST_ADMIN_PROTECTED'
   | 'EMAIL_TAKEN'
   | 'USER_LIMIT_REACHED'
+  | 'WORK_TITLE_TAKEN'
+  | 'INVALID_RULE_PACKAGE'
   | 'NOT_FOUND';
 
 /** 错误码 → HTTP 状态码。 */
@@ -34,6 +36,10 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   LAST_ADMIN_PROTECTED: 403,
   EMAIL_TAKEN: 409,
   USER_LIMIT_REACHED: 409,
+  // 稳定冲突错误：同一作者下作品标题重复
+  WORK_TITLE_TAKEN: 409,
+  // 题材规则包不存在或未启用
+  INVALID_RULE_PACKAGE: 400,
   NOT_FOUND: 404,
 };
 
@@ -55,6 +61,10 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   EMAIL_TAKEN: '该邮箱已被占用',
   // 稳定冲突错误：账号总数已达上限
   USER_LIMIT_REACHED: '账号数量已达上限',
+  // 稳定冲突错误：同一作者下作品标题重复
+  WORK_TITLE_TAKEN: '该作者下已存在同名作品',
+  // 题材无效：规则包不存在或未启用
+  INVALID_RULE_PACKAGE: '题材不可用',
   NOT_FOUND: '资源不存在',
 };
 

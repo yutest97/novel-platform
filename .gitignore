@@ -62,3 +62,5 @@ apps/web/playwright-report
 apps/web/.playwright
 # E2E 运行期口令清单（供 CI 扫描失败产物；绝不入库）
 apps/web/.e2e-secrets.txt
+# E2E 共享的管理员改密后口令（跨 spec 文件使用；绝不入库）
+apps/web/.e2e-admin-password

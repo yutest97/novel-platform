@@ -1,8 +1,10 @@
-// Prisma schema —— M1-B1 阶段：账号、登录会话与审计。
+// Prisma schema —— M1 账号体系 + M2-A 作品核心。
 //
-// 本轮**只**新增三张表：users、sessions、audit_logs。
-// 明确不包含 novels/works、chapters、facts 等 M2/M6 业务表，
-// 也不包含任何模型调用相关表。
+// 表：users、sessions、audit_logs（账号体系）、
+//     works、rule_packages、work_settings（作品核心）。
+//
+// 明确**不包含**章节、场景、人物、境界、势力、时间线、事实等业务表，
+// 也不包含任何模型调用相关表 —— 那些属于后续阶段。
 //
 // 注意：Prisma 7 起 datasource 的连接串写在 prisma.config.ts 中（不在 schema 内）。
 // 客户端产物输出到 src/generated/prisma（已在 .gitignore 中忽略，由 db:generate 生成）。
@@ -49,6 +51,7 @@ model User {
 
   sessions  Session[]
   auditLogs AuditLog[] @relation("AuditActor")
+  works     Work[]    @relation("WorkAuthor")
 
   @@map("users")
 }
@@ -95,4 +98,69 @@ model AuditLog {
   @@index([action])
   @@index([actorId])
   @@map("audit_logs")
+}
+
+/// 题材规则包（M2-A）。
+///
+/// 只描述"某个题材允许哪些设定字段"，本身不含任何玄幻字段；
+/// 玄幻相关的字段一律放在 work_settings 里，不进 works 的固定列。
+model RulePackage {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique
+  name        String
+  version     String
+  active      Boolean  @default(true)
+  fieldSchema Json     @map("field_schema")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  works Work[]
+
+  @@map("rule_packages")
+}
+
+/// 小说作品（M2-A）。
+///
+/// - 归属作者：所有查询必须带 author_id 隔离；
+/// - 同一作者下 title 唯一（不同作者可以有同名作品）；
+/// - genre_rule_package 指向 rule_packages.code，且必须是 active 的；
+/// - 本阶段**不含**章节/人物/境界等任何正文业务表。
+model Work {
+  id                    String   @id @default(uuid()) @db.Uuid
+  authorId              String   @map("author_id") @db.Uuid
+  title                 String
+  genreRulePackage      String   @map("genre_rule_package")
+  summary               String   @default("")
+  targetChapters        Int      @default(10) @map("target_chapters")
+  targetWordsPerChapter Int      @default(3000) @map("target_words_per_chapter")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  author   User          @relation("WorkAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  settings WorkSetting[]
+  rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
+
+  @@unique([authorId, title])
+  @@index([authorId, updatedAt])
+  @@map("works")
+}
+
+/// 作品设定（M2-A）。
+///
+/// 结构化设定以 (setting_key, schema_ref) 定位，值放在 jsonb 里；
+/// 题材差异通过 schema_ref 区分，**不**污染 works 的固定列。
+model WorkSetting {
+  id           String   @id @default(uuid()) @db.Uuid
+  workId       String   @map("work_id") @db.Uuid
+  settingKey   String   @map("setting_key")
+  settingValue Json     @map("setting_value")
+  schemaRef    String   @map("schema_ref")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  work Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+
+  @@unique([workId, settingKey, schemaRef])
+  @@index([workId])
+  @@map("work_settings")
 }
