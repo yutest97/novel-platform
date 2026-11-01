@@ -3,7 +3,7 @@ import { getWork, updateWork } from '@novel/works';
 
 import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
-import { optionalInteger, optionalString, rejectServerOwnedFields } from '@/work-http';
+import { optionalInteger, optionalString, rejectImmutableWorkFields } from '@/work-http';
 import { requireAuthorSession } from '@/work-guard';
 
 export const dynamic = 'force-dynamic';
@@ -46,7 +46,8 @@ export async function PATCH(
     const { id } = await context.params;
 
     const body = await readJsonObject(request);
-    rejectServerOwnedFields(body);
+    // 归属、题材与时间戳都是不可变字段：出现在请求体里一律 400，不静默忽略
+    rejectImmutableWorkFields(body);
 
     const title = optionalString(body, 'title');
     const summary = optionalString(body, 'summary');

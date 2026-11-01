@@ -33,14 +33,49 @@ export function optionalInteger(body: Record<string, unknown>, key: string): num
   return value;
 }
 
-/** 校验请求体里没有出现"服务端字段"（authorId / role 等）。 */
+/**
+ * 校验请求体里没有出现"服务端字段"（authorId / role 等）。
+ *
+ * 用于 **POST 创建**：这些字段完全由服务端决定，客户端提交一律拒绝。
+ * 注意 `genreRulePackage` 在创建时是**允许**的（要选择题材），
+ * 但在更新时不可变 —— 见 `rejectImmutableWorkFields`。
+ */
 export function rejectServerOwnedFields(body: Record<string, unknown>): void {
-  for (const key of ['authorId', 'author_id', 'role', 'id']) {
+  for (const key of SERVER_OWNED_FIELDS) {
     if (key in body) {
       throw new AuthError('VALIDATION_FAILED', `字段 ${key} 由服务端决定，不能提交`);
     }
   }
 }
+
+/**
+ * 校验请求体里没有出现**不可变字段**（仅用于 PATCH 更新）。
+ *
+ * 作品的归属与题材在创建后**不可更改**；时间戳由服务端维护。
+ * 这些字段一旦出现在请求体里，一律 400 —— **不静默忽略**，
+ * 否则客户端会以为改动生效了。
+ */
+export function rejectImmutableWorkFields(body: Record<string, unknown>): void {
+  for (const key of IMMUTABLE_WORK_FIELDS) {
+    if (key in body) {
+      throw new AuthError('VALIDATION_FAILED', `字段 ${key} 不可修改`);
+    }
+  }
+}
+
+/** 服务端决定、客户端不可提交的字段。 */
+const SERVER_OWNED_FIELDS = ['authorId', 'author_id', 'role', 'id'] as const;
+
+/** PATCH 时不可修改的字段（含题材与时间戳）。 */
+const IMMUTABLE_WORK_FIELDS = [
+  ...SERVER_OWNED_FIELDS,
+  'genreRulePackage',
+  'genre_rule_package',
+  'createdAt',
+  'created_at',
+  'updatedAt',
+  'updated_at',
+] as const;
 
 /** 作品列表响应。 */
 export function worksResponse(works: readonly unknown[]): Response {

@@ -1,10 +1,30 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import { recordSecret, resetSecretLedger } from '../e2e/secret-ledger.js';
+
+/** 仓库根目录（vitest 的工作目录是 apps/web）。 */
+const repoRoot = resolve(process.cwd(), '../..');
+
+/** 失败产物扫描脚本。 */
+const scanScript = join(repoRoot, 'scripts', 'verify-no-plaintext-secrets.sh');
+
+/** 运行扫描脚本，返回标准输出。 */
+function runScan(
+  env: Record<string, string>,
+  scanDirs: string[],
+): { stdout: string; status: number | null } {
+  const result = spawnSync('bash', [scanScript, ...scanDirs], {
+    cwd: repoRoot,
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+  });
+  return { stdout: result.stdout ?? '', status: result.status };
+}
 
 /**
  * E2E 口令清单（M1-B3-REV-02）。
@@ -84,5 +104,55 @@ describe('E2E 口令清单', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('清单中的口令能被扫描脚本识别，并删除含明文口令的失败产物', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'secret-scan-'));
+    const ledger = join(dir, 'secrets.txt');
+    const artifacts = join(dir, 'artifacts');
+    mkdirSync(artifacts);
+
+    const secret = 'Dynamic-Runtime-Password-Value';
+    const dirty = join(artifacts, 'error-context.md');
+    const clean = join(artifacts, 'notes.md');
+    writeFileSync(dirty, `- textbox "密码": ${secret}\n`, { encoding: 'utf8' });
+    writeFileSync(clean, '没有任何口令\n', { encoding: 'utf8' });
+
+    // 模拟 E2E 运行期写入口令清单
+    recordSecret(secret, ledger);
+    expect(readFileSync(ledger, 'utf8')).toContain(secret);
+
+    const { stdout, status } = runScan({ SECRET_LEDGER: ledger }, [artifacts]);
+    expect(status).toBe(0);
+    expect(stdout).toContain('已删除含明文口令的产物');
+
+    // 含口令的产物被删除，干净文件保留，清单文件本身也被清理
+    expect(existsSync(dirty)).toBe(false);
+    expect(existsSync(clean)).toBe(true);
+    expect(existsSync(ledger)).toBe(false);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('共享管理员口令文件参与扫描并在扫描后被删除', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'secret-admin-'));
+    const adminFile = join(dir, '.e2e-admin-password');
+    const artifacts = join(dir, 'artifacts');
+    mkdirSync(artifacts);
+
+    const adminPassword = 'Shared-Admin-Password-Value';
+    writeFileSync(adminFile, `${adminPassword}\n`, { encoding: 'utf8' });
+    const dirty = join(artifacts, 'error-context.md');
+    writeFileSync(dirty, `- textbox "密码": ${adminPassword}\n`, { encoding: 'utf8' });
+
+    const { stdout, status } = runScan({ ADMIN_PASSWORD_FILE: adminFile }, [artifacts]);
+    expect(status).toBe(0);
+    expect(stdout).toContain('已读取并清除共享管理员口令');
+
+    expect(existsSync(dirty)).toBe(false);
+    // 共享口令文件本身不会留在工作区
+    expect(existsSync(adminFile)).toBe(false);
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });

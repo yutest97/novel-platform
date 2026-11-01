@@ -222,6 +222,10 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
 - 守卫：未登录 → `/login`；账号停用 → `/login?reason=disabled`；
   首登未改密 → `/change-password`；作者访问管理页 → `/workspace`。
 
+> **关于 Caddy 配置的说明**：`infra/docker/caddy/Caddyfile` 是本项目**自己的实现说明**
+> （在官方 Caddy 文档之外补充的项目约定），不是 Caddy 官方文档的复制品。
+> 官方语法参考 <https://caddyserver.com/docs/caddyfile>。
+
 ### 会话失效与弹窗行为（REV-01）
 
 会话失效的统一处理集中在 `apps/web/src/lib/session-errors.ts`：
@@ -282,7 +286,7 @@ API（全部只允许 active、已改密的**作者**，作者身份只从会话
 | `/api/works`               | GET   | 列出**当前作者**的作品，按更新时间倒序                                                                                                             |
 | `/api/works`               | POST  | 创建作品；标题去首尾空白；章数默认 10（1—100）、单章字数默认 3000（1200—10000）；题材必须来自启用中的规则包；同作者重复标题 `409 WORK_TITLE_TAKEN` |
 | `/api/works/:id`           | GET   | 作品详情 + 安全的作品设定；**非所有者一律 404**（不泄露是否存在）                                                                                  |
-| `/api/works/:id`           | PATCH | 改标题/简介/两个目标值；`authorId`、`genreRulePackage` 由服务端掌握，客户端提交会被拒绝                                                            |
+| `/api/works/:id`           | PATCH | 改标题/简介/两个目标值；`authorId`、`genreRulePackage`、`createdAt`、`updatedAt` 等**不可变字段**出现在请求体里一律 400（不静默忽略）              |
 | `/api/works/rule-packages` | GET   | 可用题材（只返回启用中的）                                                                                                                         |
 
 - 管理员**不能**通过作品接口读取或修改作者作品（角色不符 → 403）；
@@ -297,6 +301,9 @@ API（全部只允许 active、已改密的**作者**，作者身份只从会话
 | ------------ | ------------------------------------------------------------------------------------------------ |
 | `/workspace` | 作者作品工作台：账号信息、创建作品表单、作品列表卡片；题材固定显示「玄幻升级」；不显示管理员入口 |
 | `/works/:id` | 作品基础信息 + 作品设定占位；明确提示人物/境界/卷纲/章节后续开放；无伪造编辑器或生成按钮         |
+
+> 作品详情当前直接显示题材**代码**（`xuanhuan`）。把它映射成规则包名称
+> （如「玄幻升级」）留待后续阶段实现 —— 本轮不强制。
 
 ### 浏览器 E2E（Playwright Chromium）
 

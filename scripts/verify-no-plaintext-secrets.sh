@@ -18,6 +18,10 @@
 #                  则清单文件里的每一行也会作为待扫描口令）
 #   SECRET_LEDGER  口令清单文件（E2E 运行期生成，扫描后删除；默认
 #                  apps/web/.e2e-secrets.txt，存在即读取）
+#   ADMIN_PASSWORD_FILE 共享管理员口令文件（E2E 运行期生成；默认
+#                  apps/web/.e2e-admin-password）。它的内容也参与扫描，
+#                  文件本身在扫描后删除 —— 这样管理员改密后的口令
+#                  不会遗留在工作区里。
 #   SCAN_DIRS      扫描目录（空格分隔，默认 test-results / playwright-report / 截图目录）
 set -euo pipefail
 
@@ -26,16 +30,36 @@ cd "$REPO_ROOT"
 
 SECRET_VALUES="${SECRET_VALUES:-}"
 SECRET_LEDGER="${SECRET_LEDGER:-apps/web/.e2e-secrets.txt}"
+ADMIN_PASSWORD_FILE="${ADMIN_PASSWORD_FILE:-apps/web/.e2e-admin-password}"
+
+# 删除文件：优先用 node。
+# 某些环境（Windows + Git Bash）会对 `rm` 拦截带盘符的绝对路径，
+# 而口令文件必须被删除 —— 因此用 node 的 fs.rmSync 兜底。
+remove_file() {
+  local target="$1"
+  if command -v node >/dev/null 2>&1; then
+    node -e "require('fs').rmSync(process.argv[1], { force: true });" "$target" 2>/dev/null && return 0
+  fi
+  rm -f "$target" 2>/dev/null || true
+}
 
 # 合并口令清单：清单文件里每行一个口令
 ledger_values=""
 if [ -f "$SECRET_LEDGER" ]; then
   ledger_values="$(tr '\n' ' ' < "$SECRET_LEDGER")"
-  rm -f "$SECRET_LEDGER"
+  remove_file "$SECRET_LEDGER"
   echo "[secrets] 已读取并清除口令清单：$SECRET_LEDGER"
 fi
 
-ALL_SECRETS="${SECRET_VALUES} ${ledger_values}"
+# 共享管理员口令：既参与扫描，也在扫描后删除
+admin_values=""
+if [ -f "$ADMIN_PASSWORD_FILE" ]; then
+  admin_values="$(tr -d '\r\n' < "$ADMIN_PASSWORD_FILE")"
+  remove_file "$ADMIN_PASSWORD_FILE"
+  echo "[secrets] 已读取并清除共享管理员口令：$ADMIN_PASSWORD_FILE"
+fi
+
+ALL_SECRETS="${SECRET_VALUES} ${ledger_values} ${admin_values}"
 if [ -z "${ALL_SECRETS// }" ]; then
   echo "[secrets] 未提供任何口令，跳过扫描。"
   exit 0
@@ -66,7 +90,7 @@ for dir in $SCAN_DIRS; do
     done
 
     if [ "$hit" = "1" ]; then
-      rm -f "$file"
+      remove_file "$file"
       removed=$((removed + 1))
       echo "[secrets] ⚠ 已删除含明文口令的产物：$file"
     fi

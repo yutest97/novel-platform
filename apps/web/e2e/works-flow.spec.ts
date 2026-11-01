@@ -111,6 +111,10 @@ test('1. 管理员创建的两个作者都能登录并完成首登改密', async
   await login(page, AUTHOR_A_EMAIL, authorAInitialPassword);
   await expect(page).toHaveURL(/\/change-password/);
 
+  // 新口令是运行时生成的：使用前必须记入口令清单，
+  // 否则失败快照里可能出现它的明文。
+  recordSecret(AUTHOR_A_NEW_PASSWORD);
+
   await page.getByLabel('当前密码').fill(authorAInitialPassword);
   await page.getByLabel('新密码', { exact: true }).fill(AUTHOR_A_NEW_PASSWORD);
   await page.getByLabel('确认新密码').fill(AUTHOR_A_NEW_PASSWORD);
@@ -185,9 +189,14 @@ test('4. 作者 B 看不到作者 A 的作品，直接访问其作品详情也�
   // B 首次登录需要改密
   await login(page, AUTHOR_B_EMAIL, authorBInitialPassword);
   await expect(page).toHaveURL(/\/change-password/);
+
+  // 改密后的口令同样是运行时拼出来的，必须记入口令清单
+  const authorBChangedPassword = `${authorBInitialPassword}-changed`;
+  recordSecret(authorBChangedPassword);
+
   await page.getByLabel('当前密码').fill(authorBInitialPassword);
-  await page.getByLabel('新密码', { exact: true }).fill(`${authorBInitialPassword}-changed`);
-  await page.getByLabel('确认新密码').fill(`${authorBInitialPassword}-changed`);
+  await page.getByLabel('新密码', { exact: true }).fill(authorBChangedPassword);
+  await page.getByLabel('确认新密码').fill(authorBChangedPassword);
   await page.getByRole('button', { name: '提交' }).click();
   await expect(page).toHaveURL(/\/workspace/);
 
@@ -293,7 +302,50 @@ test('8. 移动端 390×844：创建作品并查看列表', async ({ browser }) 
   await context.close();
 });
 
-test('9. 页面不出现人物、章节或 AI 生成入口', async ({ browser }) => {
+test('9. PATCH 不可变字段被服务端拒绝（400），作品不被改动', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await login(page, AUTHOR_A_EMAIL, AUTHOR_A_NEW_PASSWORD);
+  await expect(page).toHaveURL(/\/workspace/);
+
+  // 通过接口直接 PATCH：不可变字段一律 400，不静默忽略
+  const forbiddenBodies: Record<string, unknown>[] = [
+    { authorId: randomUUID() },
+    { author_id: randomUUID() },
+    { role: 'admin' },
+    { id: randomUUID() },
+    { genreRulePackage: 'xuanhuan' },
+    { genre_rule_package: 'xuanhuan' },
+    { createdAt: '2020-01-01T00:00:00.000Z' },
+    { created_at: '2020-01-01T00:00:00.000Z' },
+    { updatedAt: '2020-01-01T00:00:00.000Z' },
+    { updated_at: '2020-01-01T00:00:00.000Z' },
+  ];
+
+  for (const body of forbiddenBodies) {
+    const response = await page.request.patch(`/api/works/${authorAWorkId}`, {
+      headers: { origin: ORIGIN },
+      data: body,
+    });
+    expect(response.status(), `字段 ${Object.keys(body)[0]} 应当被拒绝`).toBe(400);
+    const parsed = (await response.json()) as { error: { code: string } };
+    expect(parsed.error.code).toBe('VALIDATION_FAILED');
+  }
+
+  // 作品本身没被改动：仍可正常读取，标题与题材保持原值
+  const detail = await page.request.get(`/api/works/${authorAWorkId}`);
+  expect(detail.status()).toBe(200);
+  const parsed = (await detail.json()) as {
+    work: { title: string; genreRulePackage: string };
+  };
+  expect(parsed.work.title).toBe(WORK_TITLE);
+  expect(parsed.work.genreRulePackage).toBe('xuanhuan');
+
+  await context.close();
+});
+
+test('10. 页面不出现人物、章节或 AI 生成入口', async ({ browser }) => {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();
 

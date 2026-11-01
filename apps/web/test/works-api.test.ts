@@ -48,7 +48,7 @@ async function createUser(role: 'author' | 'admin'): Promise<TestUser> {
 function jsonRequest(
   path: string,
   body: unknown,
-  options: { token?: string; origin?: string } = {},
+  options: { token?: string; origin?: string; method?: string } = {},
 ): Request {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (options.token !== undefined) {
@@ -58,7 +58,7 @@ function jsonRequest(
     headers['origin'] = options.origin;
   }
   return new Request(`http://127.0.0.1:3000${path}`, {
-    method: 'POST',
+    method: options.method ?? 'POST',
     headers,
     body: JSON.stringify(body),
   });
@@ -254,7 +254,7 @@ describe('作品接口（M2-A）', () => {
       jsonRequest(
         `/api/works/${work.id}`,
         { title: '改过的标题', targetChapters: 25 },
-        { token: author.token, origin: ORIGIN },
+        { token: author.token, origin: ORIGIN, method: 'PATCH' },
       ),
       { params: Promise.resolve({ id: work.id }) },
     );
@@ -268,7 +268,7 @@ describe('作品接口（M2-A）', () => {
       jsonRequest(
         `/api/works/${work.id}`,
         { authorId: other.id },
-        { token: author.token, origin: ORIGIN },
+        { token: author.token, origin: ORIGIN, method: 'PATCH' },
       ),
       { params: Promise.resolve({ id: work.id }) },
     );
@@ -277,6 +277,97 @@ describe('作品接口（M2-A）', () => {
     const row = await db.work.findUniqueOrThrow({ where: { id: work.id } });
     expect(row.authorId).toBe(author.id);
     expect(row.genreRulePackage).toBe('xuanhuan');
+  });
+
+  it('PATCH 不可变字段一律 400，且不静默忽略', async () => {
+    const author = await createUser('author');
+    const other = await createUser('author');
+
+    const created = await createWorkRoute(
+      jsonRequest(
+        '/api/works',
+        { title: `不可变字段-${randomUUID()}`, genreRulePackage: 'xuanhuan' },
+        { token: author.token, origin: ORIGIN },
+      ),
+    );
+    const { work } = (await created.json()) as { work: { id: string } };
+
+    // 逐个尝试提交不可变字段：全部必须 400 VALIDATION_FAILED
+    const forbiddenBodies: { label: string; body: Record<string, unknown> }[] = [
+      { label: 'authorId', body: { authorId: other.id } },
+      { label: 'author_id', body: { author_id: other.id } },
+      { label: 'role', body: { role: 'admin' } },
+      { label: 'id', body: { id: randomUUID() } },
+      { label: 'genreRulePackage', body: { genreRulePackage: 'xuanhuan' } },
+      { label: 'genre_rule_package', body: { genre_rule_package: 'xuanhuan' } },
+      { label: 'createdAt', body: { createdAt: '2020-01-01T00:00:00.000Z' } },
+      { label: 'created_at', body: { created_at: '2020-01-01T00:00:00.000Z' } },
+      { label: 'updatedAt', body: { updatedAt: '2020-01-01T00:00:00.000Z' } },
+      { label: 'updated_at', body: { updated_at: '2020-01-01T00:00:00.000Z' } },
+    ];
+
+    for (const item of forbiddenBodies) {
+      const response = await updateWorkRoute(
+        jsonRequest(`/api/works/${work.id}`, item.body, {
+          token: author.token,
+          origin: ORIGIN,
+          method: 'PATCH',
+        }),
+        { params: Promise.resolve({ id: work.id }) },
+      );
+      expect(response.status, `字段 ${item.label} 应当被拒绝`).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code, `字段 ${item.label} 应当返回 VALIDATION_FAILED`).toBe(
+        'VALIDATION_FAILED',
+      );
+    }
+
+    // 原作品完全没变：归属、题材、时间戳都保持原值
+    const row = await db.work.findUniqueOrThrow({ where: { id: work.id } });
+    expect(row.authorId).toBe(author.id);
+    expect(row.genreRulePackage).toBe('xuanhuan');
+    expect(row.createdAt.toISOString()).toBe(row.createdAt.toISOString());
+  });
+
+  it('PATCH 合法字段可以生效（与不可变字段形成对照）', async () => {
+    const author = await createUser('author');
+
+    const created = await createWorkRoute(
+      jsonRequest(
+        '/api/works',
+        { title: `可更新-${randomUUID()}`, genreRulePackage: 'xuanhuan' },
+        { token: author.token, origin: ORIGIN },
+      ),
+    );
+    const { work } = (await created.json()) as { work: { id: string } };
+
+    const patched = await updateWorkRoute(
+      jsonRequest(
+        `/api/works/${work.id}`,
+        { title: '改过的标题', summary: '改过的简介', targetWordsPerChapter: 5000 },
+        { token: author.token, origin: ORIGIN, method: 'PATCH' },
+      ),
+      { params: Promise.resolve({ id: work.id }) },
+    );
+    expect(patched.status).toBe(200);
+    const body = (await patched.json()) as {
+      work: { title: string; summary: string; targetWordsPerChapter: number };
+    };
+    expect(body.work.title).toBe('改过的标题');
+    expect(body.work.summary).toBe('改过的简介');
+    expect(body.work.targetWordsPerChapter).toBe(5000);
+  });
+
+  it('POST 仍允许 genreRulePackage（创建时要选题材）', async () => {
+    const author = await createUser('author');
+    const response = await createWorkRoute(
+      jsonRequest(
+        '/api/works',
+        { title: `题材可选-${randomUUID()}`, genreRulePackage: 'xuanhuan' },
+        { token: author.token, origin: ORIGIN },
+      ),
+    );
+    expect(response.status).toBe(201);
   });
 
   it('响应体不含 passwordHash、authorId 等敏感字段', async () => {

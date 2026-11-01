@@ -279,6 +279,8 @@
 | AT-WORK-4 | **跨作者访问** | 作者 B 通过 id 访问作者 A 的作品（读或改）一律 404，不泄露作品是否存在 |
 | AT-WORK-5 | **审计原子性** | 创建与更新与 `work.created`/`work.updated` 同事务；审计写失败则作品回滚；detail 不含简介与正文 |
 | AT-WORK-6 | **不可越权修改** | 更新不允许改 `authorId` 与 `genreRulePackage`；管理员不能通过作品接口读取或修改作者作品 |
+| AT-WORK-6b | **PATCH 不可变字段** | `authorId`/`author_id`/`role`/`id`/`genreRulePackage`/`genre_rule_package`/`createdAt`/`created_at`/`updatedAt`/`updated_at` 出现在 PATCH 请求体里一律 `400 VALIDATION_FAILED`，**不静默忽略**；作品不被改动；POST 仍允许 `genreRulePackage` |
+| AT-WORK-6c | **E2E 动态口令入清单** | 运行期生成/拼接的口令（作者初始口令、改密后口令、共享管理员口令）在使用前记入口令清单；失败产物扫描能识别并删除含这些口令的文件；共享管理员口令文件在扫描后被删除 |
 | AT-WORK-7 | **工作台页面** | `/workspace` 展示账号信息、创建表单与作品列表卡片；题材固定显示「玄幻升级」；不显示管理员入口 |
 | AT-WORK-8 | **作品详情页** | `/works/:id` 只显示基础信息与设定占位；明确提示人物/境界/卷纲/章节后续开放；无伪造编辑器或生成入口 |
 
