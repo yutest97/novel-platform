@@ -329,21 +329,95 @@ API（全部只允许 active、已改密的**作者**，作者身份只从会话
 
 API（全部要求 active、已改密的作者会话；管理员 403；他人作品 404）：
 
-| 接口                                       | 方法   | 说明                                                                                          |
-| ------------------------------------------ | ------ | --------------------------------------------------------------------------------------------- |
-| `/api/works/:id/settings`                  | GET    | 作品方向 + 规则包公开 schema 摘要 + 境界体系列表                                              |
-| `/api/works/:id/settings`                  | PATCH  | 更新作品方向；字段必须符合 field_schema；不可变字段（规则包 code / schemaRef / 归属）一律 400 |
-| `/api/works/:id/entities?type=realm_level` | GET    | 列出实体，按 `order_index` 升序                                                               |
-| `/api/works/:id/entities`                  | POST   | 新建实体（第一版只开放 `realm_level`）；同作品同类型重名 `409 ENTITY_NAME_TAKEN`              |
-| `/api/works/:id/entities/:entityId`        | PATCH  | 编辑实体（追加版本快照）；`id`/`workId`/`entityType` 等不可变                                 |
-| `/api/works/:id/entities/:entityId`        | DELETE | 软删除；被引用时 `409 ENTITY_IN_USE`                                                          |
-| `/api/works/:id/entities/reorder`          | PUT    | 排序：只接受完整、无重复、全部属于当前作品的集合                                              |
+| 接口                                        | 方法   | 说明                                                                                          |
+| ------------------------------------------- | ------ | --------------------------------------------------------------------------------------------- |
+| `/api/works/:id/settings`                   | GET    | 作品方向 + 规则包公开 schema 摘要 + **`entityGroups`**（按类型分区）                          |
+| `/api/works/:id/settings`                   | PATCH  | 更新作品方向；字段必须符合 field_schema；不可变字段（规则包 code / schemaRef / 归属）一律 400 |
+| `/api/works/:id/entities?type=<entityType>` | GET    | 列出实体，按 `order_index` 升序；类型必须是规则包声明且本轮支持的类型                         |
+| `/api/works/:id/entities`                   | POST   | 新建实体；同作品同类型重名 `409 ENTITY_NAME_TAKEN`                                            |
+| `/api/works/:id/entities/:entityId`         | PATCH  | 编辑实体（追加版本快照）；`id`/`workId`/`entityType`/`orderIndex` 等不可变                    |
+| `/api/works/:id/entities/:entityId`         | DELETE | 软删除；被引用时 `409 ENTITY_IN_USE`（附安全引用摘要）                                        |
+| `/api/works/:id/entities/reorder`           | PUT    | 排序：只接受完整、无重复、全部属于当前作品的**同类型**集合                                    |
 
 - 写接口校验 Origin；写操作与审计**同事务**（`settings.updated` / `entity.created` /
   `entity.updated` / `entity.deleted` / `entity.reordered`）；
 - 审计 detail 只记录 workId / entityId / entityType / **字段名**，不记录完整设定值；
 - 页面 `/works/:id/settings`：作品方向（标签与帮助文本来自 schema）+ 境界体系
   （新增 / 编辑 / 软删除 / 上下移动）；作品详情页有「进入设定中心」入口。
+
+### 势力与人物（M2-B2，B2-A 后端契约）
+
+迁移：`packages/db/prisma/migrations/20261102000000_m2b2_character_faction/`。
+规则包升级到 **xuanhuan@3.0.0**（`field_schema.version = 3`，所有字段组 `schemaRef = xuanhuan@3.0.0`）。
+
+**存量数据升级口径**：只把 `work_settings` / `entity_attributes` 中
+`xuanhuan@2.0.0` 的行改为 `xuanhuan@3.0.0`。
+`xuanhuan@1.0.0` 是 M2-A 时代的历史契约行，升级前后都不可见，
+**不迁移、不删除、不重新暴露**（有测试证明其行数与内容不变）。
+因为唯一索引是 `(work_id, setting_key, schema_ref)`，某键同时存在
+1.0.0 与 2.0.0 两行时，把 2.0.0 改成 3.0.0 不会冲突，所以迁移**不需要 DELETE 合并**。
+
+本轮新增两类实体（`realm_level` 保持不变）：
+
+| 实体类型    | 字段（按 order）                                                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `faction`   | `type`(enum，必填：sect/family/dynasty/alliance/guild/other)、`tier`、`headquarters`、`powerRating`、`allies`(entityRefs→faction)、`enemies`(entityRefs→faction)、`description` |
+| `character` | `identity`、`personality`、`goal`、`secret`、`secretKnownBy`(entityRefs→character)、`initialRealm`(entityRef→realm_level)、`faction`(entityRef→faction)                         |
+
+姓名仍来自 `entities.name`；两类实体的业务字段全部**可选**（`faction.type` 必填）。
+`enum` 入库值是 `value`（ASCII），`label` 仅用于展示。
+
+**字段类型**：`string | text | integer | enum | entityRef | entityRefs`。
+`entityRef` 存单个实体 UUID；`entityRefs` 存 UUID 数组（保持输入顺序，硬上限 50，
+重复值直接 400 而不静默去重，空数组表示清空）。
+
+**引用校验**（作品级 advisory lock 内、同一事务）：
+目标必须存在、未软删除、属于同一作品、`entity_type` 等于字段的 `refType`；
+禁止引用自身。不存在 / 已删除 / 跨作品**统一**返回「引用目标不存在」，
+不泄露其它作品是否存在。`refType` 未在规则包 `entityTypes` 中声明时按
+`INVALID_RULE_PACKAGE` 处理。
+
+**删除保护**：只扫描当前契约、且规则包声明为 `entityRef`/`entityRefs` 的属性
+（自由文本与旧契约属性不算引用）；只统计仍存活、同作品的引用者。
+被引用时返回 `409 ENTITY_IN_USE` 并附安全摘要：
+
+```json
+{
+  "error": {
+    "code": "ENTITY_IN_USE",
+    "message": "该实体当前被引用，无法删除",
+    "references": {
+      "total": 1,
+      "items": [{ "id": "…", "entityType": "character", "name": "林青" }]
+    }
+  }
+}
+```
+
+`items` 最多 20 条，只含 `id` / `entityType` / `name` —— **不含属性值、秘密或正文**。
+允许互相引用（双方都会删除失败，作者需先编辑其中一方解除引用）。
+
+**设定中心响应改为规范化的 `entityGroups`**（`realms` 字段已移除，不保留别名）：
+
+```json
+{ "settings": { "workId": "…", "workTitle": "…", "direction": { },
+  "schema": { "code": "xuanhuan", "version": "3.0.0", "entityTypes": [ … ] },
+  "entityGroups": [
+    { "entityType": "realm_level", "title": "境界体系", "schemaRef": "xuanhuan@3.0.0", "order": 1, "entities": [ … ] },
+    { "entityType": "faction", "title": "势力", "schemaRef": "xuanhuan@3.0.0", "order": 2, "entities": [ … ] },
+    { "entityType": "character", "title": "人物", "schemaRef": "xuanhuan@3.0.0", "order": 3, "entities": [ … ] }
+  ] } }
+```
+
+`entityGroups` 按组级 `order` 升序；组内 `entities` 按 `order_index` 升序；
+只包含规则包已声明且本轮启用 CRUD 的类型。
+每个类型有**独立的** `order_index`（各自 1..N），排序不会互相影响。
+
+**未交付项（不得标记完成）**：`F-WRK-15 人物「当前知道/不知道」信息清单`
+**仍由 M6 事实版本系统交付**，依赖 `fact_id` + 事实版本
+（`03-data-model.md` §3.11 `knowledge_marks`）。
+本轮 `character.secretKnownBy` 只表示**设定层「谁知道这个秘密」**，
+不构成事实级认知模型，也不等同于 F-WRK-15。
 
 ### 浏览器 E2E（Playwright Chromium）
 

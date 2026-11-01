@@ -10,8 +10,29 @@
 
 import { AuthError } from '@novel/auth';
 
+import { isUuid } from './ids.js';
+
+/**
+ * entityRefs 的**统一硬上限**。
+ *
+ * 即使规则包把 `maxItems` 写得更大，也按此值封顶 ——
+ * 避免单个请求把无限多的引用塞进一行 jsonb。
+ */
+export const MAX_ENTITY_REFS = 50;
+
 /** 支持的字段类型。 */
-export type FieldType = 'string' | 'text' | 'integer';
+export type FieldType = 'string' | 'text' | 'integer' | 'enum' | 'entityRef' | 'entityRefs';
+
+/** 引用类字段类型（值是实体 UUID）。 */
+export function isReferenceFieldType(type: FieldType): boolean {
+  return type === 'entityRef' || type === 'entityRefs';
+}
+
+/** enum 的一个选项：`value` 入库、`label` 仅展示。 */
+export interface EnumOption {
+  readonly value: string;
+  readonly label: string;
+}
 
 /** 单个字段定义。 */
 export interface FieldDefinition {
@@ -24,12 +45,20 @@ export interface FieldDefinition {
   readonly maxLength?: number;
   readonly min?: number;
   readonly max?: number;
+  /** type=enum 时的可选值集合（value 为入库值）。 */
+  readonly options?: readonly EnumOption[];
+  /** type=entityRef / entityRefs 时的目标实体类型。 */
+  readonly refType?: string;
+  /** type=entityRefs 时的元素个数上限。 */
+  readonly maxItems?: number;
 }
 
 /** 一组字段定义（作品方向或某个实体类型）。 */
 export interface FieldGroup {
   readonly title: string;
   readonly schemaRef: string;
+  /** 分组展示顺序（实体类型之间）；缺省排到最后。 */
+  readonly order?: number;
   readonly fields: readonly FieldDefinition[];
 }
 
@@ -61,7 +90,14 @@ function parseField(raw: unknown): FieldDefinition | null {
   if (typeof key !== 'string' || typeof label !== 'string') {
     return null;
   }
-  if (type !== 'string' && type !== 'text' && type !== 'integer') {
+  if (
+    type !== 'string' &&
+    type !== 'text' &&
+    type !== 'integer' &&
+    type !== 'enum' &&
+    type !== 'entityRef' &&
+    type !== 'entityRefs'
+  ) {
     return null;
   }
 
@@ -75,6 +111,9 @@ function parseField(raw: unknown): FieldDefinition | null {
     maxLength?: number;
     min?: number;
     max?: number;
+    options?: readonly EnumOption[];
+    refType?: string;
+    maxItems?: number;
   } = {
     key,
     label,
@@ -95,6 +134,29 @@ function parseField(raw: unknown): FieldDefinition | null {
   if (typeof item['max'] === 'number') {
     definition.max = item['max'];
   }
+  if (typeof item['refType'] === 'string') {
+    definition.refType = item['refType'];
+  }
+  if (typeof item['maxItems'] === 'number') {
+    definition.maxItems = item['maxItems'];
+  }
+
+  const rawOptions = item['options'];
+  if (Array.isArray(rawOptions)) {
+    const options: EnumOption[] = [];
+    for (const entry of rawOptions) {
+      if (typeof entry !== 'object' || entry === null) {
+        continue;
+      }
+      const option = entry as Record<string, unknown>;
+      const value = option['value'];
+      const optionLabel = option['label'];
+      if (typeof value === 'string' && typeof optionLabel === 'string') {
+        options.push({ value, label: optionLabel });
+      }
+    }
+    definition.options = options;
+  }
 
   return definition;
 }
@@ -114,11 +176,20 @@ function parseGroup(raw: unknown): FieldGroup | null {
     .filter((entry): entry is FieldDefinition => entry !== null)
     .sort((a, b) => a.order - b.order);
 
-  return {
+  const group: {
+    title: string;
+    schemaRef: string;
+    order?: number;
+    fields: readonly FieldDefinition[];
+  } = {
     title: typeof item['title'] === 'string' ? item['title'] : '',
     schemaRef: typeof item['schemaRef'] === 'string' ? item['schemaRef'] : '',
     fields,
   };
+  if (typeof item['order'] === 'number') {
+    group.order = item['order'];
+  }
+  return group;
 }
 
 /** 解析完整的 field_schema。 */
@@ -199,7 +270,10 @@ export function workDirectionGroup(rulePackage: { fieldSchema: unknown }): Field
  * - 必填字段缺失或为空 → 400；
  * - 类型不符 → 400；
  * - 整数越界、字符串超长 → 400；
- * - 可选字段未提供 → 不写入（调用方负责合并）。
+ * - enum 取值不在规则包选项内 → 400；
+ * - entityRef / entityRefs 必须是 UUID 形态（**存在性由服务层在事务内另校验**）；
+ * - entityRefs 出现重复 UUID → 400（不静默去重）；超过上限 → 400；
+ * - 可选字段未提供或为空 → 不写入（调用方负责合并）。
  *
  * @returns 规范化后的值（只含已定义且有值的字段）
  */
@@ -207,7 +281,7 @@ export function validateFields(
   group: FieldGroup,
   values: Record<string, unknown>,
   options: { requireAll?: boolean } = {},
-): Record<string, string | number> {
+): Record<string, string | number | string[]> {
   const known = new Set(group.fields.map((field) => field.key));
   for (const key of Object.keys(values)) {
     if (!known.has(key)) {
@@ -215,7 +289,7 @@ export function validateFields(
     }
   }
 
-  const result: Record<string, string | number> = {};
+  const result: Record<string, string | number | string[]> = {};
   for (const field of group.fields) {
     const raw = values[field.key];
     const missing = raw === undefined || raw === null || raw === '';
@@ -238,6 +312,47 @@ export function validateFields(
         throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 不能大于 ${field.max}`);
       }
       result[field.key] = raw;
+      continue;
+    }
+
+    if (field.type === 'enum') {
+      if (typeof raw !== 'string') {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 必须是字符串`);
+      }
+      const allowed = (field.options ?? []).map((option) => option.value);
+      if (!allowed.includes(raw)) {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 的取值不在允许范围内`);
+      }
+      result[field.key] = raw;
+      continue;
+    }
+
+    if (field.type === 'entityRef') {
+      if (typeof raw !== 'string' || !isUuid(raw)) {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 必须是实体 id`);
+      }
+      result[field.key] = raw;
+      continue;
+    }
+
+    if (field.type === 'entityRefs') {
+      if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string' || !isUuid(item))) {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 必须是实体 id 数组`);
+      }
+      // 空数组 = 清空该字段（不写行）
+      if (raw.length === 0) {
+        continue;
+      }
+      const limit = Math.min(field.maxItems ?? MAX_ENTITY_REFS, MAX_ENTITY_REFS);
+      if (raw.length > limit) {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 最多 ${limit} 项`);
+      }
+      // 重复不静默去重：直接拒绝，避免调用方误以为写入成功
+      if (new Set(raw).size !== raw.length) {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 存在重复项`);
+      }
+      // 保持输入顺序
+      result[field.key] = [...(raw as string[])];
       continue;
     }
 

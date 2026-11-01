@@ -1,5 +1,5 @@
 import { assertTrustedOrigin, readClientIp } from '@novel/auth';
-import { ALLOWED_ENTITY_TYPE, createEntity, listEntities } from '@novel/works';
+import { DEFAULT_ENTITY_TYPE, createEntity, listEntities } from '@novel/works';
 
 import { authErrorResponse, authJson, readJsonObject, requireString } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
@@ -26,7 +26,7 @@ export async function GET(
     const { id } = await context.params;
 
     const url = new URL(request.url);
-    const entityType = url.searchParams.get('type') ?? ALLOWED_ENTITY_TYPE;
+    const entityType = url.searchParams.get('type') ?? DEFAULT_ENTITY_TYPE;
 
     const entities = await listEntities(db(), {
       workId: id,

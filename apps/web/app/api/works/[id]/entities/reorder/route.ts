@@ -1,5 +1,5 @@
 import { assertTrustedOrigin, readClientIp } from '@novel/auth';
-import { ALLOWED_ENTITY_TYPE, reorderEntities } from '@novel/works';
+import { DEFAULT_ENTITY_TYPE, reorderEntities } from '@novel/works';
 
 import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
@@ -40,7 +40,7 @@ export async function PUT(
     rejectUnknownFields(body, REORDER_FIELDS);
 
     const entityType =
-      typeof body['entityType'] === 'string' ? body['entityType'] : ALLOWED_ENTITY_TYPE;
+      typeof body['entityType'] === 'string' ? body['entityType'] : DEFAULT_ENTITY_TYPE;
     const entityIds = requireStringArray(body, 'entityIds');
 
     const entities = await reorderEntities(db(), {

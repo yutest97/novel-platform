@@ -28,11 +28,14 @@ export {
 } from './works.js';
 
 export {
-  ALLOWED_ENTITY_TYPE,
+  DEFAULT_ENTITY_TYPE,
   MAX_ENTITY_NAME_LENGTH,
+  MAX_REFERENCE_SUMMARY_ITEMS,
+  SUPPORTED_ENTITY_TYPES,
   createEntity,
   deleteEntity,
   getSettingsCenter,
+  isSupportedEntityType,
   listEntities,
   normalizeEntityName,
   reorderEntities,
@@ -43,9 +46,12 @@ export {
 export type {
   CreateEntityInput,
   DeleteEntityInput,
+  EntityGroupView,
+  EntityReferenceSummaryItem,
   EntityView,
   ReorderEntitiesInput,
   SettingsCenterView,
+  SupportedEntityType,
   UpdateDirectionInput,
   UpdateEntityInput,
 } from './entities.js';
@@ -53,14 +59,17 @@ export type {
 export { assertUuid, isUuid } from './ids.js';
 
 export {
+  MAX_ENTITY_REFS,
   buildSchemaSummary,
   entityTypeGroup,
+  isReferenceFieldType,
   parseRuleFieldSchema,
   validateFields,
   workDirectionGroup,
 } from './schema.js';
 
 export type {
+  EnumOption,
   FieldDefinition,
   FieldGroup,
   FieldType,

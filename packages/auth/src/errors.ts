@@ -92,17 +92,34 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
 export class AuthError extends Error {
   readonly code: AuthErrorCode;
   readonly status: number;
+  /**
+   * 允许对外暴露的结构化附加信息。
+   *
+   * 仅用于**安全摘要**类信息（例如「该实体被哪些实体引用」的名称与类型），
+   * 绝不允许放属性值、秘密、正文等业务内容。
+   * 未提供时响应体与历史版本完全一致。
+   */
+  private readonly publicDetails?: Record<string, unknown>;
 
-  constructor(code: AuthErrorCode, detail?: string) {
+  constructor(code: AuthErrorCode, detail?: string, publicDetails?: Record<string, unknown>) {
     super(detail === undefined ? MESSAGE_BY_CODE[code] : `${MESSAGE_BY_CODE[code]}：${detail}`);
     this.name = 'AuthError';
     this.code = code;
     this.status = STATUS_BY_CODE[code];
+    if (publicDetails !== undefined) {
+      this.publicDetails = publicDetails;
+    }
   }
 
   /** 对外响应体（不含任何内部细节）。 */
-  toBody(): { error: { code: AuthErrorCode; message: string } } {
-    return { error: { code: this.code, message: MESSAGE_BY_CODE[this.code] } };
+  toBody(): { error: { code: AuthErrorCode; message: string; [key: string]: unknown } } {
+    return {
+      error: {
+        code: this.code,
+        message: MESSAGE_BY_CODE[this.code],
+        ...(this.publicDetails ?? {}),
+      },
+    };
   }
 }
 

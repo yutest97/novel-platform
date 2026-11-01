@@ -105,6 +105,14 @@ export default function WorkSettingsPage(): React.ReactElement {
   const directionFields: readonly FieldDefinition[] = center?.schema.workDirection?.fields ?? [];
   const realmFields: readonly FieldDefinition[] =
     center?.schema.entityTypes.find((item) => item.key === REALM_TYPE)?.group.fields ?? [];
+  /**
+   * 境界实体列表。
+   *
+   * M2-B2 起设定中心响应改为规范化的 `entityGroups`（不再有 `realms`）；
+   * 本轮（B2-A）只接契约变更，多分区 UI 留给 B2-B。
+   */
+  const realms: readonly EntityItem[] =
+    center?.entityGroups.find((group) => group.entityType === REALM_TYPE)?.entities ?? [];
 
   async function handleSaveDirection(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -257,13 +265,13 @@ export default function WorkSettingsPage(): React.ReactElement {
     if (realmBusy || center === null) {
       return;
     }
-    const realms = [...center.realms];
-    const index = realms.findIndex((item) => item.id === realm.id);
+    const ordered = [...realms];
+    const index = ordered.findIndex((item) => item.id === realm.id);
     const target = index + offset;
-    if (index < 0 || target < 0 || target >= realms.length) {
+    if (index < 0 || target < 0 || target >= ordered.length) {
       return;
     }
-    realms.splice(target, 0, realms.splice(index, 1)[0] as EntityItem);
+    ordered.splice(target, 0, ordered.splice(index, 1)[0] as EntityItem);
 
     setRealmBusy(true);
     setRealmError('');
@@ -271,7 +279,7 @@ export default function WorkSettingsPage(): React.ReactElement {
       await reorderEntities(
         workId,
         REALM_TYPE,
-        realms.map((item) => item.id),
+        ordered.map((item) => item.id),
       );
       await load();
     } catch (caught) {
@@ -396,7 +404,7 @@ export default function WorkSettingsPage(): React.ReactElement {
       <div className="card">
         <h2>境界体系</h2>
         <p className="hint" data-testid="realm-count">
-          当前共 {center?.realms.length ?? 0} 个境界。
+          当前共 {realms.length} 个境界。
         </p>
 
         {realmError === '' ? null : (
@@ -405,13 +413,13 @@ export default function WorkSettingsPage(): React.ReactElement {
           </p>
         )}
 
-        {center === null || center.realms.length === 0 ? (
+        {center === null || realms.length === 0 ? (
           <p className="hint" data-testid="realm-empty">
             还没有设置任何境界。
           </p>
         ) : (
           <ul className="realm-list" data-testid="realm-list">
-            {center.realms.map((realm, index) => (
+            {realms.map((realm, index) => (
               <li key={realm.id} className="realm-item" data-testid="realm-item">
                 {editingId === realm.id ? (
                   <form
@@ -524,7 +532,7 @@ export default function WorkSettingsPage(): React.ReactElement {
                         type="button"
                         className="btn-secondary btn-small"
                         onClick={() => void handleMove(realm, 1)}
-                        disabled={realmBusy || index === center.realms.length - 1}
+                        disabled={realmBusy || index === realms.length - 1}
                         data-testid="realm-move-down"
                       >
                         下移

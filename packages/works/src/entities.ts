@@ -27,13 +27,40 @@ import { assertUuid } from './ids.js';
 import {
   buildSchemaSummary,
   entityTypeGroup,
+  isReferenceFieldType,
+  parseRuleFieldSchema,
   validateFields,
   workDirectionGroup,
+  type FieldGroup,
   type SchemaSummary,
 } from './schema.js';
 
-/** 第一版唯一开放的实体类型。 */
-export const ALLOWED_ENTITY_TYPE = 'realm_level';
+/**
+ * 实体类型：**由规则包声明**，不再硬编码单值。
+ *
+ * 这里只保留"本轮已实现 CRUD 的类型"集合，作用是**收窄**：
+ * 规则包将来若声明 item / technique，也不会因为声明了就被开放写入。
+ * 实际可用的类型 = 规则包 `entityTypes` 声明 ∩ 本集合。
+ */
+export const SUPPORTED_ENTITY_TYPES = ['realm_level', 'faction', 'character'] as const;
+
+/** 本轮支持的实体类型。 */
+export type SupportedEntityType = (typeof SUPPORTED_ENTITY_TYPES)[number];
+
+/**
+ * 列表 / 排序接口在**未指定类型**时的默认值。
+ *
+ * 仅为兼容既有调用方；新调用方应显式传 type。
+ */
+export const DEFAULT_ENTITY_TYPE: SupportedEntityType = 'realm_level';
+
+/** 删除保护摘要里最多返回多少条引用者。 */
+export const MAX_REFERENCE_SUMMARY_ITEMS = 20;
+
+/** 判断是否为本轮支持的实体类型。 */
+export function isSupportedEntityType(value: string): value is SupportedEntityType {
+  return (SUPPORTED_ENTITY_TYPES as readonly string[]).includes(value);
+}
 
 /**
  * 实体写操作的 advisory lock 命名空间。
@@ -62,13 +89,27 @@ export interface EntityView {
   readonly updatedAt: string;
 }
 
-/** 设定中心视图。 */
+/** 设定中心里的一个实体分组（按 entityType 分区）。 */
+export interface EntityGroupView {
+  readonly entityType: string;
+  readonly title: string;
+  readonly schemaRef: string;
+  readonly order: number;
+  readonly entities: readonly EntityView[];
+}
+
+/**
+ * 设定中心视图。
+ *
+ * `entityGroups` 取代历史上的 `realms` 单列表：
+ * 只包含"规则包已声明 ∩ 本轮支持 CRUD"的类型，按组级 `order` 升序。
+ */
 export interface SettingsCenterView {
   readonly workId: string;
   readonly workTitle: string;
   readonly direction: Record<string, unknown>;
   readonly schema: SchemaSummary;
-  readonly realms: readonly EntityView[];
+  readonly entityGroups: readonly EntityGroupView[];
 }
 
 /** 内部：作品 + 规则包。 */
@@ -135,6 +176,140 @@ function assertGroupSchemaRef(
       'INVALID_RULE_PACKAGE',
       `规则包 ${rulePackage.code} 的字段契约版本与规则包版本不一致`,
     );
+  }
+}
+
+/**
+ * 解析并校验某个实体类型的字段组。
+ *
+ * 判定顺序（顺序本身是语义的一部分）：
+ * 1. 不在本轮支持集合 → `ENTITY_TYPE_NOT_ALLOWED`；
+ * 2. 规则包没有声明该类型 → 同样 `ENTITY_TYPE_NOT_ALLOWED`
+ *    （对调用方而言"不支持"就够了，不泄露规则包内部结构）；
+ * 3. 字段组 schemaRef 必须等于 `code@version`。
+ */
+function resolveEntityGroup(
+  rulePackage: { code: string; version: string; fieldSchema: unknown },
+  entityType: string,
+): FieldGroup {
+  if (!isSupportedEntityType(entityType)) {
+    throw new AuthError('ENTITY_TYPE_NOT_ALLOWED');
+  }
+  const group = entityTypeGroup(rulePackage, entityType);
+  if (group === null) {
+    throw new AuthError('ENTITY_TYPE_NOT_ALLOWED');
+  }
+  assertGroupSchemaRef(rulePackage, group);
+  return group;
+}
+
+/**
+ * 列出设定中心里"规则包已声明 ∩ 本轮支持"的实体类型分组。
+ *
+ * 顺序：组级 `order` 升序，缺省排最后；同 order 按 key 字典序（稳定、可测）。
+ */
+function listEntityGroups(rulePackage: {
+  code: string;
+  version: string;
+  fieldSchema: unknown;
+}): { entityType: SupportedEntityType; group: FieldGroup }[] {
+  const schema = parseRuleFieldSchema(rulePackage.fieldSchema);
+  const groups: { entityType: SupportedEntityType; group: FieldGroup }[] = [];
+  for (const entityType of SUPPORTED_ENTITY_TYPES) {
+    const group = schema.entityTypes?.[entityType];
+    if (group === undefined) {
+      continue;
+    }
+    assertGroupSchemaRef(rulePackage, group);
+    groups.push({ entityType, group });
+  }
+  groups.sort((a, b) => {
+    const orderA = a.group.order ?? Number.MAX_SAFE_INTEGER;
+    const orderB = b.group.order ?? Number.MAX_SAFE_INTEGER;
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
+    return a.entityType < b.entityType ? -1 : a.entityType > b.entityType ? 1 : 0;
+  });
+  return groups;
+}
+
+/**
+ * 在**事务内**校验引用类字段的目标。
+ *
+ * 必须在作品级 advisory lock 持有期间调用：
+ * "目标存在且未删除"这个判断只有在锁内才有意义，
+ * 否则校验通过后目标可能立刻被并发软删除。
+ *
+ * 规则（M2-B2）：
+ * - `refType` 必须在规则包 `entityTypes` 中声明，否则视为规则包坏数据；
+ * - 目标必须存在、未软删除、属于**同一作品**、类型等于 `refType`；
+ * - 三者的失败文案统一为「引用目标不存在」，不泄露其它作品是否存在；
+ * - 禁止引用自身（`selfId` 仅在编辑时存在；新建时 id 由服务端生成，不可能自引用）。
+ */
+async function assertReferences(
+  tx: Prisma.TransactionClient,
+  workId: string,
+  rulePackage: { fieldSchema: unknown },
+  group: FieldGroup,
+  values: Record<string, unknown>,
+  selfId?: string,
+): Promise<void> {
+  const declaredTypes = parseRuleFieldSchema(rulePackage.fieldSchema).entityTypes ?? {};
+
+  /** 需要查询的 id → 期望类型。 */
+  const expected = new Map<string, string>();
+  for (const field of group.fields) {
+    if (!isReferenceFieldType(field.type)) {
+      continue;
+    }
+    const refType = field.refType;
+    if (refType === undefined || declaredTypes[refType] === undefined) {
+      throw new AuthError('INVALID_RULE_PACKAGE', `字段 ${field.key} 的引用类型未声明`);
+    }
+    const value = values[field.key];
+    if (value === undefined) {
+      continue;
+    }
+    const ids = Array.isArray(value) ? value : [value];
+    for (const id of ids) {
+      if (typeof id !== 'string') {
+        continue;
+      }
+      if (selfId !== undefined && id === selfId) {
+        throw new AuthError('VALIDATION_FAILED', `字段 ${field.label} 不能引用自身`, {
+          message: `字段 ${field.label} 不能引用自身`,
+        });
+      }
+      expected.set(id, refType);
+    }
+  }
+
+  if (expected.size === 0) {
+    return;
+  }
+
+  const rows = await tx.entity.findMany({
+    where: { id: { in: [...expected.keys()] }, workId, deletedAt: null },
+    select: { id: true, entityType: true },
+  });
+  const found = new Map(rows.map((row) => [row.id, row.entityType]));
+
+  for (const [id, refType] of expected) {
+    const actualType = found.get(id);
+    if (actualType === undefined) {
+      // 不存在 / 已软删除 / 属于其它作品：**完全相同的对外文案**，不泄露存在性。
+      // 这里显式覆盖 publicDetails.message，让作者看到可操作的具体原因，
+      // 同时保证三种情况无法被区分。
+      throw new AuthError('VALIDATION_FAILED', '引用目标不存在', {
+        message: '引用目标不存在',
+      });
+    }
+    if (actualType !== refType) {
+      throw new AuthError('VALIDATION_FAILED', '引用目标类型不匹配', {
+        message: '引用目标类型不匹配',
+      });
+    }
   }
 }
 
@@ -249,25 +424,15 @@ async function loadDirection(
   return values;
 }
 
-/** 列出作品内指定类型的实体（未删除），按 order_index 升序。 */
-export async function listEntities(
-  db: PrismaClient,
-  input: { workId: string; authorId: string; entityType: string },
+/** 读取某类型实体列表的内部实现（调用方已完成归属与规则包校验）。 */
+async function loadEntitiesForWork(
+  db: Pick<PrismaClient, 'entity' | 'entityAttribute' | 'entityVersion'>,
+  workId: string,
+  entityType: string,
+  schemaRef: string,
 ): Promise<EntityView[]> {
-  assertUuid(input.workId, '作品 id');
-  if (input.entityType !== ALLOWED_ENTITY_TYPE) {
-    throw new AuthError('ENTITY_TYPE_NOT_ALLOWED');
-  }
-  const work = await requireOwnedWork(db, input.workId, input.authorId);
-  const rulePackage = await requireRulePackage(db, work.genreRulePackage);
-  const group = entityTypeGroup(rulePackage, input.entityType);
-  if (group === null) {
-    throw new AuthError('VALIDATION_FAILED', '当前题材没有定义该实体类型');
-  }
-  assertGroupSchemaRef(rulePackage, group);
-
   const entities = await db.entity.findMany({
-    where: { workId: work.id, entityType: input.entityType, deletedAt: null },
+    where: { workId, entityType, deletedAt: null },
     orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     select: {
       id: true,
@@ -281,13 +446,30 @@ export async function listEntities(
 
   const result: EntityView[] = [];
   for (const entity of entities) {
-    const details = await loadEntityDetails(db, entity.id, group.schemaRef);
+    const details = await loadEntityDetails(db, entity.id, schemaRef);
     result.push(toEntityView(entity, details.attributes, details.version));
   }
   return result;
 }
 
-/** 读取设定中心（作品方向 + schema 摘要 + 境界体系）。 */
+/** 列出作品内指定类型的实体（未删除），按 order_index 升序。 */
+export async function listEntities(
+  db: PrismaClient,
+  input: { workId: string; authorId: string; entityType: string },
+): Promise<EntityView[]> {
+  assertUuid(input.workId, '作品 id');
+  const work = await requireOwnedWork(db, input.workId, input.authorId);
+  const rulePackage = await requireRulePackage(db, work.genreRulePackage);
+  const group = resolveEntityGroup(rulePackage, input.entityType);
+  return loadEntitiesForWork(db, work.id, input.entityType, group.schemaRef);
+}
+
+/**
+ * 读取设定中心（作品方向 + schema 摘要 + 各实体类型分组）。
+ *
+ * `entityGroups` 只包含"规则包已声明 ∩ 本轮支持 CRUD"的类型，
+ * 且每个类型内部按 order_index 升序；分组之间按规则包 `order` 升序。
+ */
 export async function getSettingsCenter(
   db: PrismaClient,
   input: { workId: string; authorId: string },
@@ -297,23 +479,30 @@ export async function getSettingsCenter(
   const rulePackage = await requireRulePackage(db, work.genreRulePackage);
   const direction = workDirectionGroup(rulePackage);
 
-  const [directionValues, realms] = await Promise.all([
+  const [directionValues, groups] = await Promise.all([
     direction === null
       ? Promise.resolve<Record<string, unknown>>({})
       : loadDirection(db, work.id, direction.schemaRef),
-    listEntities(db, {
-      workId: work.id,
-      authorId: input.authorId,
-      entityType: ALLOWED_ENTITY_TYPE,
-    }),
+    Promise.resolve(listEntityGroups(rulePackage)),
   ]);
+
+  const entityGroups: EntityGroupView[] = [];
+  for (const { entityType, group } of groups) {
+    entityGroups.push({
+      entityType,
+      title: group.title,
+      schemaRef: group.schemaRef,
+      order: group.order ?? Number.MAX_SAFE_INTEGER,
+      entities: await loadEntitiesForWork(db, work.id, entityType, group.schemaRef),
+    });
+  }
 
   return {
     workId: work.id,
     workTitle: work.title,
     direction: directionValues,
     schema: buildSchemaSummary(rulePackage),
-    realms,
+    entityGroups,
   };
 }
 
@@ -463,9 +652,6 @@ export async function createEntity(
   input: CreateEntityInput,
 ): Promise<EntityView> {
   assertUuid(input.workId, '作品 id');
-  if (input.entityType !== ALLOWED_ENTITY_TYPE) {
-    throw new AuthError('ENTITY_TYPE_NOT_ALLOWED');
-  }
   const name = normalizeEntityName(input.name);
 
   try {
@@ -474,13 +660,13 @@ export async function createEntity(
       const work = await requireOwnedWork(tx, input.workId, input.authorId);
       const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
-      const group = entityTypeGroup(rulePackage, input.entityType);
-      if (group === null) {
-        throw new AuthError('VALIDATION_FAILED', '当前题材没有定义该实体类型');
-      }
-      assertGroupSchemaRef(rulePackage, group);
+      // 实体类型来自规则包声明（∩ 本轮支持集），不在这里硬编码
+      const group = resolveEntityGroup(rulePackage, input.entityType);
       const attributes = validateFields(group, input.attributes);
       const schemaRef = group.schemaRef;
+
+      // 引用必须在本事务、持有作品级锁期间校验
+      await assertReferences(tx, work.id, rulePackage, group, attributes);
 
       const siblings = await tx.entity.findMany({
         where: { workId: work.id, entityType: input.entityType, deletedAt: null },
@@ -602,16 +788,18 @@ export async function updateEntity(
         throw new AuthError('NOT_FOUND', '实体不存在');
       }
 
-      const group = entityTypeGroup(rulePackage, entity.entityType);
-      if (group === null) {
-        throw new AuthError('VALIDATION_FAILED', '当前题材没有定义该实体类型');
-      }
-      assertGroupSchemaRef(rulePackage, group);
+      // 实体类型取自数据库行，再回规则包取字段定义
+      const group = resolveEntityGroup(rulePackage, entity.entityType);
 
       const name = input.name === undefined ? entity.name : normalizeEntityName(input.name);
       const validated =
         input.attributes === undefined ? null : validateFields(group, input.attributes);
       const schemaRef = group.schemaRef;
+
+      // 引用校验：锁内、事务内；编辑时禁止引用自身
+      if (validated !== null) {
+        await assertReferences(tx, work.id, rulePackage, group, validated, entity.id);
+      }
 
       // 条件更新（compare-and-set）：只有"仍未被软删除"的行才会被改到。
       // 这样"删除与编辑并发"时，先提交的那一方赢，后提交的一方拿到 count=0
@@ -746,6 +934,7 @@ export async function deleteEntity(db: PrismaClient, input: DeleteEntityInput): 
   try {
     await runWorkWrite(db, input.workId, async (tx) => {
       const work = await requireOwnedWork(tx, input.workId, input.authorId);
+      const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
       const entity = await tx.entity.findFirst({
         where: { id: input.entityId, workId: work.id, deletedAt: null },
@@ -755,9 +944,25 @@ export async function deleteEntity(db: PrismaClient, input: DeleteEntityInput): 
         throw new AuthError('NOT_FOUND', '实体不存在');
       }
 
-      const referencing = await findReferencingEntities(tx, work.id, entity.id);
+      // 只扫描"当前契约下、规则包声明为引用类型"的属性，
+      // 不扫自由文本、也不扫旧契约属性（旧契约本来就不参与当前语义）。
+      const referencing = await findReferencingEntities(
+        tx,
+        work.id,
+        entity.id,
+        referenceKeysOf(rulePackage),
+        // 所有字段组的 schemaRef 都恒等于 `code@version`（assertGroupSchemaRef 保证）
+        `${rulePackage.code}@${rulePackage.version}`,
+      );
       if (referencing.length > 0) {
-        throw new AuthError('ENTITY_IN_USE');
+        throw new AuthError('ENTITY_IN_USE', undefined, {
+          references: {
+            total: referencing.length,
+            // 只返回定位所需的最小信息：id / 类型 / 名称。
+            // 绝不含属性值、秘密或正文。
+            items: referencing.slice(0, MAX_REFERENCE_SUMMARY_ITEMS),
+          },
+        });
       }
 
       // 条件更新（compare-and-set）+ **数据库时钟**：
@@ -803,32 +1008,79 @@ export async function deleteEntity(db: PrismaClient, input: DeleteEntityInput): 
 }
 
 /**
+ * 收集规则包里"所有引用类字段"的 attr_key。
+ *
+ * 删除保护只扫这些 key —— 不扫自由文本，避免
+ * "描述里恰好出现一个 uuid"被误判成引用。
+ */
+function referenceKeysOf(rulePackage: { fieldSchema: unknown }): string[] {
+  const schema = parseRuleFieldSchema(rulePackage.fieldSchema);
+  const keys = new Set<string>();
+  for (const group of Object.values(schema.entityTypes ?? {})) {
+    for (const field of group.fields) {
+      if (isReferenceFieldType(field.type)) {
+        keys.add(field.key);
+      }
+    }
+  }
+  return [...keys];
+}
+
+/** 删除保护摘要里的一条引用者。 */
+export interface EntityReferenceSummaryItem {
+  readonly id: string;
+  readonly entityType: string;
+  readonly name: string;
+}
+
+/**
  * 查找引用了目标实体的其它实体。
  *
- * 引用表现为：同作品内某个实体的属性值里出现了目标实体的 id
- * （例如将来人物实体的 `realmLevelRef` 属性）。
+ * 判定范围（M2-B2 收窄）：
+ * - 只查 `attr_key` 属于规则包声明的引用字段；
+ * - 只看**存活**（`deleted_at IS NULL`）、**同一作品**的实体；
+ * - 已软删除的引用者不计入，不阻止删除。
+ *
+ * 返回去重后的引用者列表（按 id 稳定排序），供删除保护与摘要使用。
  */
 async function findReferencingEntities(
   db: Pick<PrismaClient, 'entity' | 'entityAttribute'>,
   workId: string,
   entityId: string,
-): Promise<string[]> {
-  const candidates = await db.entity.findMany({
-    where: { workId, deletedAt: null, id: { not: entityId } },
-    select: { id: true },
-  });
-  if (candidates.length === 0) {
+  referenceKeys: readonly string[],
+  schemaRef: string,
+): Promise<EntityReferenceSummaryItem[]> {
+  if (referenceKeys.length === 0) {
     return [];
   }
 
   const attributes = await db.entityAttribute.findMany({
-    where: { entityId: { in: candidates.map((item) => item.id) } },
+    // 只扫当前契约：旧契约属性不参与当前语义，也不该阻止删除
+    where: { attrKey: { in: [...referenceKeys] }, schemaRef },
     select: { entityId: true, attrValue: true },
   });
 
-  return attributes
-    .filter((item) => containsId(item.attrValue, entityId))
-    .map((item) => item.entityId);
+  const referencingIds = new Set<string>();
+  for (const attribute of attributes) {
+    if (attribute.entityId === entityId) {
+      continue;
+    }
+    if (containsId(attribute.attrValue, entityId)) {
+      referencingIds.add(attribute.entityId);
+    }
+  }
+  if (referencingIds.size === 0) {
+    return [];
+  }
+
+  // 二次过滤：必须仍是同作品的存活实体（属性可能属于已删除/别处实体）
+  const rows = await db.entity.findMany({
+    where: { id: { in: [...referencingIds] }, workId, deletedAt: null },
+    select: { id: true, entityType: true, name: true },
+    orderBy: [{ entityType: 'asc' }, { name: 'asc' }, { id: 'asc' }],
+  });
+
+  return rows.map((row) => ({ id: row.id, entityType: row.entityType, name: row.name }));
 }
 
 /** 递归判断 JSON 值里是否出现指定 id 字符串。 */
@@ -873,14 +1125,13 @@ export async function reorderEntities(
     assertUuid(id, '实体 id');
   }
 
-  // 第一版只允许排序 realm_level
-  if (input.entityType !== ALLOWED_ENTITY_TYPE) {
-    throw new AuthError('ENTITY_TYPE_NOT_ALLOWED');
-  }
-
   try {
     await runWorkWrite(db, input.workId, async (tx) => {
       const work = await requireOwnedWork(tx, input.workId, input.authorId);
+      const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
+
+      // 类型必须来自规则包声明（∩ 本轮支持集）；每个类型各自独立 1..N
+      resolveEntityGroup(rulePackage, input.entityType);
 
       const existing = await tx.entity.findMany({
         where: { workId: work.id, entityType: input.entityType, deletedAt: null },

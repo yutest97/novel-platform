@@ -246,7 +246,7 @@ describe('设定中心接口（M2-B1）', () => {
     const badType = await entitiesPost(
       request(`/api/works/${workId}/entities`, {
         method: 'POST',
-        body: { entityType: 'character', name: '主角', attributes: {} },
+        body: { entityType: 'item', name: '断剑', attributes: {} },
         token: author.token,
         origin: ORIGIN,
       }),
@@ -702,24 +702,30 @@ describe('设定中心接口（M2-B1）', () => {
     }
   });
 
-  it('列出实体只接受 realm_level；其它类型一律 400', async () => {
+  it('列出实体只接受规则包声明且本轮支持的类型；其余 400', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
 
-    const response = await entitiesGet(
-      request(`/api/works/${workId}/entities?type=character`, { token: author.token }),
-      { params: Promise.resolve({ id: workId }) },
-    );
-    expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: { code: string } };
-    expect(body.error.code).toBe('ENTITY_TYPE_NOT_ALLOWED');
+    for (const entityType of ['item', 'technique', 'location', 'unknown']) {
+      const response = await entitiesGet(
+        request(`/api/works/${workId}/entities?type=${entityType}`, { token: author.token }),
+        { params: Promise.resolve({ id: workId }) },
+      );
+      expect(response.status, `类型 ${entityType} 应 400`).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe('ENTITY_TYPE_NOT_ALLOWED');
+    }
 
-    // 允许的类型正常返回
-    const ok = await entitiesGet(
-      request(`/api/works/${workId}/entities?type=realm_level`, { token: author.token }),
-      { params: Promise.resolve({ id: workId }) },
-    );
-    expect(ok.status).toBe(200);
+    // 本轮支持的三类都正常返回（初始为空）
+    for (const entityType of ['realm_level', 'faction', 'character']) {
+      const ok = await entitiesGet(
+        request(`/api/works/${workId}/entities?type=${entityType}`, { token: author.token }),
+        { params: Promise.resolve({ id: workId }) },
+      );
+      expect(ok.status, `类型 ${entityType} 应 200`).toBe(200);
+      const okBody = (await ok.json()) as { entities: unknown[] };
+      expect(okBody.entities).toEqual([]);
+    }
   });
 
   it('畸形 workId / entityId 返回稳定的 400 或 404，不产生 500', async () => {
@@ -849,7 +855,7 @@ describe('设定中心接口（M2-B1）', () => {
     expect(reloadedBody.settings.direction['subGenre']).toBe('东方玄幻');
   });
 
-  it('删除实体：被引用时 409 ENTITY_IN_USE；否则软删除', async () => {
+  it('删除实体：被引用时 409 ENTITY_IN_USE 并返回安全引用摘要；解引用后可删', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
 
@@ -864,18 +870,22 @@ describe('设定中心接口（M2-B1）', () => {
     );
     const { entity } = (await created.json()) as { entity: { id: string } };
 
-    // 构造引用
-    const referrer = await db.entity.create({
-      data: { workId, entityType: 'realm_level', name: '引用者' },
-    });
-    await db.entityAttribute.create({
-      data: {
-        entityId: referrer.id,
-        attrKey: 'realmLevelRef',
-        attrValue: entity.id,
-        schemaRef: 'xuanhuan@1.0.0',
-      },
-    });
+    // 真实引用：人物 initialRealm → 该境界（含敏感字段"秘密"，不得出现在摘要里）
+    const referrerResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'character',
+          name: '林青',
+          attributes: { identity: '外门弟子', secret: '其实是魔宗卧底', initialRealm: entity.id },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(referrerResponse.status).toBe(201);
+    const referrer = (await referrerResponse.json()) as { entity: { id: string } };
 
     const inUse = await entityDelete(
       request(`/api/works/${workId}/entities/${entity.id}`, {
@@ -886,16 +896,43 @@ describe('设定中心接口（M2-B1）', () => {
       { params: Promise.resolve({ id: workId, entityId: entity.id }) },
     );
     expect(inUse.status).toBe(409);
-    const inUseBody = (await inUse.json()) as { error: { code: string } };
+    const inUseBody = (await inUse.json()) as {
+      error: {
+        code: string;
+        references: {
+          total: number;
+          items: { id: string; entityType: string; name: string }[];
+        };
+      };
+    };
     expect(inUseBody.error.code).toBe('ENTITY_IN_USE');
+    expect(inUseBody.error.references.total).toBe(1);
+    expect(inUseBody.error.references.items).toEqual([
+      { id: referrer.entity.id, entityType: 'character', name: '林青' },
+    ]);
+    // 摘要绝不能带属性值（秘密）
+    expect(JSON.stringify(inUseBody)).not.toContain('魔宗卧底');
+    expect(JSON.stringify(inUseBody)).not.toContain('外门弟子');
+
+    // 解除引用后可以删除
+    const patched = await entityPatch(
+      request(`/api/works/${workId}/entities/${referrer.entity.id}`, {
+        method: 'PATCH',
+        body: { attributes: { identity: '外门弟子' } },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: referrer.entity.id }) },
+    );
+    expect(patched.status).toBe(200);
 
     const deleted = await entityDelete(
-      request(`/api/works/${workId}/entities/${referrer.id}`, {
+      request(`/api/works/${workId}/entities/${entity.id}`, {
         method: 'DELETE',
         token: author.token,
         origin: ORIGIN,
       }),
-      { params: Promise.resolve({ id: workId, entityId: referrer.id }) },
+      { params: Promise.resolve({ id: workId, entityId: entity.id }) },
     );
     expect(deleted.status).toBe(200);
   });
@@ -987,5 +1024,180 @@ describe('设定中心接口（M2-B1）', () => {
     expect(text).not.toContain('passwordHash');
     expect(text).not.toContain('argon2');
     expect(text).not.toContain('authorId');
+  });
+
+  it('设定中心返回规范化 entityGroups：三分组、按 order 排序、无 realms 字段', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const response = await settingsGet(
+      request(`/api/works/${workId}/settings`, { token: author.token }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      settings: {
+        realms?: unknown;
+        entityGroups: {
+          entityType: string;
+          title: string;
+          schemaRef: string;
+          order: number;
+          entities: { name: string }[];
+        }[];
+      };
+    };
+
+    expect(body.settings.realms, 'realms 字段必须被移除，不留别名').toBeUndefined();
+    expect(body.settings.entityGroups.map((group) => group.entityType)).toEqual([
+      'realm_level',
+      'faction',
+      'character',
+    ]);
+    expect(body.settings.entityGroups.map((group) => group.order)).toEqual([1, 2, 3]);
+    expect(body.settings.entityGroups.map((group) => group.title)).toEqual([
+      '境界体系',
+      '势力',
+      '人物',
+    ]);
+    for (const group of body.settings.entityGroups) {
+      expect(group.schemaRef).toBe('xuanhuan@3.0.0');
+      expect(group.entities).toEqual([]);
+    }
+  });
+
+  it('势力与人物：enum 取值、引用校验、跨作品引用与排序互相独立', async () => {
+    const author = await createUser('author');
+    const other = await createUser('author');
+    const workId = await createWork(author.id);
+    const otherWorkId = await createWork(other.id);
+
+    // 非法 enum 取值 → 400
+    const badEnum = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'faction', name: '非法势力', attributes: { type: 'not-an-option' } },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(badEnum.status).toBe(400);
+    expect(((await badEnum.json()) as { error: { code: string } }).error.code).toBe(
+      'VALIDATION_FAILED',
+    );
+
+    // 缺少必填 enum → 400
+    const missingEnum = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'faction', name: '无类型势力', attributes: {} },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(missingEnum.status).toBe(400);
+
+    // 合法：境界 + 势力 + 人物引用
+    const realmResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '炼气', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const realmId = ((await realmResponse.json()) as { entity: { id: string } }).entity.id;
+
+    const factionResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'faction', name: '青云宗', attributes: { type: 'sect' } },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(factionResponse.status).toBe(201);
+    const factionId = ((await factionResponse.json()) as { entity: { id: string } }).entity.id;
+
+    const characterResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'character',
+          name: '林青',
+          attributes: { identity: '弟子', initialRealm: realmId, faction: factionId },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(characterResponse.status).toBe(201);
+    const characterBody = (await characterResponse.json()) as {
+      entity: { orderIndex: number; attributes: Record<string, unknown> };
+    };
+    // 每类型独立 1..N：人物是第一个人物
+    expect(characterBody.entity.orderIndex).toBe(1);
+    expect(characterBody.entity.attributes['initialRealm']).toBe(realmId);
+
+    // 跨作品引用 → 400（文案与"不存在"一致）
+    const otherRealmResponse = await entitiesPost(
+      request(`/api/works/${otherWorkId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '别人的境界', attributes: REALM_ATTRIBUTES },
+        token: other.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: otherWorkId }) },
+    );
+    const otherRealmId = ((await otherRealmResponse.json()) as { entity: { id: string } }).entity
+      .id;
+
+    const crossWork = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'character',
+          name: '丙',
+          attributes: { initialRealm: otherRealmId },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(crossWork.status).toBe(400);
+    const crossWorkBody = (await crossWork.json()) as { error: { code: string; message: string } };
+    expect(crossWorkBody.error.code).toBe('VALIDATION_FAILED');
+    expect(crossWorkBody.error.message).toContain('引用目标不存在');
+
+    // 排序按类型独立：只排 realm_level 不影响 faction/character
+    const reorder = await reorderPut(
+      request(`/api/works/${workId}/entities/reorder`, {
+        method: 'PUT',
+        body: { entityType: 'realm_level', entityIds: [realmId] },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(reorder.status).toBe(200);
+
+    const settings = await settingsGet(
+      request(`/api/works/${workId}/settings`, { token: author.token }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const settingsBody = (await settings.json()) as {
+      settings: { entityGroups: { entityType: string; entities: { name: string }[] }[] };
+    };
+    const groupOf = (key: string): { name: string }[] =>
+      settingsBody.settings.entityGroups.find((group) => group.entityType === key)?.entities ?? [];
+    expect(groupOf('realm_level').map((item) => item.name)).toEqual(['炼气']);
+    expect(groupOf('faction').map((item) => item.name)).toEqual(['青云宗']);
+    expect(groupOf('character').map((item) => item.name)).toEqual(['林青']);
   });
 });

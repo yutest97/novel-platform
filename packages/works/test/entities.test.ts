@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
-  ALLOWED_ENTITY_TYPE,
+  DEFAULT_ENTITY_TYPE,
   createEntity,
   deleteEntity,
   getSettingsCenter,
@@ -278,7 +278,7 @@ describe('设定中心与实体（M2-B1）', () => {
       entityTypes?: Record<string, { schemaRef?: string }>;
     };
 
-    expect(schema.version).toBe(2);
+    expect(schema.version).toBe(3);
     expect(schema.workDirection?.schemaRef).toBe(expected);
     for (const group of Object.values(schema.entityTypes ?? {})) {
       expect(group.schemaRef).toBe(expected);
@@ -293,7 +293,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '炼气',
       attributes: realmAttributes(),
       meta: META,
@@ -327,7 +327,7 @@ describe('设定中心与实体（M2-B1）', () => {
     await createEntity(db, {
       workId: workA,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '筑基',
       attributes: realmAttributes(),
       meta: META,
@@ -337,7 +337,7 @@ describe('设定中心与实体（M2-B1）', () => {
       createEntity(db, {
         workId: workA,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '筑基',
         attributes: realmAttributes(),
         meta: META,
@@ -348,7 +348,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const other = await createEntity(db, {
       workId: workB,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '筑基',
       attributes: realmAttributes(),
       meta: META,
@@ -364,7 +364,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '金丹',
       attributes: realmAttributes(),
       meta: META,
@@ -402,7 +402,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: authorA.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '元婴',
       attributes: realmAttributes(),
       meta: META,
@@ -431,7 +431,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const a1 = await createEntity(db, {
       workId: workA,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '一',
       attributes: realmAttributes(),
       meta: META,
@@ -439,7 +439,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const a2 = await createEntity(db, {
       workId: workA,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '二',
       attributes: realmAttributes(),
       meta: META,
@@ -447,7 +447,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const b1 = await createEntity(db, {
       workId: workB,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '别作',
       attributes: realmAttributes(),
       meta: META,
@@ -458,7 +458,7 @@ describe('设定中心与实体（M2-B1）', () => {
       reorderEntities(db, {
         workId: workA,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: [a1.id, a1.id],
         meta: META,
       }),
@@ -469,7 +469,7 @@ describe('设定中心与实体（M2-B1）', () => {
       reorderEntities(db, {
         workId: workA,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: [a1.id],
         meta: META,
       }),
@@ -480,7 +480,7 @@ describe('设定中心与实体（M2-B1）', () => {
       reorderEntities(db, {
         workId: workA,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: [a1.id, b1.id],
         meta: META,
       }),
@@ -490,7 +490,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const ordered = await reorderEntities(db, {
       workId: workA,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       entityIds: [a2.id, a1.id],
       meta: META,
     });
@@ -503,7 +503,7 @@ describe('设定中心与实体（M2-B1）', () => {
     expect(audit).not.toBeNull();
   });
 
-  it('被引用的境界删除返回 ENTITY_IN_USE；未删除的软删除后不再出现在列表', async () => {
+  it('被引用的境界删除返回 ENTITY_IN_USE（含安全引用摘要）；解引用后可删', async () => {
     const db = testDb();
     const author = await createAuthor();
     const workId = await createWork(author.id);
@@ -511,47 +511,75 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '化神',
       attributes: realmAttributes(),
       meta: META,
     });
 
-    // 构造引用：另一个实体的属性里带上该实体 id
-    const referrer = await db.entity.create({
-      data: { workId, entityType: 'realm_level', name: '引用者' },
-    });
-    await db.entityAttribute.create({
-      data: {
-        entityId: referrer.id,
-        attrKey: 'realmLevelRef',
-        attrValue: realm.id,
-        schemaRef: 'xuanhuan@1.0.0',
-      },
+    // 真实引用：人物通过 initialRealm（entityRef → realm_level）指向该境界
+    const character = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: 'character',
+      name: '林青',
+      attributes: { identity: '外门弟子', initialRealm: realm.id },
+      meta: META,
     });
 
-    await expect(
-      deleteEntity(db, { workId, authorId: author.id, entityId: realm.id, meta: META }),
-    ).rejects.toMatchObject({ code: 'ENTITY_IN_USE' });
+    const failure = await deleteEntity(db, {
+      workId,
+      authorId: author.id,
+      entityId: realm.id,
+      meta: META,
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: 'ENTITY_IN_USE' });
 
-    // 未被引用时软删除成功
+    // 摘要只含定位信息（id / 类型 / 名称），不含任何属性值
+    const body = (failure as { toBody: () => { error: Record<string, unknown> } }).toBody();
+    const references = body.error['references'] as {
+      total: number;
+      items: { id: string; entityType: string; name: string }[];
+    };
+    expect(references.total).toBe(1);
+    expect(references.items).toEqual([{ id: character.id, entityType: 'character', name: '林青' }]);
+    expect(JSON.stringify(references)).not.toContain('外门弟子');
+
+    // 解除引用后可以删除
+    await updateEntity(db, {
+      workId,
+      authorId: author.id,
+      entityId: character.id,
+      attributes: { identity: '外门弟子' },
+      meta: META,
+    });
     await deleteEntity(db, {
       workId,
       authorId: author.id,
-      entityId: referrer.id,
+      entityId: realm.id,
       meta: META,
     });
 
     const list = await listEntities(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
     });
-    expect(list.map((item) => item.name)).not.toContain('引用者');
-    expect(list.map((item) => item.name)).toContain('化神');
+    expect(list.map((item) => item.name)).not.toContain('化神');
+
+    // 人物仍在（只解除了引用，没有被删）
+    const characters = await listEntities(db, {
+      workId,
+      authorId: author.id,
+      entityType: 'character',
+    });
+    expect(characters.map((item) => item.name)).toContain('林青');
 
     const deletedAudit = await db.auditLog.findFirst({
-      where: { action: 'entity.deleted', targetId: referrer.id },
+      where: { action: 'entity.deleted', targetId: realm.id },
       orderBy: { createdAt: 'desc' },
     });
     expect(deletedAudit).not.toBeNull();
@@ -565,7 +593,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '渡劫',
       attributes: realmAttributes(),
       meta: META,
@@ -575,7 +603,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const again = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '渡劫',
       attributes: realmAttributes(),
       meta: META,
@@ -606,7 +634,7 @@ describe('设定中心与实体（M2-B1）', () => {
         createEntity(db, {
           workId,
           authorId: author.id,
-          entityType: ALLOWED_ENTITY_TYPE,
+          entityType: DEFAULT_ENTITY_TYPE,
           name: '会被回滚',
           attributes: realmAttributes(),
           meta: META,
@@ -631,7 +659,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '删除回滚',
       attributes: realmAttributes(),
       meta: META,
@@ -663,11 +691,12 @@ describe('设定中心与实体（M2-B1）', () => {
     }
   });
 
-  it('第一版只开放 realm_level 实体类型', async () => {
+  it('第一版只开放规则包声明且本轮支持的类型：character / faction 可用，其余拒绝', async () => {
     const db = testDb();
     const author = await createAuthor();
     const workId = await createWork(author.id);
 
+    // 本轮支持的两类都能创建
     await expect(
       createEntity(db, {
         workId,
@@ -677,29 +706,57 @@ describe('设定中心与实体（M2-B1）', () => {
         attributes: {},
         meta: META,
       }),
-    ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+    ).resolves.toMatchObject({ entityType: 'character' });
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'faction',
+        name: '青云宗',
+        attributes: { type: 'sect' },
+        meta: META,
+      }),
+    ).resolves.toMatchObject({ entityType: 'faction' });
+
+    // 规则包没声明 / 本轮没实现的类型一律拒绝
+    for (const entityType of ['item', 'technique', 'location', 'resource_type', 'unknown']) {
+      await expect(
+        createEntity(db, {
+          workId,
+          authorId: author.id,
+          entityType,
+          name: `x-${entityType}`,
+          attributes: {},
+          meta: META,
+        }),
+        `类型 ${entityType} 应当被拒绝`,
+      ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+    }
   });
 
-  it('列表接口同样只接受 realm_level', async () => {
+  it('列表接口同样只接受规则包声明且本轮支持的类型', async () => {
     const db = testDb();
     const author = await createAuthor();
     const workId = await createWork(author.id);
 
-    await expect(
-      listEntities(db, {
-        workId,
-        authorId: author.id,
-        entityType: 'character',
-      }),
-    ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+    for (const entityType of ['item', 'technique', 'location', 'unknown']) {
+      await expect(
+        listEntities(db, {
+          workId,
+          authorId: author.id,
+          entityType,
+        }),
+        `类型 ${entityType} 应当被拒绝`,
+      ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+    }
 
-    await expect(
-      listEntities(db, {
-        workId,
-        authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
-      }),
-    ).resolves.toEqual([]);
+    for (const entityType of ['realm_level', 'faction', 'character']) {
+      await expect(
+        listEntities(db, { workId, authorId: author.id, entityType }),
+        `类型 ${entityType} 应当可列出`,
+      ).resolves.toEqual([]);
+    }
   });
 
   it('畸形 workId / entityId 在进入 Prisma 之前就被拒绝（400，不是 500）', async () => {
@@ -710,7 +767,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '元婴',
       attributes: realmAttributes(),
       meta: META,
@@ -727,7 +784,7 @@ describe('设定中心与实体（M2-B1）', () => {
       listEntities(db, {
         workId: badWorkId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
       }),
     ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
 
@@ -744,7 +801,7 @@ describe('设定中心与实体（M2-B1）', () => {
       createEntity(db, {
         workId: badWorkId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '畸形作品',
         attributes: realmAttributes(),
         meta: META,
@@ -771,7 +828,7 @@ describe('设定中心与实体（M2-B1）', () => {
       reorderEntities(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: [badEntityId],
         meta: META,
       }),
@@ -798,7 +855,7 @@ describe('设定中心与实体（M2-B1）', () => {
       createEntity(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '缺字段',
         attributes: { minorLevelCount: 9 },
         meta: META,
@@ -809,7 +866,7 @@ describe('设定中心与实体（M2-B1）', () => {
       createEntity(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '类型错',
         attributes: { ...realmAttributes(), minorLevelCount: '九个' },
         meta: META,
@@ -820,7 +877,7 @@ describe('设定中心与实体（M2-B1）', () => {
       createEntity(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '越界',
         attributes: { ...realmAttributes(), minorLevelCount: 999 },
         meta: META,
@@ -831,7 +888,7 @@ describe('设定中心与实体（M2-B1）', () => {
       createEntity(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '未知字段',
         attributes: { ...realmAttributes(), unknown: 1 },
         meta: META,
@@ -853,7 +910,7 @@ describe('设定中心与实体（M2-B1）', () => {
     await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '炼气',
       attributes: realmAttributes(),
       meta: META,
@@ -862,7 +919,8 @@ describe('设定中心与实体（M2-B1）', () => {
     const center = await getSettingsCenter(db, { workId, authorId: author.id });
     expect(center.direction['subGenre']).toBe('仙侠修真');
     expect(center.schema.workDirection?.fields.length).toBe(4);
-    expect(center.realms).toHaveLength(1);
-    expect(center.realms[0]?.name).toBe('炼气');
+    const realmGroup = center.entityGroups.find((group) => group.entityType === 'realm_level');
+    expect(realmGroup?.entities).toHaveLength(1);
+    expect(realmGroup?.entities[0]?.name).toBe('炼气');
   });
 });

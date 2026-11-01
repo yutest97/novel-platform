@@ -32,7 +32,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
-  ALLOWED_ENTITY_TYPE,
+  DEFAULT_ENTITY_TYPE,
   ENTITY_LOCK_NAMESPACE,
   createEntity,
   deleteEntity,
@@ -87,7 +87,7 @@ function realmAttributes(lifespan = '一百年'): Record<string, unknown> {
 async function readOrderIndexes(workId: string): Promise<number[]> {
   const db = testDb();
   const rows = await db.entity.findMany({
-    where: { workId, entityType: ALLOWED_ENTITY_TYPE, deletedAt: null },
+    where: { workId, entityType: DEFAULT_ENTITY_TYPE, deletedAt: null },
     select: { orderIndex: true },
   });
   return rows.map((row) => row.orderIndex ?? -1).sort((a, b) => a - b);
@@ -160,7 +160,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
               createEntity(db, {
                 workId,
                 authorId: author.id,
-                entityType: ALLOWED_ENTITY_TYPE,
+                entityType: DEFAULT_ENTITY_TYPE,
                 name: '金丹',
                 attributes: realmAttributes(),
                 meta: META,
@@ -175,7 +175,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
           const realm = await createEntity(db, {
             workId,
             authorId: author.id,
-            entityType: ALLOWED_ENTITY_TYPE,
+            entityType: DEFAULT_ENTITY_TYPE,
             name: '炼气',
             attributes: realmAttributes(),
             meta: META,
@@ -201,7 +201,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
           const realm = await createEntity(db, {
             workId,
             authorId: author.id,
-            entityType: ALLOWED_ENTITY_TYPE,
+            entityType: DEFAULT_ENTITY_TYPE,
             name: '筑基',
             attributes: realmAttributes(),
             meta: META,
@@ -226,7 +226,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
           const a = await createEntity(db, {
             workId,
             authorId: author.id,
-            entityType: ALLOWED_ENTITY_TYPE,
+            entityType: DEFAULT_ENTITY_TYPE,
             name: '甲',
             attributes: realmAttributes(),
             meta: META,
@@ -234,7 +234,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
           const b = await createEntity(db, {
             workId,
             authorId: author.id,
-            entityType: ALLOWED_ENTITY_TYPE,
+            entityType: DEFAULT_ENTITY_TYPE,
             name: '乙',
             attributes: realmAttributes(),
             meta: META,
@@ -246,7 +246,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
               reorderEntities(db, {
                 workId,
                 authorId: author.id,
-                entityType: ALLOWED_ENTITY_TYPE,
+                entityType: DEFAULT_ENTITY_TYPE,
                 entityIds: [b.id, a.id],
                 meta: META,
               }),
@@ -302,7 +302,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
       const operation = createEntity(db, {
         workId: freeWorkId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '元婴',
         attributes: realmAttributes(),
         meta: META,
@@ -328,7 +328,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '筑基',
       attributes: realmAttributes(),
       meta: META,
@@ -377,7 +377,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '筑基',
       attributes: realmAttributes(),
       meta: META,
@@ -432,7 +432,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const a = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '甲',
       attributes: realmAttributes(),
       meta: META,
@@ -440,7 +440,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const b = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '乙',
       attributes: realmAttributes(),
       meta: META,
@@ -466,7 +466,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
       reorderEntities(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: [a.id, b.id],
         meta: META,
       }),
@@ -479,7 +479,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const reordered = await reorderEntities(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       entityIds: [b.id],
       meta: META,
     });
@@ -498,7 +498,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '炼气',
       attributes: realmAttributes(),
       meta: META,
@@ -559,7 +559,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const realm = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '筑基',
       attributes: realmAttributes(),
       meta: META,
@@ -644,7 +644,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const first = await createEntity(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
       name: '金丹',
       attributes: realmAttributes(),
       meta: META,
@@ -661,7 +661,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
       const createPromise = createEntity(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name: '元婴',
         attributes: realmAttributes(),
         meta: META,
@@ -669,7 +669,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
       const reorderPromise = reorderEntities(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: [first.id],
         meta: META,
       });
@@ -701,7 +701,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const list = await listEntities(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
     });
     expect(list).toHaveLength(2);
     expect(list.map((item) => item.orderIndex).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([1, 2]);
@@ -718,7 +718,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
       const entity = await createEntity(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         name,
         attributes: realmAttributes(),
         meta: META,
@@ -736,14 +736,14 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
       reorderEntities(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: forward,
         meta: META,
       }),
       reorderEntities(db, {
         workId,
         authorId: author.id,
-        entityType: ALLOWED_ENTITY_TYPE,
+        entityType: DEFAULT_ENTITY_TYPE,
         entityIds: backward,
         meta: META,
       }),
@@ -757,7 +757,7 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
     const list = await listEntities(db, {
       workId,
       authorId: author.id,
-      entityType: ALLOWED_ENTITY_TYPE,
+      entityType: DEFAULT_ENTITY_TYPE,
     });
     const finalNames = list.map((item) => item.name);
     expect(finalNames.length).toBe(4);
@@ -770,5 +770,91 @@ describe('实体并发边界（M2-B1-REV-01）', () => {
 
     // order_index 也必须是 1..4 的完整排列（无重复、无空洞）
     expect(await readOrderIndexes(workId)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('引用目标在并发中被软删除：创建引用必须在锁内失败', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: DEFAULT_ENTITY_TYPE,
+      name: '炼气',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    const raw = await createRawClient();
+    try {
+      // 外部事务先占住作品级锁，并**未提交**地软删除该境界
+      await holdWorkEntityLock(raw, ENTITY_LOCK_NAMESPACE, workId);
+      await raw.query('UPDATE entities SET deleted_at = clock_timestamp() WHERE id = $1', [
+        realm.id,
+      ]);
+
+      // 引用它的写入会先卡在作品级锁上
+      const operation = createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'character',
+        name: '林青',
+        attributes: { initialRealm: realm.id },
+        meta: META,
+      });
+      expect(await stayedPending(operation, 300), '写入应被作品级锁阻塞').toBe(true);
+
+      await raw.query('COMMIT');
+
+      // 拿到锁之后重新校验引用 → 目标已删除 → 失败。
+      // 若引用校验发生在锁外（先查后写），这里会错误地创建成功。
+      await expect(operation).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    } finally {
+      await raw.query('ROLLBACK').catch(() => undefined);
+      await raw.end();
+    }
+
+    const characters = await listEntities(db, {
+      workId,
+      authorId: author.id,
+      entityType: 'character',
+    });
+    expect(characters).toEqual([]);
+  });
+
+  it('不同实体类型的并发新增互不干扰：各自从 order_index 1 开始', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const [realm, faction, character] = await Promise.all([
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'realm_level',
+        name: '炼气',
+        attributes: realmAttributes(),
+        meta: META,
+      }),
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'faction',
+        name: '青云宗',
+        attributes: { type: 'sect' },
+        meta: META,
+      }),
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'character',
+        name: '林青',
+        attributes: { identity: '弟子' },
+        meta: META,
+      }),
+    ]);
+
+    expect([realm.orderIndex, faction.orderIndex, character.orderIndex]).toEqual([1, 1, 1]);
   });
 });

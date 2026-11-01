@@ -290,13 +290,22 @@ export interface EntityItem {
   readonly updatedAt: string;
 }
 
+/** 设定中心里的一个实体分组（按 entityType 分区）。 */
+export interface EntityGroupItem {
+  readonly entityType: string;
+  readonly title: string;
+  readonly schemaRef: string;
+  readonly order: number;
+  readonly entities: readonly EntityItem[];
+}
+
 /** 设定中心。 */
 export interface SettingsCenter {
   readonly workId: string;
   readonly workTitle: string;
   readonly direction: Record<string, unknown>;
   readonly schema: SchemaSummary;
-  readonly realms: readonly EntityItem[];
+  readonly entityGroups: readonly EntityGroupItem[];
 }
 
 /** 读取设定中心。 */
