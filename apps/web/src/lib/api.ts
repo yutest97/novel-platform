@@ -365,7 +365,7 @@ export interface EntityItem {
 }
 
 /** 本轮启用 CRUD 的实体类型（与 `@novel/works` 的 `SUPPORTED_ENTITY_TYPES` 一致）。 */
-export type SupportedEntityType = 'realm_level' | 'faction' | 'character';
+export type SupportedEntityType = 'realm_level' | 'faction' | 'character' | 'item' | 'technique';
 
 /** 设定中心里的一个实体分组（按 entityType 分区）。 */
 export interface EntityGroupItem {

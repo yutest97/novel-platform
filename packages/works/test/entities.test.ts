@@ -278,7 +278,7 @@ describe('设定中心与实体（M2-B1）', () => {
       entityTypes?: Record<string, { schemaRef?: string }>;
     };
 
-    expect(schema.version).toBe(3);
+    expect(schema.version).toBe(4);
     expect(schema.workDirection?.schemaRef).toBe(expected);
     for (const group of Object.values(schema.entityTypes ?? {})) {
       expect(group.schemaRef).toBe(expected);
@@ -691,7 +691,7 @@ describe('设定中心与实体（M2-B1）', () => {
     }
   });
 
-  it('只开放规则包声明且本轮支持的类型：character / faction 可用，其余拒绝', async () => {
+  it('只开放规则包声明且本轮支持的类型：人物 / 势力 / 物品 / 功法可用，其余拒绝', async () => {
     const db = testDb();
     const author = await createAuthor();
     const workId = await createWork(author.id);
@@ -719,8 +719,31 @@ describe('设定中心与实体（M2-B1）', () => {
       }),
     ).resolves.toMatchObject({ entityType: 'faction' });
 
+    // 本轮新开放的两类
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'item',
+        name: '青锋剑',
+        attributes: { category: 'weapon', quality: 'mystic' },
+        meta: META,
+      }),
+    ).resolves.toMatchObject({ entityType: 'item' });
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'technique',
+        name: '青元剑诀',
+        attributes: { type: 'cultivation' },
+        meta: META,
+      }),
+    ).resolves.toMatchObject({ entityType: 'technique' });
+
     // 规则包没声明 / 本轮没实现的类型一律拒绝
-    for (const entityType of ['item', 'technique', 'location', 'resource_type', 'unknown']) {
+    for (const entityType of ['location', 'resource_type', 'unknown']) {
       await expect(
         createEntity(db, {
           workId,
@@ -740,7 +763,7 @@ describe('设定中心与实体（M2-B1）', () => {
     const author = await createAuthor();
     const workId = await createWork(author.id);
 
-    for (const entityType of ['item', 'technique', 'location', 'unknown']) {
+    for (const entityType of ['location', 'unknown']) {
       await expect(
         listEntities(db, {
           workId,
@@ -751,7 +774,7 @@ describe('设定中心与实体（M2-B1）', () => {
       ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
     }
 
-    for (const entityType of ['realm_level', 'faction', 'character']) {
+    for (const entityType of ['realm_level', 'faction', 'character', 'item', 'technique']) {
       await expect(
         listEntities(db, { workId, authorId: author.id, entityType }),
         `类型 ${entityType} 应当可列出`,

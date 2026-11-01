@@ -16,8 +16,11 @@
  *   （归属、未删除、引用、完整排序集合），再写数据、版本与审计；
  * - 因此并发写不会交错出"混合顺序"，也不会产生重复版本号。
  *
- * 本轮开放 `realm_level`（境界体系）、`faction`（势力）、`character`（人物）
- * 三种实体类型；功法、物品、地点等留给后续阶段。
+ * 本轮开放 `realm_level`（境界体系）、`faction`（势力）、`character`（人物）、
+ * `item`（物品）、`technique`（功法）五种实体类型；地点等留给后续阶段。
+ *
+ * `item` 目前**没有持有人字段**：物品持有人以 M2-B3-B 的 `item_events` 流水为唯一真相，
+ * 本轮不提供可编辑的持有属性，避免先写属性再废弃。
  */
 
 import { AUDIT_ACTIONS, AuthError, writeAuditLog, type RequestMeta } from '@novel/auth';
@@ -40,10 +43,16 @@ import {
  * 实体类型：**由规则包声明**，不再硬编码单值。
  *
  * 这里只保留"本轮已实现 CRUD 的类型"集合，作用是**收窄**：
- * 规则包将来若声明 item / technique，也不会因为声明了就被开放写入。
+ * 规则包将来若声明 location / resource_type，也不会因为声明了就被开放写入。
  * 实际可用的类型 = 规则包 `entityTypes` 声明 ∩ 本集合。
  */
-export const SUPPORTED_ENTITY_TYPES = ['realm_level', 'faction', 'character'] as const;
+export const SUPPORTED_ENTITY_TYPES = [
+  'realm_level',
+  'faction',
+  'character',
+  'item',
+  'technique',
+] as const;
 
 /** 本轮支持的实体类型。 */
 export type SupportedEntityType = (typeof SUPPORTED_ENTITY_TYPES)[number];
@@ -666,7 +675,7 @@ function buildSnapshot(
 /**
  * 创建实体。
  *
- * - 只允许规则包声明且本轮支持的实体类型（realm_level / faction / character）；
+ * - 只允许规则包声明且本轮支持的实体类型（境界 / 势力 / 人物 / 物品 / 功法）；
  * - 属性按规则包的字段定义校验；
  * - 排序值缺省时自动取"同类实体当前最大排序值 + 1"，
  *   保证同类型实体的排序集合始终是 1..N 的完整排列；

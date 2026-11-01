@@ -141,7 +141,9 @@ describe('前端契约类型与 v3 schema 同形', () => {
     expectTypeOf<FieldType>().toEqualTypeOf<
       'string' | 'text' | 'integer' | 'enum' | 'entityRef' | 'entityRefs'
     >();
-    expectTypeOf<SupportedEntityType>().toEqualTypeOf<'realm_level' | 'faction' | 'character'>();
+    expectTypeOf<SupportedEntityType>().toEqualTypeOf<
+      'realm_level' | 'faction' | 'character' | 'item' | 'technique'
+    >();
     expectTypeOf<EntityGroupItem['entityType']>().toEqualTypeOf<SupportedEntityType>();
 
     const group: EntityGroupItem = {
@@ -167,8 +169,8 @@ function assertTypeBoundaries(): void {
   void badType;
 
   const badGroup: EntityGroupItem = {
-    // @ts-expect-error 实体分组只接受本轮启用的三类
-    entityType: 'item',
+    // @ts-expect-error 实体分组只接受本轮启用的五类
+    entityType: 'location',
     title: '物品',
     schemaRef: 'xuanhuan@3.0.0',
     order: 4,

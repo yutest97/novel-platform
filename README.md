@@ -345,27 +345,33 @@ API（全部要求 active、已改密的作者会话；管理员 403；他人作
 - 页面 `/works/:id/settings`：作品方向（标签与帮助文本来自 schema）+ 境界体系
   （新增 / 编辑 / 软删除 / 上下移动）；作品详情页有「进入设定中心」入口。
 
-### 势力与人物（M2-B2：B2-A 数据契约 + B2-B 设定中心 UI）
+### 设定实体：势力 / 人物 / 物品 / 功法（M2-B2 + M2-B3-A）
 
-迁移：`packages/db/prisma/migrations/20261102000000_m2b2_character_faction/`。
-规则包升级到 **xuanhuan@3.0.0**（`field_schema.version = 3`，所有字段组 `schemaRef = xuanhuan@3.0.0`）。
+迁移：`20261102000000_m2b2_character_faction`（v3，势力 + 人物）、
+`20261103000000_m2b3a_item_technique`（v4，物品 + 功法）。
+规则包当前为 **xuanhuan@4.0.0**（`field_schema.version = 4`，所有字段组 `schemaRef = xuanhuan@4.0.0`）。
 
-**存量数据升级口径**：只把 `work_settings` / `entity_attributes` 中
-`xuanhuan@2.0.0` 的行改为 `xuanhuan@3.0.0`。
-`xuanhuan@1.0.0` 是 M2-A 时代的历史契约行，升级前后都不可见，
-**不迁移、不删除、不重新暴露**（有测试证明其行数与内容不变）。
-因为唯一索引是 `(work_id, setting_key, schema_ref)`，某键同时存在
-1.0.0 与 2.0.0 两行时，把 2.0.0 改成 3.0.0 不会冲突，所以迁移**不需要 DELETE 合并**。
+**存量数据升级口径**：每次升级只把**上一版契约**的
+`work_settings` / `entity_attributes` 行改到新版本（v3 迁移只动 `2.0.0`，
+v4 迁移只动 `3.0.0`）。
+`xuanhuan@1.0.0`（M2-A）与 `xuanhuan@2.0.0`（M2-B1）是历史契约行，升级前后都不可见，
+**不迁移、不删除、不重新暴露**（有测试逐列证明其行数与内容不变）。
+因为唯一索引含 `schema_ref`，某键同时存在 `1.0.0` / `2.0.0` / `3.0.0` 时，
+把 `3.0.0` 改成 `4.0.0` 后组合为 `1.0.0 + 2.0.0 + 4.0.0`，不会冲突，
+所以迁移**不需要 DELETE 合并**。
 
-本轮新增两类实体（`realm_level` 保持不变）：
+| 实体类型    | 字段（按 order）                                                                                                                                                                                   |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `faction`   | `type`(enum，必填：sect/family/dynasty/alliance/guild/other)、`tier`、`headquarters`、`powerRating`、`allies`(entityRefs→faction)、`enemies`(entityRefs→faction)、`description`                    |
+| `character` | `identity`、`personality`、`goal`、`secret`、`secretKnownBy`(entityRefs→character)、`initialRealm`(entityRef→realm_level)、`faction`(entityRef→faction)                                            |
+| `item`      | `category`(enum，必填：weapon/armor/pill/talisman/artifact/material/consumable/other)、`quality`(enum，必填：mortal/spirit/mystic/earth/heaven/immortal)、`acquisition`(text)、`description`(text) |
+| `technique` | `type`(enum，必填：cultivation/martial/secret/divine/innate/other)、`realmRequirement`(entityRef→realm_level)、`effect`(text)、`sideEffect`(text)、`description`(text)                             |
 
-| 实体类型    | 字段（按 order）                                                                                                                                                                |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `faction`   | `type`(enum，必填：sect/family/dynasty/alliance/guild/other)、`tier`、`headquarters`、`powerRating`、`allies`(entityRefs→faction)、`enemies`(entityRefs→faction)、`description` |
-| `character` | `identity`、`personality`、`goal`、`secret`、`secretKnownBy`(entityRefs→character)、`initialRealm`(entityRef→realm_level)、`faction`(entityRef→faction)                         |
+姓名仍来自 `entities.name`；`faction.type`、`item.category`、`item.quality`、`technique.type` 必填，
+其余业务字段可选。`enum` 入库值是 `value`（ASCII），`label` 仅用于展示。
 
-姓名仍来自 `entities.name`；两类实体的业务字段全部**可选**（`faction.type` 必填）。
-`enum` 入库值是 `value`（ASCII），`label` 仅用于展示。
+> **`item` 没有持有人字段**。物品持有人以 M2-B3-B 的 `item_events` 流水为唯一真相，
+> 本轮不提供可编辑的持有属性，避免"先写属性、再废弃"的双写不一致。
 
 **字段类型**：`string | text | integer | enum | entityRef | entityRefs`。
 `entityRef` 存单个实体 UUID；`entityRefs` 存 UUID 数组（保持输入顺序，硬上限 50，
@@ -415,11 +421,13 @@ API（全部要求 active、已改密的作者会话；管理员 403；他人作
 
 ```json
 { "settings": { "workId": "…", "workTitle": "…", "direction": { },
-  "schema": { "code": "xuanhuan", "version": "3.0.0", "entityTypes": [ … ] },
+  "schema": { "code": "xuanhuan", "version": "4.0.0", "entityTypes": [ … ] },
   "entityGroups": [
-    { "entityType": "realm_level", "title": "境界体系", "schemaRef": "xuanhuan@3.0.0", "order": 1, "entities": [ … ] },
-    { "entityType": "faction", "title": "势力", "schemaRef": "xuanhuan@3.0.0", "order": 2, "entities": [ … ] },
-    { "entityType": "character", "title": "人物", "schemaRef": "xuanhuan@3.0.0", "order": 3, "entities": [ … ] }
+    { "entityType": "realm_level", "title": "境界体系", "schemaRef": "xuanhuan@4.0.0", "order": 1, "entities": [ … ] },
+    { "entityType": "faction", "title": "势力", "schemaRef": "xuanhuan@4.0.0", "order": 2, "entities": [ … ] },
+    { "entityType": "character", "title": "人物", "schemaRef": "xuanhuan@4.0.0", "order": 3, "entities": [ … ] },
+    { "entityType": "item", "title": "物品", "schemaRef": "xuanhuan@4.0.0", "order": 4, "entities": [ … ] },
+    { "entityType": "technique", "title": "功法", "schemaRef": "xuanhuan@4.0.0", "order": 5, "entities": [ … ] }
   ] } }
 ```
 
@@ -427,19 +435,44 @@ API（全部要求 active、已改密的作者会话；管理员 403；他人作
 只包含规则包已声明且本轮启用 CRUD 的类型。
 每个类型有**独立的** `order_index`（各自 1..N），排序不会互相影响。
 
-**设定中心 UI（B2-B）**：`/works/:id/settings` 现在是四段 —— 作品方向 + 三个实体分区
-（境界体系 / 势力 / 人物）。分区顺序与标题直接取 `entityGroups`（组级 `order`），**没有硬编码**。
+**设定中心 UI（B2-B / B3-A）**：`/works/:id/settings` 现在是六段 —— 作品方向 + 五个实体分区
+（境界体系 / 势力 / 人物 / 物品 / 功法）。分区顺序与标题直接取 `entityGroups`（组级 `order`），
+**没有硬编码**：新增实体类型只需改规则包，页面自动多出分区。
 
 - 控件全部由 `field_schema` 驱动：`string` → 单行、`text` → 多行、`integer` → number、
   `enum` → `select`（显示 label、提交 value）、`entityRef` → 单选候选、
   `entityRefs` → 「选择 → 添加」的**有序**多选（提交顺序 = 选择顺序，上限取 `maxItems` 且不超过 50）；
 - 引用候选来自 `GET /entities?type=refType`，只含当前作品、未删除、类型匹配的实体；
   编辑中的实体会从候选里排除（禁止自引用）；没有候选时显示空态并提示先去对应分区创建；
-- 每个分区独立支持新增 / 编辑 / 软删除 / 上移下移 / 数量展示，三个分区的 `order_index` 互不影响；
+- 每个分区独立支持新增 / 编辑 / 软删除 / 上移下移 / 数量展示，五个分区的 `order_index` 互不影响；
 - 删除被拒（`409 ENTITY_IN_USE`）时展示 `references.total` 与最多 20 条「类型 · 名称」，
   **不含属性值、秘密或正文**；作者解除引用后即可正常删除；
 - 设定值（含人物「秘密」）只存在于组件内存：不写 URL、`localStorage`、`sessionStorage`，
   也不写任何日志。
+
+#### 交付口径（M2-B3-A）
+
+| 需求                                                     | 状态                                                                                           |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| F-WRK-09 功法/能力（名称、类型、境界门槛、效果、副作用） | **完成**：`technique` 五个字段齐全，`realmRequirement` 引用境界，删除被引用境界 → `409` + 摘要 |
+| F-WRK-07 物品/法宝（名称、类别、品质、持有人、获取方式） | **部分交付**：名称/类别/品质/获取方式已交付；**持有人由 M2-B3-B 交付**                         |
+| F-WRK-11 物品获得/消耗/丢失/转手事件流水                 | **未交付**（B3-B）                                                                             |
+| F-WRK-08 资源流水                                        | **未交付**（M2-B4）                                                                            |
+
+#### B3-B 预留契约（仅记录，本轮**不建表、不建路由**）
+
+`item_events`：`id, work_id, item_entity_id, event_type, from_holder, to_holder,
+seq_no, reversal_of, idempotency_key, note, created_by, created_at`。
+
+- 唯一约束 `(item_entity_id, idempotency_key)`；
+- `seq_no` 在作品级锁内按 `item` 取 `max(seq_no) + 1`；
+- `reversal_of` 唯一（被冲正事件只能冲正一次，冲正事件不可再冲正）；
+- 事件类型 `obtained`（from=null，to=人物）/ `transferred`（from/to 为不同人物）/
+  `consumed`、`lost`（from=人物，to=null）；
+- 持有人与物品生命周期状态**由流水回放得出**（不写 `item.holder` 属性）；
+- append-only 触发器禁止 `UPDATE` / `DELETE`；
+- 历史事件中的 holder **不参与**当前删除保护，避免人物被永久锁死；
+- `chapter_id` 暂不建列，等 `chapters` 表落地时同迁移补列与 FK。
 
 **未交付项（不得标记完成）**：`F-WRK-15 人物「当前知道/不知道」信息清单`
 **仍由 M6 事实版本系统交付**，依赖 `fact_id` + 事实版本
@@ -456,7 +489,7 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖（51 个用例，分四个 spec 文件：账号管理 / 设定中心 / 作品流程 / 账号上限）：
+覆盖（54 个用例，分四个 spec 文件：账号管理 / 设定中心 / 作品流程 / 账号上限）：
 未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
 刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
 启用后可登录、退出后保持未登录、第 11 个账号的上限提示，
@@ -477,6 +510,9 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
 解除引用后可删 → 删除被引用的势力 `409` 摘要 → 解除后可删 → 三类实体各自排序互不影响 →
 enum 只有规则包给的固定选项（非法值即使绕过界面也被服务端拒绝）→
 候选不含其它作者作品数据 → 390×844 移动端完成人物创建与多选且不撑破视口。
+**设定中心（M2-B3-A 物品 / 功法）**：物品分区两个 enum 只有规则包选项、页面**没有持有人字段** →
+创建 / 编辑 / 删除物品 → 功法引用境界、删除被引用境界 `409` 并列出「功法 · 青元剑诀」→
+解除引用后可删 → 390×844 移动端创建物品与功法且五分区不撑破视口。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

@@ -308,6 +308,8 @@ describe('M2-B2-A-REV-01 规则包坏数据：GET 设定中心与写入实体都
       'realm_level',
       'faction',
       'character',
+      'item',
+      'technique',
     ]);
     await expect(
       createEntity(handle.db, {
@@ -349,7 +351,9 @@ describe('M2-B2-A-REV-01 规则包坏数据：GET 设定中心与写入实体都
     expect(center.schema.entityTypes.map((item) => item.key).sort()).toEqual([
       'character',
       'faction',
+      'item',
       'realm_level',
+      'technique',
     ]);
   });
 

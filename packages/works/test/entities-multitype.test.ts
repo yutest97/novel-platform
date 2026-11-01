@@ -1,5 +1,6 @@
 /**
- * M2-B2：多实体类型（realm_level / faction / character）与引用体系。
+ * M2-B2 / M2-B3-A：多实体类型（realm_level / faction / character / item / technique）
+ * 与引用体系。
  *
  * 覆盖：
  * - schema 解析与校验（enum / entityRef / entityRefs）；
@@ -72,23 +73,42 @@ describe('M2-B2 多实体类型与引用', () => {
    * schema：解析与纯校验
    * ---------------------------------------------------------------- */
 
-  it('规则包 v3 声明了 realm_level / faction / character，且三类 schemaRef 恒等', async () => {
+  it('规则包 v4 声明五类实体，且五组 schemaRef 恒等', async () => {
     const db = testDb();
     const rulePackage = await db.rulePackage.findUniqueOrThrow({ where: { code: 'xuanhuan' } });
     const schema = parseRuleFieldSchema(rulePackage.fieldSchema);
 
-    expect(rulePackage.version).toBe('3.0.0');
-    expect(schema.version).toBe(3);
+    expect(rulePackage.version).toBe('4.0.0');
+    expect(schema.version).toBe(4);
     expect(Object.keys(schema.entityTypes ?? {}).sort()).toEqual([
       'character',
       'faction',
+      'item',
       'realm_level',
+      'technique',
     ]);
     for (const group of Object.values(schema.entityTypes ?? {})) {
-      expect(group.schemaRef).toBe('xuanhuan@3.0.0');
+      expect(group.schemaRef).toBe('xuanhuan@4.0.0');
     }
     expect(schema.entityTypes?.['faction']?.order).toBe(2);
     expect(schema.entityTypes?.['character']?.order).toBe(3);
+    expect(schema.entityTypes?.['item']?.order).toBe(4);
+    expect(schema.entityTypes?.['technique']?.order).toBe(5);
+
+    // item 不得出现 holder 字段：持有人以 B3-B 的 item_events 流水为唯一真相
+    expect(schema.entityTypes?.['item']?.fields.map((field) => field.key)).toEqual([
+      'category',
+      'quality',
+      'acquisition',
+      'description',
+    ]);
+    expect(schema.entityTypes?.['technique']?.fields.map((field) => field.key)).toEqual([
+      'type',
+      'realmRequirement',
+      'effect',
+      'sideEffect',
+      'description',
+    ]);
   });
 
   it('enum 选项来自规则包：入库值是 value，非法值一律 400', async () => {
@@ -432,16 +452,18 @@ describe('M2-B2 多实体类型与引用', () => {
       }),
     ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
 
-    // 未实现的类型
-    await expect(
-      reorderEntities(db, {
-        workId,
-        authorId: author.id,
-        entityType: 'item',
-        entityIds: [],
-        meta: META,
-      }),
-    ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+    // 规则包未声明 / 本轮未实现的类型
+    for (const entityType of ['location', 'resource_type']) {
+      await expect(
+        reorderEntities(db, {
+          workId,
+          authorId: author.id,
+          entityType,
+          entityIds: [],
+          meta: META,
+        }),
+      ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+    }
   });
 
   it('同名只在同类型内冲突：不同类型可以重名', async () => {
@@ -562,7 +584,7 @@ describe('M2-B2 多实体类型与引用', () => {
    * entityGroups DTO
    * ---------------------------------------------------------------- */
 
-  it('设定中心返回 entityGroups（三个分组、按 order 排序、无 realms 字段）', async () => {
+  it('设定中心返回 entityGroups（五个分组、按 order 排序、无 realms 字段）', async () => {
     const db = testDb();
     const author = await createAuthor();
     const workId = await createWork(author.id);
@@ -591,11 +613,19 @@ describe('M2-B2 多实体类型与引用', () => {
       'realm_level',
       'faction',
       'character',
+      'item',
+      'technique',
     ]);
-    expect(center.entityGroups.map((group) => group.title)).toEqual(['境界体系', '势力', '人物']);
-    expect(center.entityGroups.map((group) => group.order)).toEqual([1, 2, 3]);
+    expect(center.entityGroups.map((group) => group.title)).toEqual([
+      '境界体系',
+      '势力',
+      '人物',
+      '物品',
+      '功法',
+    ]);
+    expect(center.entityGroups.map((group) => group.order)).toEqual([1, 2, 3, 4, 5]);
     for (const group of center.entityGroups) {
-      expect(group.schemaRef).toBe('xuanhuan@3.0.0');
+      expect(group.schemaRef).toBe('xuanhuan@4.0.0');
     }
     expect(center.entityGroups[0]?.entities.map((item) => item.name)).toEqual(['炼气']);
     expect(center.entityGroups[1]?.entities.map((item) => item.name)).toEqual(['青云宗']);
@@ -633,7 +663,7 @@ describe('M2-B2 多实体类型与引用', () => {
       meta: META,
     });
 
-    for (const entityType of ['realm_level', 'faction', 'character']) {
+    for (const entityType of ['realm_level', 'faction', 'character', 'item', 'technique']) {
       await expect(
         listEntities(db, { workId, authorId: intruder.id, entityType }),
         `${entityType} 列表应 404`,
@@ -689,7 +719,8 @@ describe('M2-B2 规则包坏数据：refType 未声明', () => {
   it('refType 未在 entityTypes 中声明时按 INVALID_RULE_PACKAGE 处理', async () => {
     const { db, raw } = handle;
 
-    // 把 character.initialRealm 的 refType 改成未声明的 'item'
+    // 把 character.initialRealm 的 refType 改成未声明的 'location'
+    // （item/technique 现在已声明，必须用规则包里确实不存在的类型）
     await raw.query(
       `UPDATE rule_packages
           SET field_schema = jsonb_set(
@@ -698,7 +729,7 @@ describe('M2-B2 规则包坏数据：refType 未声明', () => {
                 (
                   SELECT jsonb_agg(
                            CASE WHEN f->>'key' = 'initialRealm'
-                                THEN jsonb_set(f, '{refType}', '"item"')
+                                THEN jsonb_set(f, '{refType}', '"location"')
                                 ELSE f END
                            ORDER BY ord)
                     FROM jsonb_array_elements(field_schema->'entityTypes'->'character'->'fields')

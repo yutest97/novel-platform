@@ -339,23 +339,21 @@ test('8. 移动端 390×844：可编辑作品方向并新增境界', async ({ br
   await context.close();
 });
 
-test('9. 设定页只开放本阶段的四类分区，不出现物品/功法/地点/关系图/AI 入口', async ({
-  browser,
-}) => {
+test('9. 设定页只开放本阶段的五类分区，不出现地点/关系图/AI 入口', async ({ browser }) => {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();
 
   await login(page, AUTHOR_A_EMAIL, AUTHOR_A_NEW_PASSWORD);
   await page.goto(`/works/${authorAWorkId}/settings`);
 
-  // 本阶段开放的四类分区（顺序见下一个用例）
+  // 本阶段开放的五个实体分区（顺序见下一个用例）
   await expect(page.getByTestId('direction-save')).toBeVisible();
-  await expect(page.getByTestId('realm-section')).toBeVisible();
-  await expect(page.getByTestId('faction-section')).toBeVisible();
-  await expect(page.getByTestId('character-section')).toBeVisible();
+  for (const key of ['realm', 'faction', 'character', 'item', 'technique']) {
+    await expect(page.getByTestId(`${key}-section`)).toBeVisible();
+  }
 
   // 后续阶段的能力不能以任何可点击入口出现
-  for (const label of ['物品', '功法', '地点', '关系图', 'AI 生成']) {
+  for (const label of ['地点', '关系图', 'AI 生成']) {
     await expect(page.getByRole('button', { name: label })).toHaveCount(0);
     await expect(page.getByRole('link', { name: label })).toHaveCount(0);
   }
@@ -368,9 +366,11 @@ test('9. 设定页只开放本阶段的四类分区，不出现物品/功法/地
  * ------------------------------------------------------------------ */
 
 /** 打开某个分区的新建表单并提交；`fill` 里可以继续操作该分区内的控件。 */
+type SectionKey = 'realm' | 'faction' | 'character' | 'item' | 'technique';
+
 async function createInSection(
   page: Page,
-  key: 'realm' | 'faction' | 'character',
+  key: SectionKey,
   name: string,
   fill?: () => Promise<void>,
 ): Promise<void> {
@@ -387,7 +387,7 @@ async function createInSection(
 }
 
 /** 某分区当前的实体名称顺序。 */
-async function namesOf(page: Page, key: 'realm' | 'faction' | 'character'): Promise<string[]> {
+async function namesOf(page: Page, key: SectionKey): Promise<string[]> {
   return page.getByTestId(`${key}-name`).allTextContents();
 }
 
@@ -399,13 +399,13 @@ test('10. 分区顺序来自 entityGroups.order，可创建两个势力', async 
   await page.goto(`/works/${authorAWorkId}/settings`);
 
   // 三个分区都渲染完成后再收集标题
-  await expect(page.getByTestId('realm-section')).toBeVisible();
-  await expect(page.getByTestId('faction-section')).toBeVisible();
-  await expect(page.getByTestId('character-section')).toBeVisible();
+  for (const key of ['realm', 'faction', 'character', 'item', 'technique']) {
+    await expect(page.getByTestId(`${key}-section`)).toBeVisible();
+  }
 
-  // 分区顺序由服务端 entityGroups.order 决定：境界 → 势力 → 人物
+  // 分区顺序由服务端 entityGroups.order 决定：境界 → 势力 → 人物 → 物品 → 功法
   const headings = await page.locator('[data-testid$="-section"] h2').allTextContents();
-  expect(headings).toEqual(['境界体系', '势力', '人物']);
+  expect(headings).toEqual(['境界体系', '势力', '人物', '物品', '功法']);
 
   await expect(page.getByTestId('faction-count')).toContainText('0');
   await expect(page.getByTestId('faction-empty')).toBeVisible();
@@ -812,6 +812,189 @@ test('20. 移动端 390×844：创建人物、单选势力与多选秘密知晓�
   expect(metrics.docWidth).toBeLessThanOrEqual(metrics.viewport + 1);
 
   await page.screenshot({ path: shotM2b2('multitype-mobile'), fullPage: false });
+
+  await context.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * M2-B3-A：物品（item）与功法（technique）
+ * ------------------------------------------------------------------ */
+
+test('21. 物品分区：enum 只给规则包选项，没有「持有人」字段，可编辑与删除', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await login(page, AUTHOR_A_EMAIL, AUTHOR_A_NEW_PASSWORD);
+  await page.goto(`/works/${authorAWorkId}/settings`);
+
+  await expect(page.getByTestId('item-count')).toContainText('0');
+  await page.getByTestId('item-create-open').click();
+
+  // 类别 / 品质都是固定选项的 select（label 展示、value 入库）
+  for (const [testId, expected] of [
+    [
+      'item-new-category',
+      ['', 'weapon', 'armor', 'pill', 'talisman', 'artifact', 'material', 'consumable', 'other'],
+    ],
+    ['item-new-quality', ['', 'mortal', 'spirit', 'mystic', 'earth', 'heaven', 'immortal']],
+  ] as const) {
+    const control = page.getByTestId(testId);
+    expect(await control.evaluate((element) => element.tagName)).toBe('SELECT');
+    const values = await control
+      .locator('option')
+      .evaluateAll((elements) => elements.map((element) => (element as HTMLOptionElement).value));
+    expect(values).toEqual([...expected]);
+  }
+
+  // 本阶段没有持有人字段（持有人由 B3-B 的事件流水推导）
+  await expect(page.getByTestId('item-new-holder')).toHaveCount(0);
+  await expect(page.getByLabel('持有人')).toHaveCount(0);
+
+  await page.getByTestId('item-new-name').fill('青锋剑');
+  await page.getByTestId('item-new-category').selectOption('weapon');
+  await page.getByTestId('item-new-quality').selectOption('mystic');
+  await page.getByTestId('item-new-acquisition').fill('秘境所得');
+  await page.getByTestId('item-create-submit').click();
+
+  const sword = page.getByTestId('item-item').filter({ hasText: '青锋剑' });
+  await expect(sword).toHaveCount(1);
+  await expect(sword.getByTestId('item-attr-category')).toHaveText('武器');
+  await expect(sword.getByTestId('item-attr-quality')).toHaveText('玄品');
+  await expect(sword.getByTestId('item-attr-acquisition')).toHaveText('秘境所得');
+
+  // 编辑品质
+  await sword.getByTestId('item-edit').click();
+  await page.getByTestId('item-edit-quality').selectOption('heaven');
+  await page.getByTestId('item-edit-save').click();
+  await expect(page.getByTestId('settings-notice')).toContainText('已更新');
+  await page.reload();
+  await expect(
+    page.getByTestId('item-item').filter({ hasText: '青锋剑' }).getByTestId('item-attr-quality'),
+  ).toHaveText('天品');
+
+  // 物品不被任何人引用 → 可以直接删除
+  await page
+    .getByTestId('item-item')
+    .filter({ hasText: '青锋剑' })
+    .getByTestId('item-delete')
+    .click();
+  await expect(page.getByTestId('settings-notice')).toContainText('已删除');
+  await expect(page.getByTestId('item-count')).toContainText('0');
+
+  await context.close();
+});
+
+test('22. 功法分区：境界门槛引用境界，删除被引用的境界 409 并展示功法名称', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await login(page, AUTHOR_A_EMAIL, AUTHOR_A_NEW_PASSWORD);
+  await page.goto(`/works/${authorAWorkId}/settings`);
+
+  await expect(page.getByTestId('item-section')).toBeVisible();
+
+  // 功法类型是固定选项的 select
+  await page.getByTestId('technique-create-open').click();
+  const typeControl = page.getByTestId('technique-new-type');
+  expect(await typeControl.evaluate((element) => element.tagName)).toBe('SELECT');
+  expect(
+    await typeControl
+      .locator('option')
+      .evaluateAll((elements) => elements.map((element) => (element as HTMLOptionElement).value)),
+  ).toEqual(['', 'cultivation', 'martial', 'secret', 'divine', 'innate', 'other']);
+
+  // 境界门槛的候选里只有当前作品的境界
+  const realmOptions = await page
+    .getByTestId('technique-new-realmRequirement')
+    .locator('option')
+    .allTextContents();
+  expect(realmOptions).toContain('炼气');
+  expect(realmOptions).not.toContain('别人的境界');
+
+  await page.getByTestId('technique-new-name').fill('青元剑诀');
+  await page.getByTestId('technique-new-type').selectOption('cultivation');
+  await page.getByTestId('technique-new-realmRequirement').selectOption({ label: '炼气' });
+  await page.getByTestId('technique-new-effect').fill('剑气纵横');
+  await page.getByTestId('technique-create-submit').click();
+
+  const technique = page.getByTestId('technique-item').filter({ hasText: '青元剑诀' });
+  await expect(technique).toHaveCount(1);
+  await expect(technique.getByTestId('technique-attr-type')).toHaveText('功法');
+  await expect(technique.getByTestId('technique-attr-realmRequirement')).toHaveText('炼气');
+
+  // 删除被功法引用的境界 → 409，摘要里列出「功法 · 青元剑诀」
+  await page
+    .getByTestId('realm-item')
+    .filter({ hasText: '炼气' })
+    .getByTestId('realm-delete')
+    .click();
+  await expect(page.getByTestId('realm-error')).toContainText('该实体当前被引用，无法删除');
+  await expect(page.getByTestId('realm-references')).toContainText('共 1 个实体引用了它');
+  await expect(page.getByTestId('realm-reference-item')).toHaveText('功法 · 青元剑诀');
+
+  // 解除引用后可删
+  await page
+    .getByTestId('technique-item')
+    .filter({ hasText: '青元剑诀' })
+    .getByTestId('technique-edit')
+    .click();
+  await page.getByTestId('technique-edit-realmRequirement').selectOption('');
+  await page.getByTestId('technique-edit-save').click();
+  await expect(page.getByTestId('settings-notice')).toContainText('已更新');
+
+  await page
+    .getByTestId('realm-item')
+    .filter({ hasText: '炼气' })
+    .getByTestId('realm-delete')
+    .click();
+  await expect(page.getByTestId('settings-notice')).toContainText('已删除');
+  await expect(page.getByTestId('realm-item').filter({ hasText: '炼气' })).toHaveCount(0);
+
+  // 功法还在，只是门槛变空
+  await page.reload();
+  await expect(
+    page
+      .getByTestId('technique-item')
+      .filter({ hasText: '青元剑诀' })
+      .getByTestId('technique-attr-realmRequirement'),
+  ).toHaveText('—');
+
+  await page.screenshot({ path: shotM2b2('item-technique-settings'), fullPage: true });
+
+  await context.close();
+});
+
+test('23. 移动端 390×844：可创建物品与功法，五分区不撑破视口', async ({ browser }) => {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  const page = await context.newPage();
+
+  await login(page, AUTHOR_A_EMAIL, AUTHOR_A_NEW_PASSWORD);
+  await page.goto(`/works/${authorAWorkId}/settings`);
+
+  for (const key of ['realm', 'faction', 'character', 'item', 'technique']) {
+    await expect(page.getByTestId(`${key}-section`)).toBeAttached();
+  }
+
+  await createInSection(page, 'item', '玄铁盾', async () => {
+    await page.getByTestId('item-new-category').selectOption('armor');
+    await page.getByTestId('item-new-quality').selectOption('earth');
+  });
+
+  await createInSection(page, 'technique', '龟息功', async () => {
+    await page.getByTestId('technique-new-type').selectOption('secret');
+  });
+
+  const metrics = await page.evaluate(() => ({
+    docWidth: document.documentElement.scrollWidth,
+    viewport: window.innerWidth,
+  }));
+  expect(metrics.docWidth).toBeLessThanOrEqual(metrics.viewport + 1);
+
+  await page.screenshot({ path: shotM2b2('item-technique-mobile'), fullPage: false });
 
   await context.close();
 });

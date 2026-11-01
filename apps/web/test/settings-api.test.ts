@@ -246,7 +246,7 @@ describe('设定中心接口（M2-B1）', () => {
     const badType = await entitiesPost(
       request(`/api/works/${workId}/entities`, {
         method: 'POST',
-        body: { entityType: 'item', name: '断剑', attributes: {} },
+        body: { entityType: 'location', name: '断剑', attributes: {} },
         token: author.token,
         origin: ORIGIN,
       }),
@@ -706,7 +706,7 @@ describe('设定中心接口（M2-B1）', () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
 
-    for (const entityType of ['item', 'technique', 'location', 'unknown']) {
+    for (const entityType of ['location', 'unknown']) {
       const response = await entitiesGet(
         request(`/api/works/${workId}/entities?type=${entityType}`, { token: author.token }),
         { params: Promise.resolve({ id: workId }) },
@@ -716,8 +716,8 @@ describe('设定中心接口（M2-B1）', () => {
       expect(body.error.code).toBe('ENTITY_TYPE_NOT_ALLOWED');
     }
 
-    // 本轮支持的三类都正常返回（初始为空）
-    for (const entityType of ['realm_level', 'faction', 'character']) {
+    // 本轮支持的五类都正常返回（初始为空）
+    for (const entityType of ['realm_level', 'faction', 'character', 'item', 'technique']) {
       const ok = await entitiesGet(
         request(`/api/works/${workId}/entities?type=${entityType}`, { token: author.token }),
         { params: Promise.resolve({ id: workId }) },
@@ -1026,7 +1026,7 @@ describe('设定中心接口（M2-B1）', () => {
     expect(text).not.toContain('authorId');
   });
 
-  it('设定中心返回规范化 entityGroups：三分组、按 order 排序、无 realms 字段', async () => {
+  it('设定中心返回规范化 entityGroups：五个分组、按 order 排序、无 realms 字段', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
 
@@ -1053,15 +1053,19 @@ describe('设定中心接口（M2-B1）', () => {
       'realm_level',
       'faction',
       'character',
+      'item',
+      'technique',
     ]);
-    expect(body.settings.entityGroups.map((group) => group.order)).toEqual([1, 2, 3]);
+    expect(body.settings.entityGroups.map((group) => group.order)).toEqual([1, 2, 3, 4, 5]);
     expect(body.settings.entityGroups.map((group) => group.title)).toEqual([
       '境界体系',
       '势力',
       '人物',
+      '物品',
+      '功法',
     ]);
     for (const group of body.settings.entityGroups) {
-      expect(group.schemaRef).toBe('xuanhuan@3.0.0');
+      expect(group.schemaRef).toBe('xuanhuan@4.0.0');
       expect(group.entities).toEqual([]);
     }
   });
@@ -1279,5 +1283,187 @@ describe('设定中心接口（M2-B1）', () => {
     );
     expect(withoutType.status).toBe(200);
     expect(await readOrder()).toEqual([ids[0], ids[1]]);
+  });
+
+  it('物品与功法：enum 取值、item 无 holder、功法引用境界与删除保护', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    // 1) 创建境界（功法的门槛）
+    const realmResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '炼气', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(realmResponse.status).toBe(201);
+    const realmId = ((await realmResponse.json()) as { entity: { id: string } }).entity.id;
+
+    // 2) 物品：enum 提交 value，响应回显 value；holder 不是规则包字段
+    const itemResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'item',
+          name: '青锋剑',
+          attributes: { category: 'weapon', quality: 'mystic', acquisition: '秘境所得' },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(itemResponse.status).toBe(201);
+    const itemBody = (await itemResponse.json()) as {
+      entity: { id: string; attributes: Record<string, unknown> };
+    };
+    expect(itemBody.entity.attributes).toEqual({
+      category: 'weapon',
+      quality: 'mystic',
+      acquisition: '秘境所得',
+    });
+
+    const withHolder = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'item',
+          name: '带持有人的剑',
+          attributes: { category: 'weapon', quality: 'spirit', holder: author.id },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(withHolder.status).toBe(400);
+    expect(((await withHolder.json()) as { error: { code: string } }).error.code).toBe(
+      'VALIDATION_FAILED',
+    );
+
+    const badCategory = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'item',
+          name: '非法类别',
+          attributes: { category: 'not-an-option', quality: 'spirit' },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(badCategory.status).toBe(400);
+
+    // 3) 功法：境界门槛引用境界；指向势力则 400
+    const techniqueResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'technique',
+          name: '青元剑诀',
+          attributes: { type: 'cultivation', realmRequirement: realmId, effect: '剑气纵横' },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(techniqueResponse.status).toBe(201);
+    const technique = (
+      (await techniqueResponse.json()) as {
+        entity: { id: string; attributes: Record<string, unknown> };
+      }
+    ).entity;
+    expect(technique.attributes['realmRequirement']).toBe(realmId);
+
+    const factionResponse = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'faction', name: '青云宗', attributes: { type: 'sect' } },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const factionId = ((await factionResponse.json()) as { entity: { id: string } }).entity.id;
+
+    const wrongType = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: {
+          entityType: 'technique',
+          name: '错误门槛',
+          attributes: { type: 'martial', realmRequirement: factionId },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(wrongType.status).toBe(400);
+
+    // 4) 删除被功法引用的境界 → 409 + 摘要里是功法
+    const blocked = await entityDelete(
+      request(`/api/works/${workId}/entities/${realmId}`, {
+        method: 'DELETE',
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: realmId }) },
+    );
+    expect(blocked.status).toBe(409);
+    const blockedBody = (await blocked.json()) as {
+      error: {
+        code: string;
+        references: { total: number; items: { id: string; entityType: string; name: string }[] };
+      };
+    };
+    expect(blockedBody.error.code).toBe('ENTITY_IN_USE');
+    expect(blockedBody.error.references).toEqual({
+      total: 1,
+      items: [{ id: technique.id, entityType: 'technique', name: '青元剑诀' }],
+    });
+
+    // 5) 解除引用后可删
+    const cleared = await entityPatch(
+      request(`/api/works/${workId}/entities/${technique.id}`, {
+        method: 'PATCH',
+        body: { attributes: { type: 'cultivation', effect: '剑气纵横' } },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: technique.id }) },
+    );
+    expect(cleared.status).toBe(200);
+
+    const deleted = await entityDelete(
+      request(`/api/works/${workId}/entities/${realmId}`, {
+        method: 'DELETE',
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: realmId }) },
+    );
+    expect(deleted.status).toBe(200);
+
+    // 6) 设定中心里五类分区都在，且 item / technique 各有一条
+    const settings = await settingsGet(
+      request(`/api/works/${workId}/settings`, { token: author.token }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const settingsBody = (await settings.json()) as {
+      settings: { entityGroups: { entityType: string; entities: { name: string }[] }[] };
+    };
+    const namesOf = (type: string): string[] =>
+      settingsBody.settings.entityGroups
+        .find((group) => group.entityType === type)
+        ?.entities.map((entity) => entity.name) ?? [];
+    expect(namesOf('item')).toEqual(['青锋剑']);
+    expect(namesOf('technique')).toEqual(['青元剑诀']);
   });
 });

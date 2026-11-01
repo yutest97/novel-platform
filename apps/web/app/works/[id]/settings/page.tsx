@@ -5,7 +5,7 @@
  *
  * 分区（顺序来自 `entityGroups.order`，**不硬编码**）：
  * - 作品方向（field_schema.workDirection）；
- * - 境界体系 / 势力 / 人物（field_schema.entityTypes）。
+ * - 境界体系 / 势力 / 人物 / 物品 / 功法（field_schema.entityTypes）。
  *
  * 约束：
  * - 只允许作品所有者访问（服务端与客户端双重校验）；
@@ -13,7 +13,8 @@
  * - 引用候选只来自"当前作品 + 未删除 + 类型匹配"（服务端过滤，见 GET /entities）；
  * - 编辑中的实体会从候选里排除（禁止自引用）；
  * - 秘密等设定值只存在于组件内存：不写 URL、localStorage、sessionStorage 或日志；
- * - 不提供物品、功法、地点、关系图或 AI 生成入口。
+ * - 不提供地点、关系图或 AI 生成入口；
+ * - 物品**没有持有人字段**：持有人以 M2-B3-B 的 item_events 流水为唯一真相。
  */
 
 import Link from 'next/link';
@@ -276,7 +277,8 @@ export default function WorkSettingsPage(): React.ReactElement {
       <div className="card">
         <h2>本阶段范围</h2>
         <p>
-          设定中心当前包含作品方向、境界体系、势力与人物；物品、功法、地点、关系图与章节创作留待后续阶段。
+          设定中心当前包含作品方向、境界体系、势力、人物、物品与功法；
+          物品持有人（事件流水）、资源流水、地点、关系图与章节创作留待后续阶段。
         </p>
         <p className="hint">本阶段不提供 AI 生成入口。</p>
       </div>

@@ -303,11 +303,14 @@
 
 ---
 
-## 14. 设定模块验收（M2-B2：境界 / 势力 / 人物）
+## 14. 设定模块验收（M2-B2 / M2-B3-A：境界 / 势力 / 人物 / 物品 / 功法）
 
-M2-B2 交付范围：`realm_level`（境界体系，沿用 M2-B1 并升级到 v3 契约）、`faction`（势力）、
-`character`（人物）三类实体的**契约、接口、设定中心 UI 与 E2E**。
-**未交付**且不得标记完成：物品、功法、地点、关系图、资源流水、时间线、伏笔；
+M2-B2 交付范围：`realm_level`（境界体系）、`faction`（势力）、`character`（人物）；
+M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），规则包升级到 **xuanhuan@4.0.0**。
+五类实体共用 `entities / entity_attributes / entity_versions` 通用骨架，五类都有
+**契约、接口、设定中心 UI 与 E2E**。
+**未交付**且不得标记完成：物品持有人与 `item_events` 流水（B3-B，见 `AT-SET-15` 的说明）、
+地点、关系图、资源流水（M2-B4）、时间线、伏笔；
 `F-WRK-15`（人物「当前知道/不知道」信息清单）仍由 M6 事实版本系统交付
 （依赖 `fact_id` + 事实版本），`character.secretKnownBy` 只表示**设定层「谁知道这个秘密」**，
 不构成事实级认知模型。
@@ -324,6 +327,11 @@ M2-B2 交付范围：`realm_level`（境界体系，沿用 M2-B1 并升级到 v3
 | AT-SET-8 | UI：四分区（方向/境界/势力/人物，顺序来自 `entityGroups.order`）、schema 驱动控件（enum → select、entityRef → 单选、entityRefs → 有序多选）、无候选空态、禁止自引用 | `apps/web/e2e/settings-flow.spec.ts` 用例 10–13、18–20 |
 | AT-SET-9 | UI 删除保护：`409` 展示引用总数与引用者「类型 · 名称」、解除引用后可删 | `apps/web/e2e/settings-flow.spec.ts` 用例 14–16 |
 | AT-SET-10 | 三类实体排序互不影响；候选不含他人作品数据；移动端 390×844 不撑破视口 | `apps/web/e2e/settings-flow.spec.ts` 用例 17、19、20 |
+| AT-SET-11 | 规则包 v4：五类字段组、`schemaRef` 恒等；`item` 字段恰为 category/quality/acquisition/description（**无 holder**） | `packages/works/test/entities-multitype.test.ts` |
+| AT-SET-12 | v3 → v4 升级：只迁 `3.0.0`；`1.0.0`/`2.0.0` 行内容逐列不变；三代同键重复不冲突；升级前后 `getSettingsCenter` 语义相等；迁移幂等 | `packages/works/test/migration-v4-upgrade.test.ts` |
+| AT-SET-13 | item / technique 契约：enum 必填与取值、`holder` 作为未知字段 400、`technique.realmRequirement` 的存在/未删除/同作品/类型一致/禁自引用 | `entities-item-technique.test.ts`、`apps/web/test/settings-api.test.ts` |
+| AT-SET-14 | 删除保护（B3-A 口径）：删除被功法引用的境界 `409` + 引用摘要（含功法名称），解引用后可删；删除物品永远允许 | 同上 |
+| AT-SET-15 | UI：物品 / 功法分区自动出现（顺序 4、5）、两个 enum 只有规则包选项、页面无「持有人」控件、删除被引用境界展示「功法 · X」、五分区排序互不影响、移动端不撑破视口 | `apps/web/e2e/settings-flow.spec.ts` 用例 9、10、21–23 |
 
 ---
 
@@ -346,8 +354,8 @@ M2-B2 交付范围：`realm_level`（境界体系，沿用 M2-B1 并升级到 v3
 | F-WRK-06 | AT-SET-1/2/6/10（境界体系）、AT-FLOW-1、AT-CONT-3 |
 | F-WRK-07 | AT-FLOW-1（物品）、AT-CHK-4 |
 | F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 |
-| F-WRK-09 | AT-FLOW-1（功法） |
-| F-WRK-11 | AT-CHK-4（物品流水） |
+| F-WRK-09 | AT-SET-11/13/15（**已完成**）、AT-FLOW-1（功法） |
+| F-WRK-11 | AT-CHK-4（物品流水）——**未交付：B3-B（item_events）** |
 | F-WRK-15 | AT-CHK-5（认知）——**仍待 M6 事实版本系统交付，M2-B2 未交付** |
 | F-WRK-16 | AT-FORE-1/2/3/4（伏笔） |
 | F-WRK-17 | AT-CHK-6（时间线） |
