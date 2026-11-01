@@ -182,6 +182,16 @@ export function entityTypeGroup(
 }
 
 /**
+ * 取"作品方向"这组字段定义。
+ *
+ * 作品方向与实体类型在 field_schema 里是**两个并列的顶层键**
+ * （`workDirection` 与 `entityTypes`），因此不能用 `entityTypeGroup`。
+ */
+export function workDirectionGroup(rulePackage: { fieldSchema: unknown }): FieldGroup | null {
+  return parseRuleFieldSchema(rulePackage.fieldSchema).workDirection ?? null;
+}
+
+/**
  * 按字段定义校验一组设定值。
  *
  * 规则：

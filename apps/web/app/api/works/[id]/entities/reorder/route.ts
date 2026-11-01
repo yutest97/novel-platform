@@ -3,32 +3,28 @@ import { ALLOWED_ENTITY_TYPE, reorderEntities } from '@novel/works';
 
 import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
-import { rejectImmutableFields, requireStringArray } from '@/settings-http';
+import { rejectUnknownFields, requireStringArray } from '@/settings-http';
 import { requireAuthorSession } from '@/work-guard';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 /**
- * 排序接口里不允许出现的字段。
+ * 排序接口的允许字段（严格白名单）。
  *
- * 注意 `entityType` **不在**其中：它指明要排序哪一类实体（第一版只有
- * realm_level），由业务层校验取值；作品归属类字段才是不可提交的。
+ * `entityType` 在其中：它指明要排序哪一类实体（第一版只有 realm_level），
+ * 取值由业务层校验；作品归属类字段（id / workId / authorId / 时间戳……）
+ * 一律不允许提交。
  */
-const IMMUTABLE_REORDER_FIELDS = [
-  'id',
-  'workId',
-  'work_id',
-  'authorId',
-  'author_id',
-  'createdAt',
-  'created_at',
-] as const;
+const REORDER_FIELDS = ['entityType', 'entityIds'] as const;
 
 /**
  * PUT /api/works/:id/entities/reorder —— 调整实体顺序。
  *
+ * - 请求体是严格白名单：只接受 entityType / entityIds；
  * - 只允许**完整、无重复、且全部属于当前作品**的实体集合；
+ * - 集合校验在作品级锁 + 同一事务内重新执行，
+ *   因此并发排序不会写出混合顺序，也不会把死锁暴露为 500；
  * - 更新 order_index 与 `entity.reordered` 审计同事务。
  */
 export async function PUT(
@@ -41,7 +37,7 @@ export async function PUT(
     const { id } = await context.params;
 
     const body = await readJsonObject(request);
-    rejectImmutableFields(body, IMMUTABLE_REORDER_FIELDS);
+    rejectUnknownFields(body, REORDER_FIELDS);
 
     const entityType =
       typeof body['entityType'] === 'string' ? body['entityType'] : ALLOWED_ENTITY_TYPE;

@@ -174,6 +174,117 @@ describe('设定中心与实体（M2-B1）', () => {
     expect(detail).not.toContain('东方玄幻');
   });
 
+  it('可选作品方向字段被清空后不再返回（旧行被删除）', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    // 先保存含两个可选字段的方向
+    await updateDirection(db, {
+      workId,
+      authorId: author.id,
+      values: {
+        subGenre: '东方玄幻',
+        goldenFinger: '残破玉佩',
+        toneStyle: '热血激昂',
+        protagonistPosition: '废柴逆袭',
+      },
+      meta: META,
+    });
+
+    let center = await getSettingsCenter(db, { workId, authorId: author.id });
+    expect(center.direction['toneStyle']).toBe('热血激昂');
+    expect(center.direction['protagonistPosition']).toBe('废柴逆袭');
+
+    // 再保存：两个可选字段被清空（不提交）
+    const cleared = await updateDirection(db, {
+      workId,
+      authorId: author.id,
+      values: {
+        subGenre: '东方玄幻',
+        goldenFinger: '残破玉佩',
+      },
+      meta: META,
+    });
+
+    expect(cleared['toneStyle']).toBeUndefined();
+    expect(cleared['protagonistPosition']).toBeUndefined();
+    expect(cleared['subGenre']).toBe('东方玄幻');
+
+    // 刷新（重新读取）后仍为空
+    center = await getSettingsCenter(db, { workId, authorId: author.id });
+    expect(center.direction['toneStyle']).toBeUndefined();
+    expect(center.direction['protagonistPosition']).toBeUndefined();
+
+    // 数据库里对应的行确实被删掉了（只删当前 schemaRef 的行）
+    const rows = await db.workSetting.findMany({
+      where: { workId },
+      select: { settingKey: true, schemaRef: true },
+    });
+    expect(rows.filter((row) => row.settingKey === 'toneStyle')).toHaveLength(0);
+    expect(rows.filter((row) => row.settingKey === 'protagonistPosition')).toHaveLength(0);
+    expect(rows.filter((row) => row.settingKey === 'subGenre')).toHaveLength(1);
+  });
+
+  it('旧 schemaRef 的方向设定不会混入当前响应，也不会被当前同步删除', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    // 造一条旧契约版本下的设定
+    await db.workSetting.create({
+      data: {
+        workId,
+        settingKey: 'toneStyle',
+        settingValue: '旧契约的语气风格',
+        schemaRef: 'xuanhuan@1.0.0',
+      },
+    });
+
+    // 当前契约下同步一组方向
+    const direction = await updateDirection(db, {
+      workId,
+      authorId: author.id,
+      values: {
+        subGenre: '东方玄幻',
+        goldenFinger: '残破玉佩',
+        toneStyle: '热血激昂',
+      },
+      meta: META,
+    });
+
+    // 响应里只有当前 schemaRef 的值
+    expect(direction['toneStyle']).toBe('热血激昂');
+
+    const center = await getSettingsCenter(db, { workId, authorId: author.id });
+    expect(center.direction['toneStyle']).toBe('热血激昂');
+
+    // 旧契约的行没有被删除（不属于当前契约的处理范围）
+    const legacy = await db.workSetting.findMany({
+      where: { workId, schemaRef: 'xuanhuan@1.0.0' },
+      select: { settingKey: true },
+    });
+    expect(legacy.map((row) => row.settingKey)).toEqual(['toneStyle']);
+  });
+
+  it('规则包的字段契约版本必须与规则包版本一致（schemaRef = code@version）', async () => {
+    const db = testDb();
+    const rulePackage = await db.rulePackage.findUniqueOrThrow({ where: { code: 'xuanhuan' } });
+    const expected = `${rulePackage.code}@${rulePackage.version}`;
+
+    const schema = rulePackage.fieldSchema as {
+      version?: number;
+      workDirection?: { schemaRef?: string };
+      entityTypes?: Record<string, { schemaRef?: string }>;
+    };
+
+    expect(schema.version).toBe(2);
+    expect(schema.workDirection?.schemaRef).toBe(expected);
+    for (const group of Object.values(schema.entityTypes ?? {})) {
+      expect(group.schemaRef).toBe(expected);
+    }
+  });
+
   it('创建 realm_level：实体 + 属性 + 第一版快照 + 审计同事务', async () => {
     const db = testDb();
     const author = await createAuthor();
@@ -567,6 +678,115 @@ describe('设定中心与实体（M2-B1）', () => {
         meta: META,
       }),
     ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+  });
+
+  it('列表接口同样只接受 realm_level', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    await expect(
+      listEntities(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'character',
+      }),
+    ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+
+    await expect(
+      listEntities(db, {
+        workId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it('畸形 workId / entityId 在进入 Prisma 之前就被拒绝（400，不是 500）', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '元婴',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    const badWorkId = 'not-a-uuid';
+    const badEntityId = '12345';
+
+    // 读取
+    await expect(
+      getSettingsCenter(db, { workId: badWorkId, authorId: author.id }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(
+      listEntities(db, {
+        workId: badWorkId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 写入
+    await expect(
+      updateDirection(db, {
+        workId: badWorkId,
+        authorId: author.id,
+        values: { subGenre: 'x', goldenFinger: 'y' },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(
+      createEntity(db, {
+        workId: badWorkId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        name: '畸形作品',
+        attributes: realmAttributes(),
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(
+      updateEntity(db, {
+        workId,
+        authorId: author.id,
+        entityId: badEntityId,
+        attributes: realmAttributes(),
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(
+      deleteEntity(db, {
+        workId,
+        authorId: author.id,
+        entityId: badEntityId,
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(
+      reorderEntities(db, {
+        workId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        entityIds: [badEntityId],
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 合法 entityId 但不存在的作品 → 仍然是 404（权限语义不变）
+    await expect(
+      updateEntity(db, {
+        workId: '00000000-0000-4000-8000-00000000ffff',
+        authorId: author.id,
+        entityId: realm.id,
+        attributes: realmAttributes(),
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('实体属性校验：缺必填、类型错、越界都 400', async () => {

@@ -50,11 +50,14 @@ export type {
   UpdateEntityInput,
 } from './entities.js';
 
+export { assertUuid, isUuid } from './ids.js';
+
 export {
   buildSchemaSummary,
   entityTypeGroup,
   parseRuleFieldSchema,
   validateFields,
+  workDirectionGroup,
 } from './schema.js';
 
 export type {

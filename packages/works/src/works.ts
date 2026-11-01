@@ -15,6 +15,8 @@
 import type { PrismaClient } from '@novel/db';
 import { AUDIT_ACTIONS, AuthError, writeAuditLog, type RequestMeta } from '@novel/auth';
 
+import { assertUuid } from './ids.js';
+
 /** 目标章数默认与范围。 */
 export const DEFAULT_TARGET_CHAPTERS = 10;
 export const MIN_TARGET_CHAPTERS = 1;
@@ -203,6 +205,7 @@ export async function getWork(
   db: PrismaClient,
   input: { workId: string; authorId: string },
 ): Promise<WorkDetailView> {
+  assertUuid(input.workId, '作品 id');
   const work = await db.work.findFirst({
     where: { id: input.workId, authorId: input.authorId },
     select: {
@@ -333,6 +336,7 @@ export interface UpdateWorkInput {
  * - 更新与 `work.updated` 审计同事务。
  */
 export async function updateWork(db: PrismaClient, input: UpdateWorkInput): Promise<WorkView> {
+  assertUuid(input.workId, '作品 id');
   const title = input.title === undefined ? undefined : normalizeTitle(input.title);
   const summary = input.summary === undefined ? undefined : normalizeSummary(input.summary);
   const targetChapters =

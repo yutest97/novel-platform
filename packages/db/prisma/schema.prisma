@@ -215,12 +215,18 @@ model EntityAttribute {
 /// 实体版本快照（M2-B1）。
 ///
 /// 每次更新实体都追加一版快照，旧版本保留 —— 便于回溯与审计核对。
+///
+/// created_at 用 `clock_timestamp()`（数据库时钟，取值时刻即该行真正落库那一刻），
+/// 而不是 `now()`（事务开始时刻）：实体写入会在事务里等锁，
+/// 事务开始时刻可能远早于实际写入时刻。
+/// 版本时间戳必须与 entities.deleted_at 同口径，
+/// 否则"软删除之后不得再产生新版本"这条不变量无法被可靠观测。
 model EntityVersion {
   id        String   @id @default(uuid()) @db.Uuid
   entityId  String   @map("entity_id") @db.Uuid
   versionNo Int      @map("version_no")
   snapshot  Json
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
 
   entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
 

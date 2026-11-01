@@ -160,6 +160,41 @@ test('2. 进入设定中心：填写并保存作品方向，刷新后仍存在',
   await context.close();
 });
 
+test('2b. 清空可选作品方向字段：保存后刷新仍为空', async ({ browser }) => {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+
+  await login(page, AUTHOR_A_EMAIL, AUTHOR_A_NEW_PASSWORD);
+  await page.goto(`/works/${authorAWorkId}/settings`);
+
+  // 先写入两个可选字段
+  await page.getByTestId('direction-toneStyle').fill('热血激昂');
+  await page.getByTestId('direction-protagonistPosition').fill('废柴逆袭');
+  await page.getByTestId('direction-save').click();
+  await expect(page.getByTestId('settings-notice')).toContainText('已保存');
+
+  await page.reload();
+  await expect(page.getByTestId('direction-toneStyle')).toHaveValue('热血激昂');
+  await expect(page.getByTestId('direction-protagonistPosition')).toHaveValue('废柴逆袭');
+
+  // 清空两个可选字段后保存
+  await page.getByTestId('direction-toneStyle').fill('');
+  await page.getByTestId('direction-protagonistPosition').fill('');
+  await page.getByTestId('direction-save').click();
+  await expect(page.getByTestId('settings-notice')).toContainText('已保存');
+
+  // 刷新后必须仍为空（服务端确实删掉了这两行）
+  await page.reload();
+  await expect(page.getByTestId('direction-toneStyle')).toHaveValue('');
+  await expect(page.getByTestId('direction-protagonistPosition')).toHaveValue('');
+
+  // 必填字段不受影响
+  await expect(page.getByTestId('direction-subGenre')).toHaveValue('东方玄幻');
+  await expect(page.getByTestId('direction-goldenFinger')).toHaveValue('残破玉佩');
+
+  await context.close();
+});
+
 test('3. 创建炼气、筑基、金丹三个境界', async ({ browser }) => {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();

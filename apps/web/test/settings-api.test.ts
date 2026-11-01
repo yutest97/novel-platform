@@ -363,6 +363,258 @@ describe('设定中心接口（M2-B1）', () => {
     expect(forbidden.status).toBe(404);
   });
 
+  it('实体 PATCH 是严格允许列表：只接受 name / orderIndex / attributes', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const created = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '元婴', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const { entity } = (await created.json()) as { entity: { id: string } };
+
+    // 逐个字段：服务端字段与完全陌生的字段都必须 400
+    const forbiddenFields = [
+      'id',
+      'workId',
+      'work_id',
+      'authorId',
+      'author_id',
+      'entityType',
+      'entity_type',
+      'createdAt',
+      'created_at',
+      'updatedAt',
+      'updated_at',
+      'deletedAt',
+      'deleted_at',
+      'unknownField',
+    ];
+
+    for (const field of forbiddenFields) {
+      const response = await entityPatch(
+        request(`/api/works/${workId}/entities/${entity.id}`, {
+          method: 'PATCH',
+          body: { [field]: 'x' },
+          token: author.token,
+          origin: ORIGIN,
+        }),
+        { params: Promise.resolve({ id: workId, entityId: entity.id }) },
+      );
+      expect(response.status, `字段 ${field} 应当被拒绝`).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code, `字段 ${field} 的错误码`).toBe('VALIDATION_FAILED');
+    }
+
+    // 允许的三个字段都能通过
+    const allowed = await entityPatch(
+      request(`/api/works/${workId}/entities/${entity.id}`, {
+        method: 'PATCH',
+        body: {
+          name: '元婴期',
+          orderIndex: 1,
+          attributes: { ...REALM_ATTRIBUTES, lifespan: '五千年' },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: entity.id }) },
+    );
+    expect(allowed.status).toBe(200);
+  });
+
+  it('实体 POST 拒绝服务端字段（id / workId / authorId / 时间戳等）', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const forbiddenFields = [
+      'id',
+      'workId',
+      'work_id',
+      'authorId',
+      'author_id',
+      'createdAt',
+      'created_at',
+      'updatedAt',
+      'updated_at',
+      'deletedAt',
+      'deleted_at',
+      'unknownField',
+    ];
+
+    for (const field of forbiddenFields) {
+      const response = await entitiesPost(
+        request(`/api/works/${workId}/entities`, {
+          method: 'POST',
+          body: {
+            entityType: 'realm_level',
+            name: `实体-${field}`,
+            attributes: REALM_ATTRIBUTES,
+            [field]: 'x',
+          },
+          token: author.token,
+          origin: ORIGIN,
+        }),
+        { params: Promise.resolve({ id: workId }) },
+      );
+      expect(response.status, `字段 ${field} 应当被拒绝`).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code, `字段 ${field} 的错误码`).toBe('VALIDATION_FAILED');
+    }
+  });
+
+  it('列出实体只接受 realm_level；其它类型一律 400', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const response = await entitiesGet(
+      request(`/api/works/${workId}/entities?type=character`, { token: author.token }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('ENTITY_TYPE_NOT_ALLOWED');
+
+    // 允许的类型正常返回
+    const ok = await entitiesGet(
+      request(`/api/works/${workId}/entities?type=realm_level`, { token: author.token }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(ok.status).toBe(200);
+  });
+
+  it('畸形 workId / entityId 返回稳定的 400 或 404，不产生 500', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const created = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '化神', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(created.status).toBe(201);
+
+    // 畸形 workId
+    const badWorkId = 'not-a-uuid';
+    const listBadWork = await entitiesGet(
+      request(`/api/works/${badWorkId}/entities?type=realm_level`, { token: author.token }),
+      { params: Promise.resolve({ id: badWorkId }) },
+    );
+    expect([400, 404]).toContain(listBadWork.status);
+    expect(listBadWork.status).not.toBe(500);
+
+    const settingsBadWork = await settingsGet(
+      request(`/api/works/${badWorkId}/settings`, { token: author.token }),
+      { params: Promise.resolve({ id: badWorkId }) },
+    );
+    expect([400, 404]).toContain(settingsBadWork.status);
+    expect(settingsBadWork.status).not.toBe(500);
+
+    const postBadWork = await entitiesPost(
+      request(`/api/works/${badWorkId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '畸形', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: badWorkId }) },
+    );
+    expect([400, 404]).toContain(postBadWork.status);
+    expect(postBadWork.status).not.toBe(500);
+
+    // 畸形 entityId
+    const badEntityId = '12345';
+    const patchBadEntity = await entityPatch(
+      request(`/api/works/${workId}/entities/${badEntityId}`, {
+        method: 'PATCH',
+        body: { name: '改名' },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: badEntityId }) },
+    );
+    expect([400, 404]).toContain(patchBadEntity.status);
+    expect(patchBadEntity.status).not.toBe(500);
+
+    const deleteBadEntity = await entityDelete(
+      request(`/api/works/${workId}/entities/${badEntityId}`, {
+        method: 'DELETE',
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: badEntityId }) },
+    );
+    expect([400, 404]).toContain(deleteBadEntity.status);
+    expect(deleteBadEntity.status).not.toBe(500);
+  });
+
+  it('作品方向清空后刷新仍为空（接口层）', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const saved = await settingsPatch(
+      request(`/api/works/${workId}/settings`, {
+        method: 'PATCH',
+        body: {
+          direction: {
+            subGenre: '东方玄幻',
+            goldenFinger: '残破玉佩',
+            toneStyle: '热血激昂',
+            protagonistPosition: '废柴逆袭',
+          },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(saved.status).toBe(200);
+    const savedBody = (await saved.json()) as { direction: Record<string, unknown> };
+    expect(savedBody.direction['toneStyle']).toBe('热血激昂');
+
+    // 清空两个可选字段
+    const cleared = await settingsPatch(
+      request(`/api/works/${workId}/settings`, {
+        method: 'PATCH',
+        body: {
+          direction: {
+            subGenre: '东方玄幻',
+            goldenFinger: '残破玉佩',
+          },
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(cleared.status).toBe(200);
+    const clearedBody = (await cleared.json()) as { direction: Record<string, unknown> };
+    expect(clearedBody.direction['toneStyle']).toBeUndefined();
+    expect(clearedBody.direction['protagonistPosition']).toBeUndefined();
+
+    // 刷新
+    const reloaded = await settingsGet(
+      request(`/api/works/${workId}/settings`, { token: author.token }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(reloaded.status).toBe(200);
+    const reloadedBody = (await reloaded.json()) as {
+      settings: { direction: Record<string, unknown> };
+    };
+    expect(reloadedBody.settings.direction['toneStyle']).toBeUndefined();
+    expect(reloadedBody.settings.direction['protagonistPosition']).toBeUndefined();
+    expect(reloadedBody.settings.direction['subGenre']).toBe('东方玄幻');
+  });
+
   it('删除实体：被引用时 409 ENTITY_IN_USE；否则软删除', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);

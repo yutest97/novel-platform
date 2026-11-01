@@ -116,6 +116,9 @@ export default function WorkSettingsPage(): React.ReactElement {
     setNotice('');
 
     try {
+      // 整组同步：请求体给出的是这组方向的**完整期望状态**。
+      // - 有值的字段 → 服务端 upsert；
+      // - 可选字段被清空（提交 null）→ 服务端删除对应的 work_settings 行。
       const payload: Record<string, unknown> = {};
       for (const field of directionFields) {
         const text = direction[field.key] ?? '';
@@ -123,6 +126,7 @@ export default function WorkSettingsPage(): React.ReactElement {
           if (field.required) {
             throw new Error(`请填写「${field.label}」`);
           }
+          payload[field.key] = null;
           continue;
         }
         payload[field.key] = field.type === 'integer' ? Number.parseInt(text, 10) : text.trim();

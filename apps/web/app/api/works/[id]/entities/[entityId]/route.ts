@@ -4,10 +4,10 @@ import { deleteEntity, updateEntity } from '@novel/works';
 import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
 import {
-  IMMUTABLE_ENTITY_FIELDS,
+  ENTITY_PATCH_FIELDS,
   optionalInteger,
   optionalString,
-  rejectImmutableFields,
+  rejectUnknownFields,
   requireRecord,
 } from '@/settings-http';
 import { requireAuthorSession } from '@/work-guard';
@@ -19,9 +19,13 @@ export const runtime = 'nodejs';
  * PATCH /api/works/:id/entities/:entityId —— 编辑实体。
  *
  * - 只允许修改当前作品内的实体；他人作品 → 404；
- * - 归属、类型、id 不可修改（出现即 400，不静默忽略）；
+ * - 请求体是**严格白名单**：只接受 name / orderIndex / attributes。
+ *   出现 id / workId / authorId / entityType / createdAt / updatedAt /
+ *   deletedAt（或任何未知字段）一律 400 VALIDATION_FAILED，
+ *   不静默忽略；
  * - 更新属性后追加新版本快照，旧版本保留；
- * - 与 `entity.updated` 审计同事务。
+ * - 与 `entity.updated` 审计同事务；
+ * - 归属、未删除状态与版本号计算都在作品级锁 + 同一事务内完成。
  */
 export async function PATCH(
   request: Request,
@@ -33,7 +37,7 @@ export async function PATCH(
     const { id, entityId } = await context.params;
 
     const body = await readJsonObject(request);
-    rejectImmutableFields(body, IMMUTABLE_ENTITY_FIELDS);
+    rejectUnknownFields(body, ENTITY_PATCH_FIELDS);
 
     const name = optionalString(body, 'name');
     const orderIndex = optionalInteger(body, 'orderIndex');
@@ -64,7 +68,9 @@ export async function PATCH(
  *
  * - 第一版只做 realm_level 的软删除；
  * - 被同作品内其它实体引用时返回 `ENTITY_IN_USE`，不删除；
- * - 软删除与 `entity.deleted` 审计同事务。
+ * - 软删除与 `entity.deleted` 审计同事务；
+ * - 归属、未删除状态与引用检查都在作品级锁 + 同一事务内重新执行，
+ *   因此"删除后又被并发编辑"不会产生新的版本或审计。
  */
 export async function DELETE(
   request: Request,

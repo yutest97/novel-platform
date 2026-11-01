@@ -3,7 +3,7 @@ import { getSettingsCenter, updateDirection } from '@novel/works';
 
 import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
-import { IMMUTABLE_SETTING_FIELDS, rejectImmutableFields, requireRecord } from '@/settings-http';
+import { SETTINGS_PATCH_FIELDS, rejectUnknownFields, requireRecord } from '@/settings-http';
 import { requireAuthorSession } from '@/work-guard';
 
 export const dynamic = 'force-dynamic';
@@ -47,7 +47,7 @@ export async function PATCH(
     const { id } = await context.params;
 
     const body = await readJsonObject(request);
-    rejectImmutableFields(body, IMMUTABLE_SETTING_FIELDS);
+    rejectUnknownFields(body, SETTINGS_PATCH_FIELDS);
 
     const values = requireRecord(body, 'direction');
 

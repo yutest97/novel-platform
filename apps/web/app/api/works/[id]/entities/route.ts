@@ -3,16 +3,24 @@ import { ALLOWED_ENTITY_TYPE, createEntity, listEntities } from '@novel/works';
 
 import { authErrorResponse, authJson, readJsonObject, requireString } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
-import { optionalInteger, requireRecord } from '@/settings-http';
+import {
+  ENTITY_CREATE_FIELDS,
+  optionalInteger,
+  rejectUnknownFields,
+  requireRecord,
+} from '@/settings-http';
 import { requireAuthorSession } from '@/work-guard';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 /**
- * GET /api/works/:id/entities?type=realm_level —— 列出作品内指定类型的实体。
+ * GET /api/works/:id/entities —— 列出作品内的实体。
  *
- * 只允许作品所有者访问；按 order_index 升序返回未删除的实体。
+ * - 只允许作品所有者访问；
+ * - 第一版只开放 `realm_level`：其它 entityType 一律 400
+ *   （`ENTITY_TYPE_NOT_ALLOWED`），不接受任意类型；
+ * - 按 order_index 升序返回未删除的实体。
  */
 export async function GET(
   request: Request,
@@ -39,6 +47,8 @@ export async function GET(
 /**
  * POST /api/works/:id/entities —— 新建实体（第一版只开放 realm_level）。
  *
+ * - 请求体是**严格白名单**：只接受 entityType / name / orderIndex / attributes，
+ *   出现任何其它字段（id / workId / authorId / 时间戳……）一律 400；
  * - 属性按规则包的 field_schema 校验；
  * - 创建 + 第一版快照 + `entity.created` 审计同事务；
  * - 同作品同类型重名 → 稳定错误码 `ENTITY_NAME_TAKEN`。
@@ -53,6 +63,8 @@ export async function POST(
     const { id } = await context.params;
 
     const body = await readJsonObject(request);
+    rejectUnknownFields(body, ENTITY_CREATE_FIELDS);
+
     const entityType = requireString(body, 'entityType');
     const name = requireString(body, 'name');
     const orderIndex = optionalInteger(body, 'orderIndex');

@@ -55,6 +55,28 @@ export function requireStringArray(body: Record<string, unknown>, key: string): 
 }
 
 /**
+ * **严格允许列表**：请求体里只允许出现给定的字段。
+ *
+ * 只要出现任何其它字段（无论是 id / workId 这类服务端字段，
+ * 还是完全陌生的字段），一律 400 VALIDATION_FAILED ——
+ * 不静默忽略，避免客户端误以为"提交成功"。
+ *
+ * 与 `rejectImmutableFields` 的区别：那个函数只拒绝一份黑名单，
+ * 这个函数是白名单，黑名单之外的一切都拒绝。
+ */
+export function rejectUnknownFields(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+): void {
+  const allowSet = new Set(allowed);
+  for (const key of Object.keys(body)) {
+    if (!allowSet.has(key)) {
+      throw new AuthError('VALIDATION_FAILED', `字段 ${key} 不可提交`);
+    }
+  }
+}
+
+/**
  * 拒绝出现在请求体里的**不可变字段**。
  *
  * 作品方向与实体的归属、类型、标识都由服务端掌握；
@@ -85,18 +107,14 @@ export const IMMUTABLE_SETTING_FIELDS = [
   'schema_ref',
 ] as const;
 
-/** 实体不可变字段。 */
-export const IMMUTABLE_ENTITY_FIELDS = [
-  'id',
-  'workId',
-  'work_id',
-  'authorId',
-  'author_id',
-  'entityType',
-  'entity_type',
-  'createdAt',
-  'created_at',
-] as const;
+/** 设定中心 PATCH 的允许字段（严格白名单）。 */
+export const SETTINGS_PATCH_FIELDS = ['direction'] as const;
+
+/** 实体 PATCH 的允许字段（严格白名单）。 */
+export const ENTITY_PATCH_FIELDS = ['name', 'orderIndex', 'attributes'] as const;
+
+/** 实体 POST 的允许字段（严格白名单）。 */
+export const ENTITY_CREATE_FIELDS = ['entityType', 'name', 'orderIndex', 'attributes'] as const;
 
 /** 设定中心响应。 */
 export function settingsResponse(payload: unknown): Response {

@@ -18,6 +18,9 @@ CREATE TABLE "entities" (
     "order_index" INTEGER,
     "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ(3) NOT NULL,
+    -- deleted_at 没有列默认值：软删除只可能由应用层的软删除路径写入，
+    -- 而那条路径显式使用数据库时钟 clock_timestamp()，
+    -- 保证与 entity_versions.created_at 同口径。
     "deleted_at" TIMESTAMPTZ(3),
 
     CONSTRAINT "entities_pkey" PRIMARY KEY ("id")
@@ -42,7 +45,13 @@ CREATE TABLE "entity_versions" (
     "entity_id" UUID NOT NULL,
     "version_no" INTEGER NOT NULL,
     "snapshot" JSONB NOT NULL,
-    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- created_at 用 clock_timestamp() 而不是 CURRENT_TIMESTAMP：
+    -- 前者是**该行真正落库那一刻**的数据库时钟，后者是事务开始时刻。
+    -- 实体写入会在事务里等锁（作品级 advisory lock + 行锁），
+    -- 事务开始时刻可能远早于实际写入时刻。
+    -- 版本时间戳必须与 deleted_at（同样用数据库时钟）口径一致，
+    -- 否则"软删除之后不得再产生新版本"这条不变量无法被可靠观测。
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
 
     CONSTRAINT "entity_versions_pkey" PRIMARY KEY ("id")
 );
@@ -80,12 +89,19 @@ ALTER TABLE "entity_versions" ADD CONSTRAINT "entity_versions_entity_id_fkey" FO
 --
 -- 字段的类型、是否必填、标签、顺序与帮助文本都在这里；
 -- 玄幻专属内容**只**存在规则包，不进通用核心表。
+--
+-- 版本口径（M2-B1-REV-01 统一）：
+-- - `rule_packages.version` = 规则包（= 字段契约）的版本；
+-- - field_schema 里的 `schemaRef` = `${code}@${version}`，与上一条**恒等**；
+-- - field_schema.version = 字段契约的整数版本号。
+-- 三者必须同时指向同一个契约版本，不得出现 "v2 schema + v1 contract"。
 UPDATE "rule_packages"
-SET "field_schema" = '{
+SET "version" = '2.0.0',
+    "field_schema" = '{
   "version": 2,
   "workDirection": {
     "title": "作品方向",
-    "schemaRef": "xuanhuan@1.0.0",
+    "schemaRef": "xuanhuan@2.0.0",
     "fields": [
       {
         "key": "subGenre",
@@ -128,7 +144,7 @@ SET "field_schema" = '{
   "entityTypes": {
     "realm_level": {
       "title": "境界体系",
-      "schemaRef": "xuanhuan@1.0.0",
+      "schemaRef": "xuanhuan@2.0.0",
       "fields": [
         {
           "key": "minorLevelCount",

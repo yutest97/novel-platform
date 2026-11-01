@@ -24,6 +24,7 @@ export type AuthErrorCode =
   | 'ENTITY_NAME_TAKEN'
   | 'ENTITY_IN_USE'
   | 'ENTITY_TYPE_NOT_ALLOWED'
+  | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
 /** 错误码 → HTTP 状态码。 */
@@ -49,6 +50,8 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   ENTITY_IN_USE: 409,
   // 实体类型不在当前阶段允许范围内
   ENTITY_TYPE_NOT_ALLOWED: 400,
+  // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
+  CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
 };
 
@@ -80,6 +83,8 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   ENTITY_IN_USE: '该实体当前被引用，无法删除',
   // 实体类型不允许
   ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
+  // 并发修改冲突
+  CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',
 };
 
