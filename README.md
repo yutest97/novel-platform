@@ -372,10 +372,24 @@ API（全部要求 active、已改密的作者会话；管理员 403；他人作
 重复值直接 400 而不静默去重，空数组表示清空）。
 
 **引用校验**（作品级 advisory lock 内、同一事务）：
-目标必须存在、未软删除、属于同一作品、`entity_type` 等于字段的 `refType`；
+目标必须存在、未软删除、属于同一作品、`entity_type` 等于**该字段**的 `refType`；
 禁止引用自身。不存在 / 已删除 / 跨作品**统一**返回「引用目标不存在」，
-不泄露其它作品是否存在。`refType` 未在规则包 `entityTypes` 中声明时按
-`INVALID_RULE_PACKAGE` 处理。
+不泄露其它作品是否存在。
+校验是**逐字段、逐 id** 的：同一个 UUID 若同时出现在两个 `refType` 不同的
+引用字段里，两个字段各自都必须满足自己的 `refType`，否则整个请求 400。
+
+**规则包契约校验**：读取规则包后、任何业务判断之前统一校验 `field_schema`，
+任一项不满足都返回 `INVALID_RULE_PACKAGE`（不静默返回残缺 schema）：
+
+- `enum` 的 `options` 必须非空，且每个 `value` 非空、不重复；
+- `entityRef` / `entityRefs` 必须有 `refType`，且该 `refType` 已在
+  `field_schema.entityTypes` 中声明（未声明 → `INVALID_RULE_PACKAGE`）；
+- `entityRefs.maxItems` 如果出现，必须是正整数（统一硬上限仍为 50）；
+- 字段类型必须是已知的六种之一。
+
+**排序接口**：`PUT /entities/reorder` 的 `entityType` 可省略（默认 `realm_level`），
+但一旦出现就必须是非空字符串 —— 数字 / `null` / 数组 / 对象一律
+`400 VALIDATION_FAILED`，不会被静默当成默认类型。
 
 **删除保护**：只扫描当前契约、且规则包声明为 `entityRef`/`entityRefs` 的属性
 （自由文本与旧契约属性不算引用）；只统计仍存活、同作品的引用者。

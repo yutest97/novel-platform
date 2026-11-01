@@ -16,8 +16,8 @@
  *   （归属、未删除、引用、完整排序集合），再写数据、版本与审计；
  * - 因此并发写不会交错出"混合顺序"，也不会产生重复版本号。
  *
- * 本轮只开放 `realm_level`（境界体系）一种实体类型；
- * 人物、势力、功法、物品等留给后续阶段。
+ * 本轮开放 `realm_level`（境界体系）、`faction`（势力）、`character`（人物）
+ * 三种实体类型；功法、物品、地点等留给后续阶段。
  */
 
 import { AUDIT_ACTIONS, AuthError, writeAuditLog, type RequestMeta } from '@novel/auth';
@@ -25,6 +25,7 @@ import type { Prisma, PrismaClient } from '@novel/db';
 
 import { assertUuid } from './ids.js';
 import {
+  assertFieldSchemaContract,
   buildSchemaSummary,
   entityTypeGroup,
   isReferenceFieldType,
@@ -145,7 +146,13 @@ async function requireOwnedWork(
   return work;
 }
 
-/** 读取作品对应的规则包（必须是启用中的）。 */
+/**
+ * 读取作品对应的规则包（必须是启用中的）。
+ *
+ * 读取后立刻做**字段契约校验**：坏规则包（enum 选项为空、引用缺少 refType、
+ * refType 未声明、maxItems 非正整数……）在这里就失败，
+ * 绝不允许"解析成功但内容残缺"的 schema 流到接口与页面。
+ */
 async function requireRulePackage(
   db: RulePackageReader,
   code: string,
@@ -154,6 +161,7 @@ async function requireRulePackage(
   if (rulePackage === null || !rulePackage.active) {
     throw new AuthError('INVALID_RULE_PACKAGE');
   }
+  assertFieldSchemaContract(rulePackage.fieldSchema);
   return rulePackage;
 }
 
@@ -235,6 +243,21 @@ function listEntityGroups(rulePackage: {
 }
 
 /**
+ * 一次引用出现。
+ *
+ * 必须按"出现"记录，而不是按 id 去重成 `Map<id, refType>`：
+ * 同一个 UUID 完全可以出现在两个 `refType` 不同的引用字段里
+ * （例如把某个势力 id 同时塞进 `secretKnownBy` 与 `faction`）。
+ * 用 Map 保存会让后一个字段**覆盖**前一个字段的期望类型，
+ * 于是只有一个字段被真正校验，另一个字段的类型约束被静默跳过。
+ */
+interface ReferenceOccurrence {
+  readonly id: string;
+  readonly refType: string;
+  readonly fieldKey: string;
+}
+
+/**
  * 在**事务内**校验引用类字段的目标。
  *
  * 必须在作品级 advisory lock 持有期间调用：
@@ -243,9 +266,11 @@ function listEntityGroups(rulePackage: {
  *
  * 规则（M2-B2）：
  * - `refType` 必须在规则包 `entityTypes` 中声明，否则视为规则包坏数据；
- * - 目标必须存在、未软删除、属于**同一作品**、类型等于 `refType`；
+ * - 目标必须存在、未软删除、属于**同一作品**、类型等于**该字段**的 `refType`；
  * - 三者的失败文案统一为「引用目标不存在」，不泄露其它作品是否存在；
- * - 禁止引用自身（`selfId` 仅在编辑时存在；新建时 id 由服务端生成，不可能自引用）。
+ * - 禁止引用自身（`selfId` 仅在编辑时存在；新建时 id 由服务端生成，不可能自引用）；
+ * - 校验是**逐字段、逐 id** 的：同一个 id 出现在两个 refType 不同的字段里，
+ *   两个字段都必须各自满足自己的 refType，否则整体 400。
  */
 async function assertReferences(
   tx: Prisma.TransactionClient,
@@ -257,8 +282,7 @@ async function assertReferences(
 ): Promise<void> {
   const declaredTypes = parseRuleFieldSchema(rulePackage.fieldSchema).entityTypes ?? {};
 
-  /** 需要查询的 id → 期望类型。 */
-  const expected = new Map<string, string>();
+  const occurrences: ReferenceOccurrence[] = [];
   for (const field of group.fields) {
     if (!isReferenceFieldType(field.type)) {
       continue;
@@ -281,22 +305,24 @@ async function assertReferences(
           message: `字段 ${field.label} 不能引用自身`,
         });
       }
-      expected.set(id, refType);
+      occurrences.push({ id, refType, fieldKey: field.key });
     }
   }
 
-  if (expected.size === 0) {
+  if (occurrences.length === 0) {
     return;
   }
 
+  // 查询可以按 id 去重（只影响 SQL 规模），校验绝不去重。
+  const targetIds = [...new Set(occurrences.map((occurrence) => occurrence.id))];
   const rows = await tx.entity.findMany({
-    where: { id: { in: [...expected.keys()] }, workId, deletedAt: null },
+    where: { id: { in: targetIds }, workId, deletedAt: null },
     select: { id: true, entityType: true },
   });
-  const found = new Map(rows.map((row) => [row.id, row.entityType]));
+  const actualTypeById = new Map(rows.map((row) => [row.id, row.entityType]));
 
-  for (const [id, refType] of expected) {
-    const actualType = found.get(id);
+  for (const occurrence of occurrences) {
+    const actualType = actualTypeById.get(occurrence.id);
     if (actualType === undefined) {
       // 不存在 / 已软删除 / 属于其它作品：**完全相同的对外文案**，不泄露存在性。
       // 这里显式覆盖 publicDetails.message，让作者看到可操作的具体原因，
@@ -305,8 +331,8 @@ async function assertReferences(
         message: '引用目标不存在',
       });
     }
-    if (actualType !== refType) {
-      throw new AuthError('VALIDATION_FAILED', '引用目标类型不匹配', {
+    if (actualType !== occurrence.refType) {
+      throw new AuthError('VALIDATION_FAILED', `字段 ${occurrence.fieldKey} 的引用目标类型不匹配`, {
         message: '引用目标类型不匹配',
       });
     }

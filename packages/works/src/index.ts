@@ -60,6 +60,7 @@ export { assertUuid, isUuid } from './ids.js';
 
 export {
   MAX_ENTITY_REFS,
+  assertFieldSchemaContract,
   buildSchemaSummary,
   entityTypeGroup,
   isReferenceFieldType,

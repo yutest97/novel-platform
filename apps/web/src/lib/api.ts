@@ -249,23 +249,40 @@ export async function fetchRulePackages(): Promise<RulePackage[]> {
 
 /* ------------------------------------------------- 设定中心与实体（M2-B1） */
 
+/** 规则包支持的字段类型（与 `@novel/works` 的 `FieldType` 一一对应）。 */
+export type FieldType = 'string' | 'text' | 'integer' | 'enum' | 'entityRef' | 'entityRefs';
+
+/** enum 的一个选项：`value` 入库、`label` 仅展示。 */
+export interface EnumOption {
+  readonly value: string;
+  readonly label: string;
+}
+
 /** 字段定义（来自规则包的 field_schema）。 */
 export interface FieldDefinition {
   readonly key: string;
   readonly label: string;
-  readonly type: 'string' | 'text' | 'integer';
+  readonly type: FieldType;
   readonly required: boolean;
   readonly order: number;
   readonly help?: string;
   readonly maxLength?: number;
   readonly min?: number;
   readonly max?: number;
+  /** type=enum 时的可选值集合。 */
+  readonly options?: readonly EnumOption[];
+  /** type=entityRef / entityRefs 时的目标实体类型。 */
+  readonly refType?: string;
+  /** type=entityRefs 时的元素个数上限。 */
+  readonly maxItems?: number;
 }
 
 /** 一组字段定义。 */
 export interface FieldGroup {
   readonly title: string;
   readonly schemaRef: string;
+  /** 分组展示顺序（实体类型之间）；缺省表示排到最后。 */
+  readonly order?: number;
   readonly fields: readonly FieldDefinition[];
 }
 
@@ -290,9 +307,12 @@ export interface EntityItem {
   readonly updatedAt: string;
 }
 
+/** 本轮启用 CRUD 的实体类型（与 `@novel/works` 的 `SUPPORTED_ENTITY_TYPES` 一致）。 */
+export type SupportedEntityType = 'realm_level' | 'faction' | 'character';
+
 /** 设定中心里的一个实体分组（按 entityType 分区）。 */
 export interface EntityGroupItem {
-  readonly entityType: string;
+  readonly entityType: SupportedEntityType;
   readonly title: string;
   readonly schemaRef: string;
   readonly order: number;

@@ -23,6 +23,20 @@ export const MAX_ENTITY_REFS = 50;
 /** 支持的字段类型。 */
 export type FieldType = 'string' | 'text' | 'integer' | 'enum' | 'entityRef' | 'entityRefs';
 
+/** 已知字段类型清单（契约校验用，必须与 `FieldType` 保持同步）。 */
+const KNOWN_FIELD_TYPES: readonly FieldType[] = [
+  'string',
+  'text',
+  'integer',
+  'enum',
+  'entityRef',
+  'entityRefs',
+];
+
+function isKnownFieldType(value: unknown): value is FieldType {
+  return typeof value === 'string' && (KNOWN_FIELD_TYPES as readonly string[]).includes(value);
+}
+
 /** 引用类字段类型（值是实体 UUID）。 */
 export function isReferenceFieldType(type: FieldType): boolean {
   return type === 'entityRef' || type === 'entityRefs';
@@ -224,6 +238,136 @@ export function parseRuleFieldSchema(raw: unknown): RuleFieldSchema {
   }
   result.entityTypes = entityTypes;
   return result;
+}
+
+/**
+ * 契约问题一律按 `INVALID_RULE_PACKAGE` 抛出。
+ *
+ * 这是**规则包坏数据**，不是调用方的输入错误：
+ * 解析器会宽松地丢掉不认识的字段，若不在读取时拦下来，
+ * 表现为"作者看到残缺的 schema、写入被静默忽略"，比直接报错危险得多。
+ */
+function contractViolation(detail: string): never {
+  throw new AuthError('INVALID_RULE_PACKAGE', detail);
+}
+
+/** 校验单个字段组的契约完整性。 */
+function assertGroupContract(
+  groupKey: string,
+  rawGroup: unknown,
+  declaredTypes: ReadonlySet<string>,
+): void {
+  if (typeof rawGroup !== 'object' || rawGroup === null || Array.isArray(rawGroup)) {
+    contractViolation(`规则包字段组 ${groupKey} 结构不合法`);
+  }
+  const group = rawGroup as Record<string, unknown>;
+  const rawFields = group['fields'];
+  if (!Array.isArray(rawFields)) {
+    contractViolation(`规则包字段组 ${groupKey} 缺少字段定义`);
+  }
+
+  const seenKeys = new Set<string>();
+  for (const rawField of rawFields) {
+    if (typeof rawField !== 'object' || rawField === null || Array.isArray(rawField)) {
+      contractViolation(`规则包字段组 ${groupKey} 存在非法字段定义`);
+    }
+    const field = rawField as Record<string, unknown>;
+    const key = field['key'];
+    if (typeof key !== 'string' || key === '') {
+      contractViolation(`规则包字段组 ${groupKey} 存在缺少 key 的字段`);
+    }
+    if (seenKeys.has(key)) {
+      contractViolation(`规则包字段组 ${groupKey} 存在重复字段 ${key}`);
+    }
+    seenKeys.add(key);
+
+    const type = field['type'];
+    if (!isKnownFieldType(type)) {
+      contractViolation(`规则包字段组 ${groupKey}.${key} 的字段类型不合法`);
+    }
+
+    if (type === 'enum') {
+      const options = field['options'];
+      if (!Array.isArray(options) || options.length === 0) {
+        contractViolation(`规则包字段组 ${groupKey}.${key} 的 enum 选项为空`);
+      }
+      const values = new Set<string>();
+      for (const rawOption of options) {
+        if (typeof rawOption !== 'object' || rawOption === null || Array.isArray(rawOption)) {
+          contractViolation(`规则包字段组 ${groupKey}.${key} 存在非法 enum 选项`);
+        }
+        const option = rawOption as Record<string, unknown>;
+        const value = option['value'];
+        const label = option['label'];
+        if (typeof value !== 'string' || value === '' || typeof label !== 'string') {
+          contractViolation(`规则包字段组 ${groupKey}.${key} 存在非法 enum 选项`);
+        }
+        if (values.has(value)) {
+          contractViolation(`规则包字段组 ${groupKey}.${key} 的 enum 选项 value 重复`);
+        }
+        values.add(value);
+      }
+    }
+
+    if (type === 'entityRef' || type === 'entityRefs') {
+      const refType = field['refType'];
+      if (typeof refType !== 'string' || refType === '') {
+        contractViolation(`规则包字段组 ${groupKey}.${key} 缺少 refType`);
+      }
+      if (!declaredTypes.has(refType)) {
+        contractViolation(`规则包字段组 ${groupKey}.${key} 的 refType ${refType} 未在规则包中声明`);
+      }
+      // maxItems 只在 entityRefs 上有效；一旦出现就必须是正整数
+      // （统一硬上限 MAX_ENTITY_REFS 由 validateFields 另行封顶）。
+      if (type === 'entityRefs' && field['maxItems'] !== undefined) {
+        const maxItems = field['maxItems'];
+        if (typeof maxItems !== 'number' || !Number.isInteger(maxItems) || maxItems <= 0) {
+          contractViolation(`规则包字段组 ${groupKey}.${key} 的 maxItems 必须是正整数`);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 校验 `field_schema` 的字段契约完整性。
+ *
+ * 在**读取规则包之后、做任何业务判断之前**调用（见 `requireRulePackage`）：
+ * 坏规则包必须在入口处就失败，而不是解析成一份"看起来正常、其实残缺"的 schema。
+ *
+ * 校验项（M2-B2-A-REV-01）：
+ * 1. 字段类型必须是已知类型；
+ * 2. `enum` 的 `options` 必须非空，且每个 `value` 非空、不重复；
+ * 3. `entityRef` / `entityRefs` 必须有 `refType`；
+ * 4. `refType` 必须在该 `field_schema.entityTypes` 中声明；
+ * 5. `entityRefs.maxItems` 如果出现，必须是正整数。
+ */
+export function assertFieldSchemaContract(rawSchema: unknown): void {
+  if (typeof rawSchema !== 'object' || rawSchema === null || Array.isArray(rawSchema)) {
+    contractViolation('规则包缺少字段定义');
+  }
+  const schema = rawSchema as Record<string, unknown>;
+
+  const entityTypes: Record<string, unknown> = {};
+  const rawEntityTypes = schema['entityTypes'];
+  if (rawEntityTypes !== undefined) {
+    if (
+      typeof rawEntityTypes !== 'object' ||
+      rawEntityTypes === null ||
+      Array.isArray(rawEntityTypes)
+    ) {
+      contractViolation('规则包的 entityTypes 结构不合法');
+    }
+    Object.assign(entityTypes, rawEntityTypes as Record<string, unknown>);
+  }
+
+  const declaredTypes = new Set(Object.keys(entityTypes));
+  if (schema['workDirection'] !== undefined) {
+    assertGroupContract('workDirection', schema['workDirection'], declaredTypes);
+  }
+  for (const [key, value] of Object.entries(entityTypes)) {
+    assertGroupContract(key, value, declaredTypes);
+  }
 }
 
 /** 生成对外的 schema 摘要。 */

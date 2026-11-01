@@ -1200,4 +1200,84 @@ describe('设定中心接口（M2-B1）', () => {
     expect(groupOf('faction').map((item) => item.name)).toEqual(['青云宗']);
     expect(groupOf('character').map((item) => item.name)).toEqual(['林青']);
   });
+
+  it('reorder 的 entityType 出现时必须是字符串：数字 / null / 数组 / 对象都 400 且不改顺序', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    /** 当前 realm_level 的 order_index 顺序（按 id 表示）。 */
+    const readOrder = async (): Promise<string[]> => {
+      const rows = await db.entity.findMany({
+        where: { workId, entityType: 'realm_level', deletedAt: null },
+        orderBy: { orderIndex: 'asc' },
+        select: { id: true },
+      });
+      return rows.map((row) => row.id);
+    };
+
+    const ids: string[] = [];
+    for (const name of ['炼气', '筑基']) {
+      const created = await entitiesPost(
+        request(`/api/works/${workId}/entities`, {
+          method: 'POST',
+          body: { entityType: 'realm_level', name, attributes: REALM_ATTRIBUTES },
+          token: author.token,
+          origin: ORIGIN,
+        }),
+        { params: Promise.resolve({ id: workId }) },
+      );
+      expect(created.status).toBe(201);
+      ids.push(((await created.json()) as { entity: { id: string } }).entity.id);
+    }
+
+    const before = await readOrder();
+    expect(before).toEqual(ids);
+
+    // 数字 / null / 数组 / 对象 / 布尔都不是字符串：一律 400，且不得被当成默认类型
+    for (const entityType of [123, null, [], {}, true]) {
+      const response = await reorderPut(
+        request(`/api/works/${workId}/entities/reorder`, {
+          method: 'PUT',
+          body: { entityType, entityIds: [ids[1], ids[0]] },
+          token: author.token,
+          origin: ORIGIN,
+        }),
+        { params: Promise.resolve({ id: workId }) },
+      );
+      expect(response.status, `entityType=${JSON.stringify(entityType)} 应当 400`).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code, `entityType=${JSON.stringify(entityType)} 的错误码`).toBe(
+        'VALIDATION_FAILED',
+      );
+    }
+
+    // 一次都没有改动 order_index
+    expect(await readOrder()).toEqual(before);
+
+    // 合法请求仍然生效（顺序确实能被重排）
+    const reordered = await reorderPut(
+      request(`/api/works/${workId}/entities/reorder`, {
+        method: 'PUT',
+        body: { entityType: 'realm_level', entityIds: [ids[1], ids[0]] },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(reordered.status).toBe(200);
+    expect(await readOrder()).toEqual([ids[1], ids[0]]);
+
+    // 未提供 entityType：仍默认 realm_level（兼容旧调用方）
+    const withoutType = await reorderPut(
+      request(`/api/works/${workId}/entities/reorder`, {
+        method: 'PUT',
+        body: { entityIds: [ids[0], ids[1]] },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(withoutType.status).toBe(200);
+    expect(await readOrder()).toEqual([ids[0], ids[1]]);
+  });
 });

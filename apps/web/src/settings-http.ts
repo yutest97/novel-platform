@@ -18,8 +18,33 @@ export function optionalString(body: Record<string, unknown>, key: string): stri
   return value;
 }
 
-/** 读取一个字符串字典字段（如 attributes / direction）。 */
-export function requireRecord(body: Record<string, unknown>, key: string): Record<string, unknown> {
+/**
+ * 读取"出现即必须是字符串"的可选字段。
+ *
+ * 与 `optionalString` 的区别：那里把 `null` 当成"未提供"，
+ * 这里只有**键完全不存在**才回落到默认值；
+ * 一旦出现，数字 / null / 数组 / 对象一律 400 ——
+ * 避免 `{ "entityType": 123 }` 被静默当成默认类型处理。
+ */
+export function optionalStrictString(
+  body: Record<string, unknown>,
+  key: string,
+  fallback: string,
+): string {
+  if (!(key in body)) {
+    return fallback;
+  }
+  const value = body[key];
+  if (typeof value !== 'string' || value === '') {
+    throw new AuthError('VALIDATION_FAILED', `字段 ${key} 必须是非空字符串`);
+  }
+  return value;
+}
+
+/** 读取一个字符串字典字段（如 attributes / direction）。 */ export function requireRecord(
+  body: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
   const value = body[key];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new AuthError('VALIDATION_FAILED', `字段 ${key} 必须是对象`);
