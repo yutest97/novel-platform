@@ -418,7 +418,6 @@ export interface CreateEntityInput {
   readonly authorId: string;
   readonly entityType: string;
   readonly name: string;
-  readonly orderIndex?: number | null;
   readonly attributes: Record<string, unknown>;
   readonly meta: RequestMeta;
 }
@@ -491,17 +490,11 @@ export async function createEntity(
         (max, item) => (item.orderIndex !== null && item.orderIndex > max ? item.orderIndex : max),
         0,
       );
-      let orderIndex = input.orderIndex ?? null;
-      if (orderIndex !== null) {
-        if (!Number.isInteger(orderIndex) || orderIndex < 1) {
-          throw new AuthError('VALIDATION_FAILED', '排序值必须是正整数');
-        }
-        if (siblings.some((item) => item.orderIndex === orderIndex)) {
-          throw new AuthError('VALIDATION_FAILED', '排序值已被占用');
-        }
-      } else {
-        orderIndex = maxOrderIndex + 1;
-      }
+      // 排序值由**服务端独占**：客户端不能指定。
+      // 新建一律追加到"当前最大未删除 order_index + 1"，
+      // 保证同类型实体的排序集合始终是 1..N 的完整排列。
+      // 任何调整顺序的需求都必须走 PUT /entities/reorder（完整集合重排）。
+      const orderIndex = maxOrderIndex + 1;
 
       const entity = await tx.entity.create({
         data: {
@@ -574,7 +567,6 @@ export interface UpdateEntityInput {
   readonly authorId: string;
   readonly entityId: string;
   readonly name?: string;
-  readonly orderIndex?: number | null;
   readonly attributes?: Record<string, unknown>;
   readonly meta: RequestMeta;
 }
@@ -624,12 +616,12 @@ export async function updateEntity(
       // 条件更新（compare-and-set）：只有"仍未被软删除"的行才会被改到。
       // 这样"删除与编辑并发"时，先提交的那一方赢，后提交的一方拿到 count=0
       // → 直接 404，不会写出新版本或新审计。
+      //
+      // 排序值**不在这里改**：orderIndex 由服务端独占，
+      // 编辑只允许 name / attributes，顺序变更一律走 reorder。
       const affected = await tx.entity.updateMany({
         where: { id: entity.id, workId: work.id, deletedAt: null },
-        data: {
-          name,
-          ...(input.orderIndex === undefined ? {} : { orderIndex: input.orderIndex }),
-        },
+        data: { name },
       });
       if (affected.count === 0) {
         // 并发软删除已经生效：按"实体不存在"处理，不写版本、不写审计
@@ -650,8 +642,11 @@ export async function updateEntity(
 
       let attributes = validated;
       if (attributes !== null) {
-        // 全量替换该实体的属性：先清掉旧值再写入新值
-        await tx.entityAttribute.deleteMany({ where: { entityId: entity.id } });
+        // 全量替换该实体的属性 —— **只替换当前 schemaRef 下的属性**。
+        // 旧契约（其它 schemaRef）写入的属性既不属于当前字段定义，
+        // 也不该被这次编辑连带删除：它们要留给按旧契约读取的场景，
+        // 更不能混进当前响应。
+        await tx.entityAttribute.deleteMany({ where: { entityId: entity.id, schemaRef } });
         for (const [key, value] of Object.entries(attributes)) {
           await tx.entityAttribute.create({
             data: {
@@ -663,8 +658,10 @@ export async function updateEntity(
           });
         }
       } else {
+        // 只改名称（未提交 attributes）时，构造版本快照所读的属性
+        // 同样**只取当前 schemaRef**：旧契约的属性不得进入新版本快照。
         const existing = await tx.entityAttribute.findMany({
-          where: { entityId: entity.id },
+          where: { entityId: entity.id, schemaRef },
           select: { attrKey: true, attrValue: true },
         });
         attributes = Object.fromEntries(

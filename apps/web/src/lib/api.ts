@@ -25,6 +25,8 @@ export type ApiErrorCode =
   | 'ENTITY_NAME_TAKEN'
   | 'ENTITY_IN_USE'
   | 'ENTITY_TYPE_NOT_ALLOWED'
+  // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
+  | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR';
 
@@ -46,6 +48,8 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   ENTITY_NAME_TAKEN: '同名实体已存在',
   ENTITY_IN_USE: '该境界当前被引用，无法删除',
   ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
+  // 并发修改冲突：可重试提示，**不**触发登录跳转
+  CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
   INTERNAL_ERROR: '服务内部错误，请稍后重试',
 };
@@ -327,7 +331,6 @@ export async function createEntity(
   input: {
     entityType: string;
     name: string;
-    orderIndex?: number;
     attributes: Record<string, unknown>;
   },
 ): Promise<EntityItem> {
@@ -338,13 +341,17 @@ export async function createEntity(
   return (body as { entity: EntityItem }).entity;
 }
 
-/** 编辑实体。 */
+/**
+ * 编辑实体。
+ *
+ * **排序值不在入参里**：orderIndex 由服务端独占，
+ * 顺序变更只能通过 `reorderEntities`（完整集合重排）完成。
+ */
 export async function updateEntity(
   workId: string,
   entityId: string,
   input: {
     name?: string;
-    orderIndex?: number;
     attributes?: Record<string, unknown>;
   },
 ): Promise<EntityItem> {

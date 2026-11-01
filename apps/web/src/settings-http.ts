@@ -18,24 +18,6 @@ export function optionalString(body: Record<string, unknown>, key: string): stri
   return value;
 }
 
-/** 读取可选整数段（缺失时返回 undefined；null 视为显式清空）。 */
-export function optionalInteger(
-  body: Record<string, unknown>,
-  key: string,
-): number | undefined | null {
-  const value = body[key];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value === null) {
-    return null;
-  }
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new AuthError('VALIDATION_FAILED', `字段 ${key} 必须是整数`);
-  }
-  return value;
-}
-
 /** 读取一个字符串字典字段（如 attributes / direction）。 */
 export function requireRecord(body: Record<string, unknown>, key: string): Record<string, unknown> {
   const value = body[key];
@@ -110,11 +92,21 @@ export const IMMUTABLE_SETTING_FIELDS = [
 /** 设定中心 PATCH 的允许字段（严格白名单）。 */
 export const SETTINGS_PATCH_FIELDS = ['direction'] as const;
 
-/** 实体 PATCH 的允许字段（严格白名单）。 */
-export const ENTITY_PATCH_FIELDS = ['name', 'orderIndex', 'attributes'] as const;
+/**
+ * 实体 PATCH 的允许字段（严格白名单）。
+ *
+ * `orderIndex` **不在其中**：排序值由服务端独占，
+ * 顺序变更只能走 `PUT /entities/reorder` 的完整集合重排。
+ */
+export const ENTITY_PATCH_FIELDS = ['name', 'attributes'] as const;
 
-/** 实体 POST 的允许字段（严格白名单）。 */
-export const ENTITY_CREATE_FIELDS = ['entityType', 'name', 'orderIndex', 'attributes'] as const;
+/**
+ * 实体 POST 的允许字段（严格白名单）。
+ *
+ * `orderIndex` **不在其中**：新建时由服务端追加到
+ * "最大未删除 order_index + 1"。
+ */
+export const ENTITY_CREATE_FIELDS = ['entityType', 'name', 'attributes'] as const;
 
 /** 设定中心响应。 */
 export function settingsResponse(payload: unknown): Response {

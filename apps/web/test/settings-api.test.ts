@@ -274,22 +274,35 @@ describe('设定中心接口（M2-B1）', () => {
     const workId = await createWork(author.id);
     const otherWorkId = await createWork(other.id);
 
-    for (const [index, name] of ['甲', '乙'].entries()) {
-      await entitiesPost(
+    // 排序值由服务端独占：POST 不再接受 orderIndex，
+    // 先按创建顺序得到 1、2，再用 reorder 调整成 ['乙', '甲']。
+    const createdIds: string[] = [];
+    for (const name of ['甲', '乙']) {
+      const response = await entitiesPost(
         request(`/api/works/${workId}/entities`, {
           method: 'POST',
-          body: {
-            entityType: 'realm_level',
-            name,
-            orderIndex: 2 - index,
-            attributes: REALM_ATTRIBUTES,
-          },
+          body: { entityType: 'realm_level', name, attributes: REALM_ATTRIBUTES },
           token: author.token,
           origin: ORIGIN,
         }),
         { params: Promise.resolve({ id: workId }) },
       );
+      expect(response.status).toBe(201);
+      const { entity } = (await response.json()) as { entity: { id: string } };
+      createdIds.push(entity.id);
     }
+
+    const reorder = await reorderPut(
+      request(`/api/works/${workId}/entities/reorder`, {
+        method: 'PUT',
+        body: { entityType: 'realm_level', entityIds: [...createdIds].reverse() },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(reorder.status).toBe(200);
+
     await entitiesPost(
       request(`/api/works/${otherWorkId}/entities`, {
         method: 'POST',
@@ -363,7 +376,7 @@ describe('设定中心接口（M2-B1）', () => {
     expect(forbidden.status).toBe(404);
   });
 
-  it('实体 PATCH 是严格允许列表：只接受 name / orderIndex / attributes', async () => {
+  it('实体 PATCH 是严格允许列表：只接受 name / attributes', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
 
@@ -378,7 +391,7 @@ describe('设定中心接口（M2-B1）', () => {
     );
     const { entity } = (await created.json()) as { entity: { id: string } };
 
-    // 逐个字段：服务端字段与完全陌生的字段都必须 400
+    // 逐个字段：服务端字段、排序值（服务端独占）与完全陌生的字段都必须 400
     const forbiddenFields = [
       'id',
       'workId',
@@ -387,6 +400,8 @@ describe('设定中心接口（M2-B1）', () => {
       'author_id',
       'entityType',
       'entity_type',
+      'orderIndex',
+      'order_index',
       'createdAt',
       'created_at',
       'updatedAt',
@@ -411,13 +426,12 @@ describe('设定中心接口（M2-B1）', () => {
       expect(body.error.code, `字段 ${field} 的错误码`).toBe('VALIDATION_FAILED');
     }
 
-    // 允许的三个字段都能通过
+    // 允许的两个字段都能通过
     const allowed = await entityPatch(
       request(`/api/works/${workId}/entities/${entity.id}`, {
         method: 'PATCH',
         body: {
           name: '元婴期',
-          orderIndex: 1,
           attributes: { ...REALM_ATTRIBUTES, lifespan: '五千年' },
         },
         token: author.token,
@@ -428,7 +442,224 @@ describe('设定中心接口（M2-B1）', () => {
     expect(allowed.status).toBe(200);
   });
 
-  it('实体 POST 拒绝服务端字段（id / workId / authorId / 时间戳等）', async () => {
+  it('排序值服务端独占：PATCH orderIndex 一律 400，顺序只能靠完整 reorder 改变', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    // 1) 顺序创建两个实体 → 服务端自动得到 order_index 1、2
+    const ids: string[] = [];
+    for (const name of ['甲', '乙']) {
+      const response = await entitiesPost(
+        request(`/api/works/${workId}/entities`, {
+          method: 'POST',
+          body: { entityType: 'realm_level', name, attributes: REALM_ATTRIBUTES },
+          token: author.token,
+          origin: ORIGIN,
+        }),
+        { params: Promise.resolve({ id: workId }) },
+      );
+      expect(response.status).toBe(201);
+      const { entity } = (await response.json()) as { entity: { id: string; orderIndex: number } };
+      ids.push(entity.id);
+      expect(entity.orderIndex, '新建时由服务端追加排序值').toBe(ids.length);
+    }
+
+    const readOrderIndexes = async (): Promise<number[]> => {
+      const rows = await db.entity.findMany({
+        where: { workId, entityType: 'realm_level', deletedAt: null },
+        select: { id: true, orderIndex: true },
+      });
+      return ids.map((id) => rows.find((row) => row.id === id)?.orderIndex ?? -1);
+    };
+
+    expect(await readOrderIndexes(), '两个实体顺序应为 1、2').toEqual([1, 2]);
+
+    // 2) PATCH 第二个实体提交 orderIndex=1 必须 400
+    for (const field of ['orderIndex', 'order_index']) {
+      const response = await entityPatch(
+        request(`/api/works/${workId}/entities/${ids[1]}`, {
+          method: 'PATCH',
+          body: { [field]: 1 },
+          token: author.token,
+          origin: ORIGIN,
+        }),
+        { params: Promise.resolve({ id: workId, entityId: ids[1] as string }) },
+      );
+      expect(response.status, `PATCH ${field} 必须 400`).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe('VALIDATION_FAILED');
+    }
+
+    // 3) 数据库中的 order_index 仍然是 1、2（没有被越权改写）
+    expect(await readOrderIndexes(), 'order_index 必须保持不变').toEqual([1, 2]);
+
+    // 混在合法字段里也不允许：不能让 orderIndex 借道 attributes/name 蒙混过关
+    const mixed = await entityPatch(
+      request(`/api/works/${workId}/entities/${ids[1]}`, {
+        method: 'PATCH',
+        body: { name: '乙改', orderIndex: 1 },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: ids[1] as string }) },
+    );
+    expect(mixed.status, '混入 orderIndex 也必须整体拒绝').toBe(400);
+    expect(await readOrderIndexes()).toEqual([1, 2]);
+
+    // 4) 合法顺序只能通过完整 reorder 请求改变
+    const reorder = await reorderPut(
+      request(`/api/works/${workId}/entities/reorder`, {
+        method: 'PUT',
+        body: { entityType: 'realm_level', entityIds: [ids[1], ids[0]] },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(reorder.status).toBe(200);
+    expect(await readOrderIndexes(), 'reorder 后顺序应为 2、1').toEqual([2, 1]);
+
+    // 不完整的 reorder 仍然被拒绝
+    const partial = await reorderPut(
+      request(`/api/works/${workId}/entities/reorder`, {
+        method: 'PUT',
+        body: { entityType: 'realm_level', entityIds: [ids[0]] },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    expect(partial.status).toBe(400);
+    expect(await readOrderIndexes(), '失败的 reorder 不得改变顺序').toEqual([2, 1]);
+  });
+
+  it('更新 attributes 只替换当前 schemaRef：旧契约属性不删除也不混入响应', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const created = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '金丹', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const { entity } = (await created.json()) as { entity: { id: string } };
+
+    // 手工插入一条**旧契约**（xuanhuan@1.0.0）的属性。
+    // 其中 legacyOnly 只在旧契约里存在；lifespan 与当前契约同名但取值不同，
+    // 用来验证"同名不同契约"不会串味。
+    const legacySchemaRef = 'xuanhuan@1.0.0';
+    await db.entityAttribute.create({
+      data: {
+        entityId: entity.id,
+        attrKey: 'legacyOnly',
+        attrValue: '旧契约专属字段',
+        schemaRef: legacySchemaRef,
+      },
+    });
+    await db.entityAttribute.create({
+      data: {
+        entityId: entity.id,
+        attrKey: 'lifespan',
+        attrValue: '旧契约寿命值',
+        schemaRef: legacySchemaRef,
+      },
+    });
+
+    const patched = await entityPatch(
+      request(`/api/works/${workId}/entities/${entity.id}`, {
+        method: 'PATCH',
+        body: { attributes: { ...REALM_ATTRIBUTES, lifespan: '新契约寿命值' } },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: entity.id }) },
+    );
+    expect(patched.status).toBe(200);
+    const patchedBody = (await patched.json()) as {
+      entity: { attributes: Record<string, unknown>; version: number };
+    };
+
+    // 旧契约属性不得出现在响应里
+    expect(patchedBody.entity.attributes).not.toHaveProperty('legacyOnly');
+    // 同名 key 取当前契约的值，不能被旧契约覆盖
+    expect(patchedBody.entity.attributes['lifespan']).toBe('新契约寿命值');
+
+    // 旧契约的属性行必须**仍然存在**（不能被当前契约的编辑连带删除）
+    const legacyRows = await db.entityAttribute.findMany({
+      where: { entityId: entity.id, schemaRef: legacySchemaRef },
+      select: { attrKey: true, attrValue: true },
+    });
+    expect(legacyRows.map((row) => row.attrKey).sort()).toEqual(['legacyOnly', 'lifespan']);
+
+    // 新版本快照里同样不得出现旧契约属性
+    const latest = await db.entityVersion.findFirst({
+      where: { entityId: entity.id },
+      orderBy: { versionNo: 'desc' },
+      select: { snapshot: true },
+    });
+    const snapshotAttributes = (latest?.snapshot as { attributes: Record<string, unknown> })
+      .attributes;
+    expect(snapshotAttributes).not.toHaveProperty('legacyOnly');
+    expect(snapshotAttributes['lifespan']).toBe('新契约寿命值');
+  });
+
+  it('只改名称时版本快照只读取当前 schemaRef 的属性', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    const created = await entitiesPost(
+      request(`/api/works/${workId}/entities`, {
+        method: 'POST',
+        body: { entityType: 'realm_level', name: '筑基', attributes: REALM_ATTRIBUTES },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId }) },
+    );
+    const { entity } = (await created.json()) as { entity: { id: string } };
+
+    await db.entityAttribute.create({
+      data: {
+        entityId: entity.id,
+        attrKey: 'legacyOnly',
+        attrValue: '旧契约专属字段',
+        schemaRef: 'xuanhuan@1.0.0',
+      },
+    });
+
+    // 只提交 name，不提交 attributes
+    const patched = await entityPatch(
+      request(`/api/works/${workId}/entities/${entity.id}`, {
+        method: 'PATCH',
+        body: { name: '筑基期' },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      { params: Promise.resolve({ id: workId, entityId: entity.id }) },
+    );
+    expect(patched.status).toBe(200);
+    const patchedBody = (await patched.json()) as {
+      entity: { attributes: Record<string, unknown>; version: number };
+    };
+    expect(patchedBody.entity.attributes).not.toHaveProperty('legacyOnly');
+
+    // 新版本快照也必须只含当前契约的属性
+    const snapshotRow = await db.entityVersion.findFirst({
+      where: { entityId: entity.id },
+      orderBy: { versionNo: 'desc' },
+      select: { snapshot: true },
+    });
+    const snapshotAttributes = (snapshotRow?.snapshot as { attributes: Record<string, unknown> })
+      .attributes;
+    expect(snapshotAttributes).not.toHaveProperty('legacyOnly');
+    expect(snapshotAttributes['minorLevelCount']).toBe(REALM_ATTRIBUTES.minorLevelCount);
+  });
+
+  it('实体 POST 拒绝服务端字段（id / workId / authorId / orderIndex / 时间戳等）', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
 
@@ -438,6 +669,9 @@ describe('设定中心接口（M2-B1）', () => {
       'work_id',
       'authorId',
       'author_id',
+      // 排序值由服务端独占：POST 也不能指定
+      'orderIndex',
+      'order_index',
       'createdAt',
       'created_at',
       'updatedAt',

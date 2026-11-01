@@ -5,7 +5,6 @@ import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
 import {
   ENTITY_PATCH_FIELDS,
-  optionalInteger,
   optionalString,
   rejectUnknownFields,
   requireRecord,
@@ -19,10 +18,12 @@ export const runtime = 'nodejs';
  * PATCH /api/works/:id/entities/:entityId —— 编辑实体。
  *
  * - 只允许修改当前作品内的实体；他人作品 → 404；
- * - 请求体是**严格白名单**：只接受 name / orderIndex / attributes。
- *   出现 id / workId / authorId / entityType / createdAt / updatedAt /
- *   deletedAt（或任何未知字段）一律 400 VALIDATION_FAILED，
- *   不静默忽略；
+ * - 请求体是**严格白名单**：只接受 name / attributes。
+ *   出现 id / workId / authorId / entityType / **orderIndex** /
+ *   createdAt / updatedAt / deletedAt（或任何未知字段）一律
+ *   400 VALIDATION_FAILED，不静默忽略；
+ * - **排序值由服务端独占**：属性与名称之外的一切（尤其是顺序）
+ *   都不能通过本接口修改；调整顺序只能走 `PUT /entities/reorder`；
  * - 更新属性后追加新版本快照，旧版本保留；
  * - 与 `entity.updated` 审计同事务；
  * - 归属、未删除状态与版本号计算都在作品级锁 + 同一事务内完成。
@@ -40,7 +41,6 @@ export async function PATCH(
     rejectUnknownFields(body, ENTITY_PATCH_FIELDS);
 
     const name = optionalString(body, 'name');
-    const orderIndex = optionalInteger(body, 'orderIndex');
     const attributes =
       body['attributes'] === undefined ? undefined : requireRecord(body, 'attributes');
 
@@ -49,7 +49,6 @@ export async function PATCH(
       authorId: author.id,
       entityId,
       ...(name === undefined ? {} : { name }),
-      ...(orderIndex === undefined ? {} : { orderIndex }),
       ...(attributes === undefined ? {} : { attributes }),
       meta: {
         ip: readClientIp(request),
