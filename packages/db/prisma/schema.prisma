@@ -138,6 +138,7 @@ model Work {
 
   author   User          @relation("WorkAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   settings WorkSetting[]
+  entities Entity[]
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -163,4 +164,66 @@ model WorkSetting {
   @@unique([workId, settingKey, schemaRef])
   @@index([workId])
   @@map("work_settings")
+}
+
+/// 通用实体（M2-B1）。
+///
+/// - 只承载"实体"这一抽象骨架：具体的题材语义（境界、人物、功法……）
+///   由 entity_type 区分，字段定义放在 rule_packages 的 field_schema 里；
+/// - 删除是**软删除**（deleted_at）：同一作品同类型下未删除实体名称唯一，
+///   软删除后同名可重新使用 —— 该约束由迁移里的**部分唯一索引**实现
+///   （Prisma 不支持部分索引，因此这里只声明普通索引）；
+/// - 查询必须带 work_id，跨作品不可见。
+model Entity {
+  id         String    @id @default(uuid()) @db.Uuid
+  workId     String    @map("work_id") @db.Uuid
+  entityType String    @map("entity_type")
+  name       String
+  orderIndex Int?      @map("order_index")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt  DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  work       Work              @relation(fields: [workId], references: [id], onDelete: Cascade)
+  attributes EntityAttribute[]
+  versions   EntityVersion[]
+
+  @@index([workId, entityType])
+  @@map("entities")
+}
+
+/// 实体属性（M2-B1）。
+///
+/// 结构化属性以 (attr_key, schema_ref) 定位，值放在 jsonb 里；
+/// schema_ref 指向规则包版本，便于将来按版本解释同一份数据。
+model EntityAttribute {
+  id           String   @id @default(uuid()) @db.Uuid
+  entityId     String   @map("entity_id") @db.Uuid
+  attrKey      String   @map("attr_key")
+  attrValue    Json     @map("attr_value")
+  schemaRef    String   @map("schema_ref")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, attrKey, schemaRef])
+  @@index([entityId])
+  @@map("entity_attributes")
+}
+
+/// 实体版本快照（M2-B1）。
+///
+/// 每次更新实体都追加一版快照，旧版本保留 —— 便于回溯与审计核对。
+model EntityVersion {
+  id        String   @id @default(uuid()) @db.Uuid
+  entityId  String   @map("entity_id") @db.Uuid
+  versionNo Int      @map("version_no")
+  snapshot  Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entity Entity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, versionNo])
+  @@map("entity_versions")
 }

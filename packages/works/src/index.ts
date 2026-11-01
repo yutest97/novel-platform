@@ -27,6 +27,44 @@ export {
   updateWork,
 } from './works.js';
 
+export {
+  ALLOWED_ENTITY_TYPE,
+  MAX_ENTITY_NAME_LENGTH,
+  createEntity,
+  deleteEntity,
+  getSettingsCenter,
+  listEntities,
+  normalizeEntityName,
+  reorderEntities,
+  updateDirection,
+  updateEntity,
+} from './entities.js';
+
+export type {
+  CreateEntityInput,
+  DeleteEntityInput,
+  EntityView,
+  ReorderEntitiesInput,
+  SettingsCenterView,
+  UpdateDirectionInput,
+  UpdateEntityInput,
+} from './entities.js';
+
+export {
+  buildSchemaSummary,
+  entityTypeGroup,
+  parseRuleFieldSchema,
+  validateFields,
+} from './schema.js';
+
+export type {
+  FieldDefinition,
+  FieldGroup,
+  FieldType,
+  RuleFieldSchema,
+  SchemaSummary,
+} from './schema.js';
+
 export type {
   CreateWorkInput,
   RulePackageView,

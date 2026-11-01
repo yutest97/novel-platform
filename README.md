@@ -165,10 +165,12 @@ ADMIN_INITIAL_PASSWORD='至少12位的口令' \
   审计写失败会连业务修改一起回滚，不会出现"改了但没审计"。
 
 数据表：`users`、`sessions`、`audit_logs`（账号体系）、
-`works`、`rule_packages`、`work_settings`（M2-A 作品核心）。
+`works`、`rule_packages`、`work_settings`（M2-A 作品核心）、
+`entities`、`entity_attributes`、`entity_versions`（M2-B1 通用实体骨架）。
 
-**不包含**章节、场景、人物、境界、势力、时间线、事实等业务表，
+**不包含**章节、场景、人物、势力、功法、物品、时间线、事实等业务表，
 也不包含任何模型调用相关表 —— 那些属于后续阶段。
+境界体系走**通用实体**（`entity_type = 'realm_level'`），不单独建表。
 
 ### 管理接口（M1-B2）
 
@@ -305,6 +307,44 @@ API（全部只允许 active、已改密的**作者**，作者身份只从会话
 > 作品详情当前直接显示题材**代码**（`xuanhuan`）。把它映射成规则包名称
 > （如「玄幻升级」）留待后续阶段实现 —— 本轮不强制。
 
+### 设定中心与境界体系（M2-B1）
+
+数据库（迁移 `packages/db/prisma/migrations/20261101000001_m2b1_entities/`）：
+
+| 表                  | 说明                                                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `entities`          | 通用实体：`work_id`、`entity_type`、`name`、`order_index`、`deleted_at`；同作品同类型下**未删除**实体名称唯一（部分唯一索引，软删除后同名可复用） |
+| `entity_attributes` | 实体属性：`entity_id + attr_key + schema_ref` 唯一，值放 jsonb                                                                                    |
+| `entity_versions`   | 版本快照：`entity_id + version_no` 唯一；每次编辑**追加**一版，旧版本保留                                                                         |
+
+**xuanhuan 的 `field_schema`（版本 2）** 定义了两个字段组：
+
+| 字段组                   | 字段（按 order）                                                             | 类型                    | 必填       |
+| ------------------------ | ---------------------------------------------------------------------------- | ----------------------- | ---------- |
+| 作品方向 `workDirection` | subGenre、goldenFinger、toneStyle、protagonistPosition                       | string                  | 前两个必填 |
+| 实体类型 `realm_level`   | minorLevelCount、breakthroughCondition、lifespan、powerBaseline、description | integer / string / text | 前两个必填 |
+
+每个字段都带 `label`、`help`（帮助文本）与 `order`（顺序）。
+玄幻专属定义**只**存在规则包里，不写进通用核心表。
+
+API（全部要求 active、已改密的作者会话；管理员 403；他人作品 404）：
+
+| 接口                                       | 方法   | 说明                                                                                          |
+| ------------------------------------------ | ------ | --------------------------------------------------------------------------------------------- |
+| `/api/works/:id/settings`                  | GET    | 作品方向 + 规则包公开 schema 摘要 + 境界体系列表                                              |
+| `/api/works/:id/settings`                  | PATCH  | 更新作品方向；字段必须符合 field_schema；不可变字段（规则包 code / schemaRef / 归属）一律 400 |
+| `/api/works/:id/entities?type=realm_level` | GET    | 列出实体，按 `order_index` 升序                                                               |
+| `/api/works/:id/entities`                  | POST   | 新建实体（第一版只开放 `realm_level`）；同作品同类型重名 `409 ENTITY_NAME_TAKEN`              |
+| `/api/works/:id/entities/:entityId`        | PATCH  | 编辑实体（追加版本快照）；`id`/`workId`/`entityType` 等不可变                                 |
+| `/api/works/:id/entities/:entityId`        | DELETE | 软删除；被引用时 `409 ENTITY_IN_USE`                                                          |
+| `/api/works/:id/entities/reorder`          | PUT    | 排序：只接受完整、无重复、全部属于当前作品的集合                                              |
+
+- 写接口校验 Origin；写操作与审计**同事务**（`settings.updated` / `entity.created` /
+  `entity.updated` / `entity.deleted` / `entity.reordered`）；
+- 审计 detail 只记录 workId / entityId / entityType / **字段名**，不记录完整设定值；
+- 页面 `/works/:id/settings`：作品方向（标签与帮助文本来自 schema）+ 境界体系
+  （新增 / 编辑 / 软删除 / 上下移动）；作品详情页有「进入设定中心」入口。
+
 ### 浏览器 E2E（Playwright Chromium）
 
 ```bash
@@ -314,7 +354,7 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖（29 个用例，分三个 spec 文件：账号管理 / 作品流程 / 账号上限）：
+覆盖（39 个用例，分四个 spec 文件：账号管理 / 设定中心 / 作品流程 / 账号上限）：
 未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
 刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
 启用后可登录、退出后保持未登录、第 11 个账号的上限提示，
@@ -324,7 +364,10 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
 登录 / 表格横向滚动 / 一次性口令弹窗可操作；
 **作品流程**：管理员创建两个作者 → 作者 A 创建作品、刷新后仍在 → 打开详情 →
 作者 B 看不到且直接访问被拒 → 退出重登后仍在 → 重复标题与校验失败提示可被读屏获取 →
-移动端创建作品 → 页面不出现人物/章节/AI 生成入口。
+移动端创建作品 → 页面不出现人物/章节/AI 生成入口；
+**设定中心**：填写并保存作品方向（刷新后仍在）→ 创建炼气/筑基/金丹 → 修改筑基（刷新后仍在）
+→ 调整顺序（刷新后保持）→ 删除未被引用的境界 → 作者 B 进不去 A 的设定页 →
+移动端编辑方向并新增境界 → 页面不出现人物/势力/功法/物品/章节/AI 生成入口。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

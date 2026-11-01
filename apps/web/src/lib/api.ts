@@ -22,6 +22,9 @@ export type ApiErrorCode =
   | 'USER_LIMIT_REACHED'
   | 'WORK_TITLE_TAKEN'
   | 'INVALID_RULE_PACKAGE'
+  | 'ENTITY_NAME_TAKEN'
+  | 'ENTITY_IN_USE'
+  | 'ENTITY_TYPE_NOT_ALLOWED'
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR';
 
@@ -40,6 +43,9 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   USER_LIMIT_REACHED: '账号数量已达上限（10 个）',
   WORK_TITLE_TAKEN: '你已创建过同名作品，请换一个标题',
   INVALID_RULE_PACKAGE: '题材不可用',
+  ENTITY_NAME_TAKEN: '同名实体已存在',
+  ENTITY_IN_USE: '该境界当前被引用，无法删除',
+  ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
   NOT_FOUND: '目标不存在',
   INTERNAL_ERROR: '服务内部错误，请稍后重试',
 };
@@ -235,4 +241,137 @@ export async function fetchWork(workId: string): Promise<WorkDetail> {
 export async function fetchRulePackages(): Promise<RulePackage[]> {
   const { body } = await apiRequest('/api/works/rule-packages');
   return (body as { rulePackages: RulePackage[] }).rulePackages;
+}
+
+/* ------------------------------------------------- 设定中心与实体（M2-B1） */
+
+/** 字段定义（来自规则包的 field_schema）。 */
+export interface FieldDefinition {
+  readonly key: string;
+  readonly label: string;
+  readonly type: 'string' | 'text' | 'integer';
+  readonly required: boolean;
+  readonly order: number;
+  readonly help?: string;
+  readonly maxLength?: number;
+  readonly min?: number;
+  readonly max?: number;
+}
+
+/** 一组字段定义。 */
+export interface FieldGroup {
+  readonly title: string;
+  readonly schemaRef: string;
+  readonly fields: readonly FieldDefinition[];
+}
+
+/** 规则包的公开 schema 摘要。 */
+export interface SchemaSummary {
+  readonly code: string;
+  readonly name: string;
+  readonly version: string;
+  readonly workDirection: FieldGroup | null;
+  readonly entityTypes: readonly { key: string; group: FieldGroup }[];
+}
+
+/** 实体。 */
+export interface EntityItem {
+  readonly id: string;
+  readonly entityType: string;
+  readonly name: string;
+  readonly orderIndex: number | null;
+  readonly attributes: Record<string, unknown>;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** 设定中心。 */
+export interface SettingsCenter {
+  readonly workId: string;
+  readonly workTitle: string;
+  readonly direction: Record<string, unknown>;
+  readonly schema: SchemaSummary;
+  readonly realms: readonly EntityItem[];
+}
+
+/** 读取设定中心。 */
+export async function fetchSettingsCenter(workId: string): Promise<SettingsCenter> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}/settings`);
+  return (body as { settings: SettingsCenter }).settings;
+}
+
+/** 更新作品方向。 */
+export async function updateDirection(
+  workId: string,
+  direction: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}/settings`, {
+    method: 'PATCH',
+    body: { direction },
+  });
+  return (body as { direction: Record<string, unknown> }).direction;
+}
+
+/** 列出作品内指定类型的实体。 */
+export async function fetchEntities(workId: string, entityType: string): Promise<EntityItem[]> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/entities?type=${encodeURIComponent(entityType)}`,
+  );
+  return (body as { entities: EntityItem[] }).entities;
+}
+
+/** 新建实体。 */
+export async function createEntity(
+  workId: string,
+  input: {
+    entityType: string;
+    name: string;
+    orderIndex?: number;
+    attributes: Record<string, unknown>;
+  },
+): Promise<EntityItem> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}/entities`, {
+    method: 'POST',
+    body: input,
+  });
+  return (body as { entity: EntityItem }).entity;
+}
+
+/** 编辑实体。 */
+export async function updateEntity(
+  workId: string,
+  entityId: string,
+  input: {
+    name?: string;
+    orderIndex?: number;
+    attributes?: Record<string, unknown>;
+  },
+): Promise<EntityItem> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/entities/${encodeURIComponent(entityId)}`,
+    { method: 'PATCH', body: input },
+  );
+  return (body as { entity: EntityItem }).entity;
+}
+
+/** 软删除实体。 */
+export async function deleteEntity(workId: string, entityId: string): Promise<void> {
+  await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/entities/${encodeURIComponent(entityId)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** 重排实体顺序。 */
+export async function reorderEntities(
+  workId: string,
+  entityType: string,
+  entityIds: readonly string[],
+): Promise<EntityItem[]> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}/entities/reorder`, {
+    method: 'PUT',
+    body: { entityType, entityIds },
+  });
+  return (body as { entities: EntityItem[] }).entities;
 }

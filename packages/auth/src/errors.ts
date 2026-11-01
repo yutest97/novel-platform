@@ -21,6 +21,9 @@ export type AuthErrorCode =
   | 'USER_LIMIT_REACHED'
   | 'WORK_TITLE_TAKEN'
   | 'INVALID_RULE_PACKAGE'
+  | 'ENTITY_NAME_TAKEN'
+  | 'ENTITY_IN_USE'
+  | 'ENTITY_TYPE_NOT_ALLOWED'
   | 'NOT_FOUND';
 
 /** 错误码 → HTTP 状态码。 */
@@ -40,6 +43,12 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   WORK_TITLE_TAKEN: 409,
   // 题材规则包不存在或未启用
   INVALID_RULE_PACKAGE: 400,
+  // 稳定冲突错误：同一作品同类型下实体名重复
+  ENTITY_NAME_TAKEN: 409,
+  // 稳定冲突错误：实体被其它实体引用，无法删除
+  ENTITY_IN_USE: 409,
+  // 实体类型不在当前阶段允许范围内
+  ENTITY_TYPE_NOT_ALLOWED: 400,
   NOT_FOUND: 404,
 };
 
@@ -65,6 +74,12 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   WORK_TITLE_TAKEN: '该作者下已存在同名作品',
   // 题材无效：规则包不存在或未启用
   INVALID_RULE_PACKAGE: '题材不可用',
+  // 稳定冲突错误：同一作品同类型下实体名重复
+  ENTITY_NAME_TAKEN: '同名实体已存在',
+  // 稳定冲突错误：实体被引用，无法删除
+  ENTITY_IN_USE: '该实体当前被引用，无法删除',
+  // 实体类型不允许
+  ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
   NOT_FOUND: '资源不存在',
 };
 

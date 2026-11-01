@@ -136,8 +136,20 @@ export default function WorkDetailPage(): React.ReactElement {
           </div>
 
           <div className="card">
+            <h2>设定中心</h2>
+            <p className="hint">作品方向与境界体系已开放。</p>
+            <Link
+              href={`/works/${work.id}/settings`}
+              className="btn-secondary"
+              data-testid="open-settings"
+            >
+              进入设定中心
+            </Link>
+          </div>
+
+          <div className="card">
             <h2>后续阶段</h2>
-            <p>人物、境界、卷纲与章节创作将在后续阶段开放。</p>
+            <p>人物、势力、功法、物品、卷纲与章节创作将在后续阶段开放。</p>
             <p className="hint">本阶段不提供 AI 生成入口。</p>
           </div>
         </>

@@ -31,6 +31,11 @@ export const AUDIT_ACTIONS = {
   ADMIN_PASSWORD_RESET: 'admin.password_reset',
   WORK_CREATED: 'work.created',
   WORK_UPDATED: 'work.updated',
+  SETTINGS_UPDATED: 'settings.updated',
+  ENTITY_CREATED: 'entity.created',
+  ENTITY_UPDATED: 'entity.updated',
+  ENTITY_DELETED: 'entity.deleted',
+  ENTITY_REORDERED: 'entity.reordered',
 } as const;
 
 /** 审计动作类型。 */

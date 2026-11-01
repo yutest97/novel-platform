@@ -1,0 +1,648 @@
+/**
+ * 设定中心与通用实体测试（M2-B1）。
+ *
+ * 覆盖：作品归属隔离、schema 校验、版本快照、软删除、排序、审计原子性。
+ */
+
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import {
+  ALLOWED_ENTITY_TYPE,
+  createEntity,
+  deleteEntity,
+  getSettingsCenter,
+  listEntities,
+  reorderEntities,
+  updateDirection,
+  updateEntity,
+} from '../src/entities.js';
+import { closeTestDb, testDb, uniqueEmail } from './helpers/db.js';
+
+const META = { ip: '203.0.113.20', userAgent: 'vitest' };
+
+/** 创建作者账号。 */
+async function createAuthor(): Promise<{ id: string; email: string }> {
+  const db = testDb();
+  const email = uniqueEmail('m2b1');
+  const user = await db.user.create({
+    data: {
+      email,
+      passwordHash: '$argon2id$stub',
+      role: 'author',
+      status: 'active',
+      mustChangePassword: false,
+    },
+  });
+  return { id: user.id, email };
+}
+
+/** 创建作品。 */
+async function createWork(authorId: string, title?: string): Promise<string> {
+  const db = testDb();
+  const work = await db.work.create({
+    data: {
+      authorId,
+      title: title ?? `作品-${uniqueEmail('t')}`,
+      genreRulePackage: 'xuanhuan',
+    },
+  });
+  return work.id;
+}
+
+/** 合法的境界属性。 */
+function realmAttributes(): Record<string, unknown> {
+  return {
+    minorLevelCount: 9,
+    breakthroughCondition: '引气入体',
+    lifespan: '一百年',
+    powerBaseline: '凡境',
+  };
+}
+
+describe('设定中心与实体（M2-B1）', () => {
+  beforeAll(() => {
+    testDb();
+  });
+
+  afterAll(async () => {
+    await closeTestDb();
+  });
+
+  it('xuanhuan 规则包包含作品方向与 realm_level 的字段定义', async () => {
+    const db = testDb();
+    const rulePackage = await db.rulePackage.findUniqueOrThrow({ where: { code: 'xuanhuan' } });
+    const schema = rulePackage.fieldSchema as {
+      workDirection?: { fields?: { key: string }[] };
+      entityTypes?: Record<string, { fields?: { key: string }[] }>;
+    };
+
+    expect(schema.workDirection?.fields?.map((field) => field.key)).toEqual([
+      'subGenre',
+      'goldenFinger',
+      'toneStyle',
+      'protagonistPosition',
+    ]);
+    expect(schema.entityTypes?.['realm_level']?.fields?.map((field) => field.key)).toEqual([
+      'minorLevelCount',
+      'breakthroughCondition',
+      'lifespan',
+      'powerBaseline',
+      'description',
+    ]);
+  });
+
+  it('作者只能看到自己作品的设定；他人作品一律 404', async () => {
+    const db = testDb();
+    const authorA = await createAuthor();
+    const authorB = await createAuthor();
+    const workId = await createWork(authorA.id);
+
+    const center = await getSettingsCenter(db, { workId, authorId: authorA.id });
+    expect(center.workId).toBe(workId);
+    expect(center.schema.code).toBe('xuanhuan');
+
+    await expect(getSettingsCenter(db, { workId, authorId: authorB.id })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('作品方向按 xuanhuan schema 校验：未知字段、缺必填、类型错都 400', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    // 未知字段
+    await expect(
+      updateDirection(db, {
+        workId,
+        authorId: author.id,
+        values: { unknownField: 'x' },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 缺必填
+    await expect(
+      updateDirection(db, {
+        workId,
+        authorId: author.id,
+        values: { subGenre: '东方玄幻' },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 类型错
+    await expect(
+      updateDirection(db, {
+        workId,
+        authorId: author.id,
+        values: { subGenre: '东方玄幻', goldenFinger: 123 },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('更新作品方向成功并写 settings.updated 审计（不含具体值）', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const direction = await updateDirection(db, {
+      workId,
+      authorId: author.id,
+      values: {
+        subGenre: '东方玄幻',
+        goldenFinger: '残破玉佩',
+        toneStyle: '热血激昂',
+        protagonistPosition: '废柴逆袭',
+      },
+      meta: META,
+    });
+
+    expect(direction['subGenre']).toBe('东方玄幻');
+    expect(direction['goldenFinger']).toBe('残破玉佩');
+
+    const audit = await db.auditLog.findFirst({
+      where: { action: 'settings.updated', targetId: workId },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(audit).not.toBeNull();
+    const detail = JSON.stringify(audit?.detail ?? {});
+    expect(detail).toContain('subGenre');
+    // detail 不得包含设定值
+    expect(detail).not.toContain('残破玉佩');
+    expect(detail).not.toContain('东方玄幻');
+  });
+
+  it('创建 realm_level：实体 + 属性 + 第一版快照 + 审计同事务', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '炼气',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    expect(realm.name).toBe('炼气');
+    expect(realm.attributes['minorLevelCount']).toBe(9);
+    expect(realm.version).toBe(1);
+
+    const versions = await db.entityVersion.findMany({ where: { entityId: realm.id } });
+    expect(versions).toHaveLength(1);
+    expect(versions[0]?.versionNo).toBe(1);
+
+    const audit = await db.auditLog.findFirst({
+      where: { action: 'entity.created', targetId: realm.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(audit).not.toBeNull();
+    const detail = JSON.stringify(audit?.detail ?? '');
+    expect(detail).toContain(workId);
+    expect(detail).toContain('realm_level');
+    expect(detail).not.toContain('引气入体');
+  });
+
+  it('同作品同类型重名被拒绝；不同作品允许同名', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workA = await createWork(author.id);
+    const workB = await createWork(author.id);
+
+    await createEntity(db, {
+      workId: workA,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '筑基',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    await expect(
+      createEntity(db, {
+        workId: workA,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        name: '筑基',
+        attributes: realmAttributes(),
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'ENTITY_NAME_TAKEN' });
+
+    // 不同作品同名可以
+    const other = await createEntity(db, {
+      workId: workB,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '筑基',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+    expect(other.name).toBe('筑基');
+  });
+
+  it('编辑实体追加新版本，旧版本保留', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '金丹',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    const updated = await updateEntity(db, {
+      workId,
+      authorId: author.id,
+      entityId: realm.id,
+      attributes: { ...realmAttributes(), breakthroughCondition: '破而后立' },
+      meta: META,
+    });
+
+    expect(updated.version).toBe(2);
+    expect(updated.attributes['breakthroughCondition']).toBe('破而后立');
+
+    const versions = await db.entityVersion.findMany({
+      where: { entityId: realm.id },
+      orderBy: { versionNo: 'asc' },
+    });
+    expect(versions).toHaveLength(2);
+    expect(versions[0]?.versionNo).toBe(1);
+    expect(versions[1]?.versionNo).toBe(2);
+    // 旧版本快照保留最初的值
+    const snapshot = versions[0]?.snapshot as { attributes: Record<string, unknown> };
+    expect(snapshot.attributes['breakthroughCondition']).toBe('引气入体');
+  });
+
+  it('其他作者更新实体一律 404', async () => {
+    const db = testDb();
+    const authorA = await createAuthor();
+    const authorB = await createAuthor();
+    const workId = await createWork(authorA.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: authorA.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '元婴',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    await expect(
+      updateEntity(db, {
+        workId,
+        authorId: authorB.id,
+        entityId: realm.id,
+        name: '被篡改',
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    const row = await db.entity.findUniqueOrThrow({ where: { id: realm.id } });
+    expect(row.name).toBe('元婴');
+  });
+
+  it('排序拒绝重复、缺失与跨作品 ID；合法排序完整生效', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workA = await createWork(author.id);
+    const workB = await createWork(author.id);
+
+    const a1 = await createEntity(db, {
+      workId: workA,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '一',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+    const a2 = await createEntity(db, {
+      workId: workA,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '二',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+    const b1 = await createEntity(db, {
+      workId: workB,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '别作',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    // 重复
+    await expect(
+      reorderEntities(db, {
+        workId: workA,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        entityIds: [a1.id, a1.id],
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 缺失
+    await expect(
+      reorderEntities(db, {
+        workId: workA,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        entityIds: [a1.id],
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 跨作品
+    await expect(
+      reorderEntities(db, {
+        workId: workA,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        entityIds: [a1.id, b1.id],
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 合法排序
+    const ordered = await reorderEntities(db, {
+      workId: workA,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      entityIds: [a2.id, a1.id],
+      meta: META,
+    });
+    expect(ordered.map((item) => item.name)).toEqual(['二', '一']);
+
+    const audit = await db.auditLog.findFirst({
+      where: { action: 'entity.reordered', targetId: workA },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(audit).not.toBeNull();
+  });
+
+  it('被引用的境界删除返回 ENTITY_IN_USE；未删除的软删除后不再出现在列表', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '化神',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    // 构造引用：另一个实体的属性里带上该实体 id
+    const referrer = await db.entity.create({
+      data: { workId, entityType: 'realm_level', name: '引用者' },
+    });
+    await db.entityAttribute.create({
+      data: {
+        entityId: referrer.id,
+        attrKey: 'realmLevelRef',
+        attrValue: realm.id,
+        schemaRef: 'xuanhuan@1.0.0',
+      },
+    });
+
+    await expect(
+      deleteEntity(db, { workId, authorId: author.id, entityId: realm.id, meta: META }),
+    ).rejects.toMatchObject({ code: 'ENTITY_IN_USE' });
+
+    // 未被引用时软删除成功
+    await deleteEntity(db, {
+      workId,
+      authorId: author.id,
+      entityId: referrer.id,
+      meta: META,
+    });
+
+    const list = await listEntities(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+    });
+    expect(list.map((item) => item.name)).not.toContain('引用者');
+    expect(list.map((item) => item.name)).toContain('化神');
+
+    const deletedAudit = await db.auditLog.findFirst({
+      where: { action: 'entity.deleted', targetId: referrer.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    expect(deletedAudit).not.toBeNull();
+  });
+
+  it('软删除后同名可以重新创建', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '渡劫',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+    await deleteEntity(db, { workId, authorId: author.id, entityId: realm.id, meta: META });
+
+    const again = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '渡劫',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+    expect(again.name).toBe('渡劫');
+  });
+
+  it('审计写入失败时创建实体回滚（实体、属性、版本都不落库）', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    await db.$executeRawUnsafe(`
+      CREATE OR REPLACE FUNCTION works_block_audit() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'audit blocked';
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await db.$executeRawUnsafe(`
+      CREATE TRIGGER works_block_audit_trigger
+      BEFORE INSERT ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION works_block_audit();
+    `);
+
+    try {
+      await expect(
+        createEntity(db, {
+          workId,
+          authorId: author.id,
+          entityType: ALLOWED_ENTITY_TYPE,
+          name: '会被回滚',
+          attributes: realmAttributes(),
+          meta: META,
+        }),
+      ).rejects.toBeTruthy();
+
+      const entities = await db.entity.findMany({ where: { workId, name: '会被回滚' } });
+      expect(entities).toHaveLength(0);
+      const versions = await db.entityVersion.findMany({ where: { entity: { workId } } });
+      expect(versions).toHaveLength(0);
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS works_block_audit_trigger ON audit_logs`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS works_block_audit()`);
+    }
+  });
+
+  it('审计写入失败时删除实体回滚（实体仍在）', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    const realm = await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '删除回滚',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    await db.$executeRawUnsafe(`
+      CREATE OR REPLACE FUNCTION works_block_audit() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'audit blocked';
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await db.$executeRawUnsafe(`
+      CREATE TRIGGER works_block_audit_trigger
+      BEFORE INSERT ON audit_logs
+      FOR EACH ROW EXECUTE FUNCTION works_block_audit();
+    `);
+
+    try {
+      await expect(
+        deleteEntity(db, { workId, authorId: author.id, entityId: realm.id, meta: META }),
+      ).rejects.toBeTruthy();
+
+      const row = await db.entity.findUniqueOrThrow({ where: { id: realm.id } });
+      expect(row.deletedAt).toBeNull();
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS works_block_audit_trigger ON audit_logs`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS works_block_audit()`);
+    }
+  });
+
+  it('第一版只开放 realm_level 实体类型', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: 'character',
+        name: '主角',
+        attributes: {},
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'ENTITY_TYPE_NOT_ALLOWED' });
+  });
+
+  it('实体属性校验：缺必填、类型错、越界都 400', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        name: '缺字段',
+        attributes: { minorLevelCount: 9 },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        name: '类型错',
+        attributes: { ...realmAttributes(), minorLevelCount: '九个' },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        name: '越界',
+        attributes: { ...realmAttributes(), minorLevelCount: 999 },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    await expect(
+      createEntity(db, {
+        workId,
+        authorId: author.id,
+        entityType: ALLOWED_ENTITY_TYPE,
+        name: '未知字段',
+        attributes: { ...realmAttributes(), unknown: 1 },
+        meta: META,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('设定中心返回作品方向、schema 摘要与境界列表', async () => {
+    const db = testDb();
+    const author = await createAuthor();
+    const workId = await createWork(author.id);
+
+    await updateDirection(db, {
+      workId,
+      authorId: author.id,
+      values: { subGenre: '仙侠修真', goldenFinger: '老爷爷' },
+      meta: META,
+    });
+    await createEntity(db, {
+      workId,
+      authorId: author.id,
+      entityType: ALLOWED_ENTITY_TYPE,
+      name: '炼气',
+      attributes: realmAttributes(),
+      meta: META,
+    });
+
+    const center = await getSettingsCenter(db, { workId, authorId: author.id });
+    expect(center.direction['subGenre']).toBe('仙侠修真');
+    expect(center.schema.workDirection?.fields.length).toBe(4);
+    expect(center.realms).toHaveLength(1);
+    expect(center.realms[0]?.name).toBe('炼气');
+  });
+});
