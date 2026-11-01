@@ -41,10 +41,8 @@ export function optionalStrictString(
   return value;
 }
 
-/** 读取一个字符串字典字段（如 attributes / direction）。 */ export function requireRecord(
-  body: Record<string, unknown>,
-  key: string,
-): Record<string, unknown> {
+/** 读取一个字符串字典字段（如 attributes / direction）。 */
+export function requireRecord(body: Record<string, unknown>, key: string): Record<string, unknown> {
   const value = body[key];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new AuthError('VALIDATION_FAILED', `字段 ${key} 必须是对象`);

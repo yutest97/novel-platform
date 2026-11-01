@@ -303,7 +303,31 @@
 
 ---
 
-## 14. 追踪矩阵（P0 功能 → 用例，v1.3 按实际 ID 更新）
+## 14. 设定模块验收（M2-B2：境界 / 势力 / 人物）
+
+M2-B2 交付范围：`realm_level`（境界体系，沿用 M2-B1 并升级到 v3 契约）、`faction`（势力）、
+`character`（人物）三类实体的**契约、接口、设定中心 UI 与 E2E**。
+**未交付**且不得标记完成：物品、功法、地点、关系图、资源流水、时间线、伏笔；
+`F-WRK-15`（人物「当前知道/不知道」信息清单）仍由 M6 事实版本系统交付
+（依赖 `fact_id` + 事实版本），`character.secretKnownBy` 只表示**设定层「谁知道这个秘密」**，
+不构成事实级认知模型。
+
+| 用例 | 覆盖内容 | 自动化位置 |
+| --- | --- | --- |
+| AT-SET-1 | 规则包 v3：三类字段组、`schemaRef` 恒等、enum 选项来自规则包 | `packages/works/test/entities-multitype.test.ts` |
+| AT-SET-2 | v2 → v3 升级：只迁 `2.0.0`、`1.0.0` 行数内容不变、作者可见数据逐字段一致、跨版本同键重复不冲突 | `packages/works/test/migration-v3-upgrade.test.ts` |
+| AT-SET-3 | 字段契约坏数据（options 空/重复、refType 缺失/未声明、maxItems 非正整数）→ `INVALID_RULE_PACKAGE` | `packages/works/test/schema-contract.test.ts` |
+| AT-SET-4 | 引用写校验：存在、未删除、同作品、类型一致、禁自引用、重复 400；同一 UUID 落在两个 `refType` 不同字段必须整体 400 | `entities-multitype.test.ts`、`entities-reference-typing.test.ts` |
+| AT-SET-5 | 删除保护：只扫当前契约的引用字段、只计存活引用者、`409 ENTITY_IN_USE` 附安全摘要（≤20 条、仅 id/类型/名称） | `entities-multitype.test.ts`、`apps/web/test/settings-api.test.ts` |
+| AT-SET-6 | 多类型 CRUD、每类型独立 `1..N` 排序、reorder 完整集合、`entityType` 出现即必须是字符串 | `packages/works/test/*`、`apps/web/test/settings-api.test.ts` |
+| AT-SET-7 | 设定中心 DTO：`entityGroups` 按组级 `order`、组内按 `order_index`、`realms` 已移除 | `apps/web/test/settings-api.test.ts` |
+| AT-SET-8 | UI：四分区（方向/境界/势力/人物，顺序来自 `entityGroups.order`）、schema 驱动控件（enum → select、entityRef → 单选、entityRefs → 有序多选）、无候选空态、禁止自引用 | `apps/web/e2e/settings-flow.spec.ts` 用例 10–13、18–20 |
+| AT-SET-9 | UI 删除保护：`409` 展示引用总数与引用者「类型 · 名称」、解除引用后可删 | `apps/web/e2e/settings-flow.spec.ts` 用例 14–16 |
+| AT-SET-10 | 三类实体排序互不影响；候选不含他人作品数据；移动端 390×844 不撑破视口 | `apps/web/e2e/settings-flow.spec.ts` 用例 17、19、20 |
+
+---
+
+## 15. 追踪矩阵（P0 功能 → 用例，v1.3 按实际 ID 更新）
 
 | P0 功能 | 覆盖用例 |
 | --- | --- |
@@ -317,14 +341,14 @@
 | F-WRK-01 | AT-FLOW-1（新建作品） |
 | F-WRK-02 | AT-FLOW-1（方向参数存 work_settings） |
 | F-WRK-03 | AT-FLOW-1（世界观设定） |
-| F-WRK-04 | AT-FLOW-1（人物设定） |
-| F-WRK-05 | AT-FLOW-1（势力设定） |
-| F-WRK-06 | AT-FLOW-1（境界体系）、AT-CONT-3 |
+| F-WRK-04 | AT-SET-4/5/8（人物设定，M2-B2 已交付部分）、AT-FLOW-1 |
+| F-WRK-05 | AT-SET-4/8（势力设定，M2-B2 已交付部分）、AT-FLOW-1 |
+| F-WRK-06 | AT-SET-1/2/6/10（境界体系）、AT-FLOW-1、AT-CONT-3 |
 | F-WRK-07 | AT-FLOW-1（物品）、AT-CHK-4 |
 | F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 |
 | F-WRK-09 | AT-FLOW-1（功法） |
 | F-WRK-11 | AT-CHK-4（物品流水） |
-| F-WRK-15 | AT-CHK-5（认知） |
+| F-WRK-15 | AT-CHK-5（认知）——**仍待 M6 事实版本系统交付，M2-B2 未交付** |
 | F-WRK-16 | AT-FORE-1/2/3/4（伏笔） |
 | F-WRK-17 | AT-CHK-6（时间线） |
 | F-OL-01 | AT-FLOW-1（卷纲） |
@@ -366,7 +390,7 @@
 
 ---
 
-## 15. 验收通过口径（呼应 `00` §8）
+## 16. 验收通过口径（呼应 `00` §8）
 
 - P0 用例 100% 通过，P1 ≥90%（桩模型自动化部分）。
 - 存在 1 部作品完成 10 章（AT-CONT-1，真实模型），且质量指标达标（§10）。

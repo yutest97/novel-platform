@@ -691,7 +691,7 @@ describe('设定中心与实体（M2-B1）', () => {
     }
   });
 
-  it('第一版只开放规则包声明且本轮支持的类型：character / faction 可用，其余拒绝', async () => {
+  it('只开放规则包声明且本轮支持的类型：character / faction 可用，其余拒绝', async () => {
     const db = testDb();
     const author = await createAuthor();
     const workId = await createWork(author.id);

@@ -13,7 +13,8 @@ export const runtime = 'nodejs';
  * GET /api/works/:id/entities —— 列出作品内的实体。
  *
  * - 只允许作品所有者访问；
- * - 第一版只开放 `realm_level`：其它 entityType 一律 400
+ * - 只接受规则包声明且本轮已实现 CRUD 的类型
+ *   （`realm_level` / `faction` / `character`）：其它 entityType 一律 400
  *   （`ENTITY_TYPE_NOT_ALLOWED`），不接受任意类型；
  * - 按 order_index 升序返回未删除的实体。
  */
@@ -40,7 +41,7 @@ export async function GET(
 }
 
 /**
- * POST /api/works/:id/entities —— 新建实体（第一版只开放 realm_level）。
+ * POST /api/works/:id/entities —— 新建实体（realm_level / faction / character）。
  *
  * - 请求体是**严格白名单**：只接受 entityType / name / attributes，
  *   出现任何其它字段（id / workId / authorId / 时间戳 / orderIndex……）一律 400；

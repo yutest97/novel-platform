@@ -91,16 +91,27 @@ h2 {
   font-weight: 600;
 }
 
-.field input {
+.field input,
+.field select,
+.field textarea {
   padding: 0.6rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 1rem;
   background: #fff;
   color: var(--text);
+  /* 下拉与多行文本同样不能撑破容器（移动端尤其重要） */
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.field textarea {
+  resize: vertical;
 }
 
 .field input:focus-visible,
+.field select:focus-visible,
+.field textarea:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -320,6 +331,13 @@ tbody tr:last-child td {
     min-height: 44px;
   }
 
+  /* 输入类控件同样保证可点按高度 */
+  .field input,
+  .field select,
+  .field textarea {
+    min-height: 44px;
+  }
+
   .btn-small {
     min-height: 40px;
     padding: 0.45rem 0.7rem;
@@ -440,6 +458,7 @@ tbody tr:last-child td {
 
 /* ------------------------------------------------- 设定中心（M2-B1） */
 
+.entity-list,
 .realm-list {
   list-style: none;
   margin: 0 0 1rem;
@@ -448,6 +467,7 @@ tbody tr:last-child td {
   gap: 0.75rem;
 }
 
+.entity-item,
 .realm-item {
   padding: 0.9rem 1rem;
   border: 1px solid var(--border);
@@ -455,9 +475,52 @@ tbody tr:last-child td {
   background: var(--panel);
 }
 
+.entity-item h3,
 .realm-item h3 {
   margin: 0 0 0.5rem;
   font-size: 1.05rem;
+}
+
+/* 引用候选：选择 + 添加，已选项按选择顺序排列 */
+.refs-picker {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.refs-picker select {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.refs-selected {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.35rem;
+  word-break: break-all;
+}
+
+.refs-selected li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* 删除保护：引用者清单 */
+.reference-list {
+  margin: 0.3rem 0 0.5rem;
+  padding-left: 1.2rem;
+}
+
+.alert p {
+  margin: 0 0 0.35rem;
+}
+
+.alert p:last-child {
+  margin-bottom: 0;
 }
 
 .row-actions {

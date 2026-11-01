@@ -46,7 +46,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   WORK_TITLE_TAKEN: '你已创建过同名作品，请换一个标题',
   INVALID_RULE_PACKAGE: '题材不可用',
   ENTITY_NAME_TAKEN: '同名实体已存在',
-  ENTITY_IN_USE: '该境界当前被引用，无法删除',
+  ENTITY_IN_USE: '该实体当前被引用，无法删除',
   ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
@@ -54,17 +54,73 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   INTERNAL_ERROR: '服务内部错误，请稍后重试',
 };
 
-/** 接口错误（携带稳定错误码与 HTTP 状态）。 */
+/**
+ * 删除保护摘要里的一条引用者（**只含定位信息**）。
+ *
+ * 服务端保证这里不含属性值 / 秘密 / 正文，前端也不做任何补全。
+ */
+export interface EntityReferenceItem {
+  readonly id: string;
+  readonly entityType: string;
+  readonly name: string;
+}
+
+/** 删除保护摘要（`ENTITY_IN_USE` 时随错误一起返回）。 */
+export interface EntityReferenceSummary {
+  readonly total: number;
+  readonly items: readonly EntityReferenceItem[];
+}
+
+/** 接口错误（携带稳定错误码、HTTP 状态，以及可选的安全引用摘要）。 */
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number;
+  /** 仅 `ENTITY_IN_USE` 且服务端提供了摘要时存在。 */
+  readonly references?: EntityReferenceSummary;
 
-  constructor(code: ApiErrorCode, status: number) {
+  constructor(code: ApiErrorCode, status: number, references?: EntityReferenceSummary) {
     super(MESSAGES[code] ?? MESSAGES.INTERNAL_ERROR);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    if (references !== undefined) {
+      this.references = references;
+    }
   }
+}
+
+/**
+ * 从错误响应体里解析引用摘要。
+ *
+ * 逐字段校验形状：畸形数据一律当作"没有摘要"，绝不把未知字段带到界面上
+ * （服务端已经只返回 id / entityType / name，这里再兜一层）。
+ */
+function parseReferenceSummary(value: unknown): EntityReferenceSummary | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const summary = value as { total?: unknown; items?: unknown };
+  if (typeof summary.total !== 'number' || !Array.isArray(summary.items)) {
+    return undefined;
+  }
+  const items: EntityReferenceItem[] = [];
+  for (const entry of summary.items) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const item = entry as { id?: unknown; entityType?: unknown; name?: unknown };
+    if (
+      typeof item.id === 'string' &&
+      typeof item.entityType === 'string' &&
+      typeof item.name === 'string'
+    ) {
+      items.push({ id: item.id, entityType: item.entityType, name: item.name });
+    }
+  }
+  if (items.length === 0) {
+    return undefined;
+  }
+  return { total: Math.max(summary.total, items.length), items };
 }
 
 function isApiErrorCode(value: unknown): value is ApiErrorCode {
@@ -108,11 +164,12 @@ export async function apiRequest(
   }
 
   if (!response.ok) {
-    const code =
+    const error =
       typeof body === 'object' && body !== null && 'error' in body
-        ? (body as { error?: { code?: unknown } }).error?.code
+        ? (body as { error?: { code?: unknown; references?: unknown } }).error
         : undefined;
-    throw new ApiError(isApiErrorCode(code) ? code : 'INTERNAL_ERROR', response.status);
+    const code = isApiErrorCode(error?.code) ? error.code : 'INTERNAL_ERROR';
+    throw new ApiError(code, response.status, parseReferenceSummary(error?.references));
   }
 
   return { status: response.status, body };
