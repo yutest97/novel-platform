@@ -303,17 +303,19 @@
 
 ---
 
-## 14. 设定模块验收（M2-B2 / M2-B3-A / M2-B3-B1：境界 / 势力 / 人物 / 物品 / 功法 / 物品流水）
+## 14. 设定模块验收（M2-B2 / M2-B3-A / M2-B3-B1 / M2-B3-B2：境界 / 势力 / 人物 / 物品 / 功法 / 物品流水）
 
 M2-B2 交付范围：`realm_level`（境界体系）、`faction`（势力）、`character`（人物）；
 M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），规则包升级到 **xuanhuan@4.0.0**；
-M2-B3-B1 新增 `item_events` 流水（追加 / 冲正 / 回放，**不改规则包**）。
+M2-B3-B1 新增 `item_events` 流水（追加 / 冲正 / 回放，**不改规则包**）；
+M2-B3-B2 交付物品持有人 / 事件时间线 UI 与对应 E2E（`AT-SET-21/22`）。
 五类实体共用 `entities / entity_attributes / entity_versions` 通用骨架，五类都有
 **契约、接口、设定中心 UI 与 E2E**。
 
-**交付状态**：B3-B1 后端已交付事件流水、派生持有人与删除保护（`AT-SET-16..20`）；
-**B3-B2 时间线 UI / E2E 尚未交付**（事件目前只能通过接口读写）。
-**未交付**且不得标记完成：物品事件时间线 UI（B3-B2）、
+**交付状态**：B3-B1 后端交付事件流水、派生持有人与删除保护（`AT-SET-16..20`）；
+B3-B2 交付 item 卡片入口、时间线（分页 / 冲正关系）、追加表单（按状态只开放合法操作）、
+冲正二次确认、错误映射与移动端布局（`AT-SET-21/22`）。
+**未交付**且不得标记完成：
 地点、关系图、资源流水（M2-B4）、时间线、伏笔；
 `AT-CHK-4`（物品归属矛盾）依赖章节正文与场景节拍（M2-D / M2-E），仍未交付；
 `F-WRK-15`（人物「当前知道/不知道」信息清单）仍由 M6 事实版本系统交付
@@ -342,6 +344,18 @@ M2-B3-B1 新增 `item_events` 流水（追加 / 冲正 / 回放，**不改规则
 | AT-SET-18 | 事件接口：`fromHolder` 400、幂等（同键同内容 200+deduplicated、同键异内容 409）、`afterSeq` 分页、软删物品 409 `ITEM_EVENTS_CLOSED` 但历史可读、他人作品 404、管理员 403、畸形 UUID 400 | `apps/web/test/item-events-api.test.ts` |
 | AT-SET-19 | 事件并发：10 并发转手 seq 连续唯一；同一幂等键并发只 1 行；并发冲正只 1 条冲正行；追加与物品软删并发不产生"已删物品上的事件"；转手与删除该人并发二者只成功一个；物品事件写与实体写受**同一把**作品级锁约束 | `packages/works/test/item-events-concurrency.test.ts` |
 | AT-SET-20 | 删除人物：仍是存活物品的当前持有人 → 409 并列出物品；已被转走的历史持有人不阻止删除；事件 DTO 只含 id/name/deleted | `packages/works/test/item-events.test.ts`、`apps/web/test/item-events-api.test.ts` |
+| AT-SET-21 | 时间线 UI 规则（单测）：四种状态 → 合法操作集合；冲正按钮只在「最新 + 未冲正 + 非冲正行」；冲正行显示「冲正 #N」、目标行置灰；空状态区分「从未登记」与安全异常；备注 ≤500；幂等键复用 / 更换 / 成功清空；五个事件错误码中文映射且 `CONCURRENT_MODIFICATION` 不跳登录 | `apps/web/test/item-events-ui.test.ts` |
+| AT-SET-22 | 时间线 UI（E2E）：item 卡片入口（其它实体没有）、首次打开同时请求 state/events（`limit=50`）、登记获得 → 转手（当前持有人不在候选）→ 消耗 → 冲正（目标行「已冲正」、冲正行不可再冲正）、备注与幂等键不写 URL/storage、删除当前持有人 409 并列出物品、转走后可删（历史显示「已删除角色」）、另一作者 404 / 管理员 403、软删物品后只读、390×844 按钮 ≥40px 且不撑破视口、截图无口令/邮箱/Cookie/令牌 | `apps/web/e2e/item-events-flow.spec.ts` |
+
+**事件时间线与 APIs 的对应关系（B3-B2）**
+
+| 面板区域 | 行为                                                                                                     | 接口                                |
+| -------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| 状态摘要 | 打开面板时读取；显示状态 / 当前持有人 / 事件总数 / 有效事件数 / 最后 seq                                  | `GET /api/works/:id/items/:itemId/state` |
+| 时间线   | 首屏 `limit=50`，按 `seq` 升序；「加载更多」用 `afterSeq` 续读；持有人只渲染 `{id,name,deleted}`          | `GET /api/works/:id/items/:itemId/events` |
+| 追加事件 | 按当前状态只提交合法 `eventType`；`toHolder` 仅获得/转手必填；`fromHolder` 永远不由客户端提交             | `POST /api/works/:id/items/:itemId/events` |
+| 冲正     | 只对最新、未冲正、非冲正行开放；二次确认后提交可选备注                                                    | `POST /api/works/:id/items/:itemId/events/:eventId/reversal` |
+| 删除保护 | 删除当前持有人时展示 `references` 摘要（「物品 · 名称」），不提供强制级联                                 | `DELETE /api/works/:id/entities/:entityId` |
 
 ---
 
@@ -362,10 +376,10 @@ M2-B3-B1 新增 `item_events` 流水（追加 / 冲正 / 回放，**不改规则
 | F-WRK-04 | AT-SET-4/5/8（人物设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-05 | AT-SET-4/8（势力设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-06 | AT-SET-1/2/6/10（境界体系）、AT-FLOW-1、AT-CONT-3 |
-| F-WRK-07 | AT-SET-13/14/15/16/17/19/20（**B3-B1 后端完成**：持有人由事件流回放派生、删除当前持有人 409；**时间线 UI 待 B3-B2**；**AT-CHK-4 待章节**）、AT-FLOW-1 |
+| F-WRK-07 | AT-SET-13/14/15/16/17/19/20/22（**完成**：持有人由事件流回放派生、item 卡片时间线入口、删除当前持有人 409；**AT-CHK-4 待章节**）、AT-FLOW-1 |
 | F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 |
 | F-WRK-09 | AT-SET-11/13/15（**已完成**）、AT-FLOW-1（功法） |
-| F-WRK-11 | AT-SET-16/17/18/19（**B3-B1 后端完成**：追加 / 冲正 / 回放 / 序号 / append-only；**B3-B2 UI 待完成**；**AT-CHK-4 待章节**） |
+| F-WRK-11 | AT-SET-16/17/18/19/21/22（**完成**：追加 / 冲正 / 回放 / 序号 / append-only + 时间线 UI 与 E2E；**AT-CHK-4 待章节**） |
 | F-WRK-15 | AT-CHK-5（认知）——**仍待 M6 事实版本系统交付，M2-B2 未交付** |
 | F-WRK-16 | AT-FORE-1/2/3/4（伏笔） |
 | F-WRK-17 | AT-CHK-6（时间线） |

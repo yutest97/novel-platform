@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * 作品设定中心（M2-B2-B）。
+ * 作品设定中心（M2-B2-B / M2-B3-B2）。
  *
  * 分区（顺序来自 `entityGroups.order`，**不硬编码**）：
  * - 作品方向（field_schema.workDirection）；
@@ -14,21 +14,26 @@
  * - 编辑中的实体会从候选里排除（禁止自引用）；
  * - 秘密等设定值只存在于组件内存：不写 URL、localStorage、sessionStorage 或日志；
  * - 不提供地点、关系图或 AI 生成入口；
- * - 物品**没有持有人字段**：持有人以 M2-B3-B 的 item_events 流水为唯一真相。
+ * - 物品**没有持有人字段**：持有人以 item_events 流水为唯一真相，
+ *   item 卡片上的「持有人 / 事件」入口打开时间线面板（B3-B2）。
  */
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { EntitySection } from '@/components/settings/entity-section';
+import { ItemEventsPanel } from '@/components/settings/item-events-panel';
+import { ItemHolderEntry } from '@/components/settings/item-holder-entry';
 import {
   fetchEntities,
   fetchSettingsCenter,
+  getItemState,
   messageOf,
   updateDirection,
   type EntityItem,
   type FieldDefinition,
+  type ItemStateView,
   type SettingsCenter,
 } from '@/lib/api';
 import { attributeToText } from '@/lib/entity-form';
@@ -48,6 +53,13 @@ export default function WorkSettingsPage(): React.ReactElement {
   );
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+
+  /** itemId → 派生状态（卡片入口摘要 + 面板刷新）。 */
+  const [itemStates, setItemStates] = useState<ReadonlyMap<string, ItemStateView>>(new Map());
+  /** 当前打开事件面板的物品；null 表示未打开。 */
+  const [openItemId, setOpenItemId] = useState<string | null>(null);
+  /** `?item=<id>` 只处理一次，避免每次 reload 都把面板重新弹出来。 */
+  const deepLinkHandled = useRef(false);
 
   // 作品方向表单
   const [direction, setDirection] = useState<Record<string, string>>({});
@@ -77,6 +89,8 @@ export default function WorkSettingsPage(): React.ReactElement {
           }
         }
       }
+      // 物品事件表单需要人物候选，即使某版规则包里没有任何字段引用 character。
+      refTypes.add('character');
       const loaded = await Promise.all(
         [...refTypes].map(async (entityType): Promise<readonly [string, EntityItem[]]> => {
           try {
@@ -87,6 +101,27 @@ export default function WorkSettingsPage(): React.ReactElement {
         }),
       );
       setCandidates(new Map(loaded));
+
+      // 物品卡片上的持有人摘要：逐个读派生状态（只读接口，失败不影响页面其它分区）。
+      const itemGroup = data.entityGroups.find((group) => group.entityType === 'item');
+      const entries = await Promise.all(
+        (itemGroup?.entities ?? []).map(
+          async (item): Promise<readonly [string, ItemStateView] | null> => {
+            try {
+              return [item.id, await getItemState(workId, item.id)] as const;
+            } catch {
+              return null;
+            }
+          },
+        ),
+      );
+      const states = new Map<string, ItemStateView>();
+      for (const entry of entries) {
+        if (entry !== null) {
+          states.set(entry[0], entry[1]);
+        }
+      }
+      setItemStates(states);
     } catch (caught) {
       if (handleSessionError(caught, router)) {
         return;
@@ -103,6 +138,47 @@ export default function WorkSettingsPage(): React.ReactElement {
     }
   }, [state.status, load]);
 
+  // 深链：`/works/:id/settings?item=<itemId>` 直接打开事件面板。
+  // 只处理一次（关闭后不会因为重新加载而再次弹出）；URL 里只允许出现物品 id，
+  // 备注草稿永远不进地址栏。
+  useEffect(() => {
+    if (center === null || deepLinkHandled.current) {
+      return;
+    }
+    const requested = new URLSearchParams(window.location.search).get('item');
+    if (requested === null || requested === '') {
+      return;
+    }
+    deepLinkHandled.current = true;
+    setOpenItemId(requested);
+  }, [center]);
+
+  /** 面板里的状态变化即时回写到卡片入口摘要。 */
+  const handleItemStateChange = useCallback((next: ItemStateView): void => {
+    setItemStates((previous) => {
+      const map = new Map(previous);
+      map.set(next.itemId, next);
+      return map;
+    });
+  }, []);
+
+  const stableSessionError = useCallback(
+    (error: unknown) => handleSessionError(error, router),
+    [router],
+  );
+
+  function closeItemPanel(): void {
+    setOpenItemId(null);
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('item')) {
+      url.searchParams.delete('item');
+      window.history.replaceState(null, '', url.toString());
+    }
+  }
+
   const directionFields: readonly FieldDefinition[] = center?.schema.workDirection?.fields ?? [];
   const schemaGroups = center?.schema.entityTypes ?? [];
   const sections = center?.entityGroups ?? [];
@@ -112,6 +188,14 @@ export default function WorkSettingsPage(): React.ReactElement {
   function fieldsOf(entityType: string): readonly FieldDefinition[] {
     return schemaGroups.find((entry) => entry.key === entityType)?.group.fields ?? [];
   }
+
+  /** 面板打开的物品；不在存活列表里（已软删 / 深链失效）时为 null。 */
+  const openItemEntity =
+    openItemId === null
+      ? null
+      : (sections
+          .find((group) => group.entityType === 'item')
+          ?.entities.find((entity) => entity.id === openItemId) ?? null);
 
   async function handleSaveDirection(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -260,27 +344,59 @@ export default function WorkSettingsPage(): React.ReactElement {
         )}
       </div>
 
-      {sections.map((group) => (
-        <EntitySection
-          key={group.entityType}
+      {sections.map((group) => {
+        // 只有物品分区有「持有人 / 事件」入口：EntitySection 本身不感知实体类型。
+        const extra =
+          group.entityType === 'item'
+            ? (entity: EntityItem): React.ReactNode => (
+                <ItemHolderEntry
+                  state={itemStates.get(entity.id) ?? null}
+                  loading={loading}
+                  onOpen={() => setOpenItemId(entity.id)}
+                />
+              )
+            : undefined;
+
+        return (
+          <EntitySection
+            key={group.entityType}
+            workId={workId}
+            group={group}
+            fields={fieldsOf(group.entityType)}
+            refTitles={refTitles}
+            candidatesByType={candidates}
+            onReload={load}
+            onNotice={setNotice}
+            onSessionError={stableSessionError}
+            {...(extra === undefined ? {} : { renderExtraActions: extra })}
+          />
+        );
+      })}
+
+      {openItemId === null ? null : (
+        <ItemEventsPanel
+          key={openItemId}
           workId={workId}
-          group={group}
-          fields={fieldsOf(group.entityType)}
-          refTitles={refTitles}
-          candidatesByType={candidates}
-          onReload={load}
-          onNotice={setNotice}
-          onSessionError={(error) => handleSessionError(error, router)}
+          itemId={openItemId}
+          fallbackName={openItemEntity?.name ?? '物品'}
+          characters={candidates.get('character') ?? []}
+          // 深链打开的物品若已不在存活列表里（已软删除），历史只读。
+          closed={openItemEntity === null}
+          onClose={closeItemPanel}
+          onStateChange={handleItemStateChange}
+          onSessionError={stableSessionError}
         />
-      ))}
+      )}
 
       <div className="card">
         <h2>本阶段范围</h2>
         <p>
-          设定中心当前包含作品方向、境界体系、势力、人物、物品与功法；
-          物品持有人（事件流水）、资源流水、地点、关系图与章节创作留待后续阶段。
+          设定中心当前包含作品方向、境界体系、势力、人物、物品与功法； 物品卡片上的「持有人 /
+          事件」可查看事件时间线，并登记获得、转手、消耗、丢失或冲正。
         </p>
-        <p className="hint">本阶段不提供 AI 生成入口。</p>
+        <p className="hint">
+          资源流水、地点、关系图与章节创作留待后续阶段；本阶段不提供 AI 生成入口。
+        </p>
       </div>
     </main>
   );

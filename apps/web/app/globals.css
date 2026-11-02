@@ -270,6 +270,9 @@ tbody tr:last-child td {
   width: 100%;
   padding: 1.5rem;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.18);
+  /* 内容再长也不能超出视口：弹窗自身滚动，关闭按钮始终可点 */
+  max-height: 90vh;
+  overflow-y: auto;
 }
 
 .modal h2 {
@@ -341,12 +344,6 @@ tbody tr:last-child td {
   .btn-small {
     min-height: 40px;
     padding: 0.45rem 0.7rem;
-  }
-
-  /* 弹窗在窄屏可滚动，且不超出视口 */
-  .modal {
-    max-height: 90vh;
-    overflow-y: auto;
   }
 
   .secret {
@@ -528,4 +525,177 @@ tbody tr:last-child td {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.75rem;
+}
+
+/* ------------------------------------------- 物品持有人 / 事件（M2-B3-B2） */
+
+.modal--wide {
+  max-width: 46rem;
+}
+
+.alert--warn {
+  background: #fff4e5;
+  color: #8a5a00;
+  border: 1px solid #f0d3a8;
+}
+
+.card--inner {
+  background: #fafbfc;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.card--inner h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+
+.item-panel-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+/* 滚动时盖住 .modal 的 1.5rem 内边距，避免内容从标题上方露出来 */
+.item-panel-header::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 1.5rem;
+  background: var(--panel);
+}
+
+/* 滚动时盖住 .modal 的 1.5rem 内边距，避免内容从标题上方露出来 */
+.item-panel-header::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 1.5rem;
+  background: var(--panel);
+}
+
+.item-panel-header .toolbar {
+  margin-bottom: 0;
+}
+
+.item-panel-summary {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  background: #fafbfc;
+}
+
+.item-panel-summary .kv {
+  grid-template-columns: 7rem 1fr;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.timeline-row {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--panel);
+  padding: 0.7rem 0.85rem;
+}
+
+/* 已被冲正的目标行：置灰，避免被读成仍然有效 */
+.timeline-row--reversed {
+  background: #f2f3f5;
+  border-color: #e2e4e8;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+/* 冲正行：虚线 + 提示色，和普通事件区分开 */
+.timeline-row--reversal {
+  background: #fffaf0;
+  border-style: dashed;
+  border-color: #e7d3ab;
+}
+
+.timeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.timeline-seq {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.timeline-route {
+  margin: 0.35rem 0 0;
+  word-break: break-word;
+}
+
+.timeline-note {
+  margin: 0.3rem 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.timeline-meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.timeline-row .row-actions {
+  margin-top: 0.5rem;
+}
+
+.radio-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+}
+
+.radio-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 40px;
+  cursor: pointer;
+}
+
+/* 单选按钮不能被 `.field input` 的触控高度撑成一整行 */
+.field .radio-row input[type='radio'] {
+  width: 1.15rem;
+  height: 1.15rem;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+fieldset.field {
+  border: 0;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+
+fieldset.field legend {
+  padding: 0;
+  margin-bottom: 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 600;
 }

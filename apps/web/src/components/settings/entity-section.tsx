@@ -56,6 +56,13 @@ export interface EntitySectionProps {
   readonly onNotice: (message: string) => void;
   /** 会话类错误统一处理；返回 true 表示已处理（通常已跳转）。 */
   readonly onSessionError: (error: unknown) => boolean;
+  /**
+   * 卡片操作区里额外渲染的控件（M2-B3-B2）。
+   *
+   * 只有物品分区会传：其它实体类型不出现「持有人 / 事件」入口。
+   * 组件本身仍然不感知任何实体类型。
+   */
+  readonly renderExtraActions?: (entity: EntityItem) => React.ReactNode;
 }
 
 /** 从异常里取出可展示文案与引用摘要。 */
@@ -79,6 +86,7 @@ export function EntitySection({
   onReload,
   onNotice,
   onSessionError,
+  renderExtraActions,
 }: EntitySectionProps): React.ReactElement {
   const key = sectionKey(group.entityType);
   const entities = group.entities;
@@ -328,6 +336,7 @@ export function EntitySection({
                     ))}
                   </dl>
                   <div className="row-actions">
+                    {renderExtraActions?.(entity)}
                     <button
                       type="button"
                       className="btn-secondary btn-small"

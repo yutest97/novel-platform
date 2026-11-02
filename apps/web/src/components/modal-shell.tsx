@@ -38,12 +38,15 @@ export interface ModalShellProps {
    * 执行，同样拿不到节点。因此统一在这里（mounted 之后）聚焦。
    */
   readonly initialFocusRef?: React.RefObject<HTMLElement | null>;
+  /** 追加到 `.modal` 上的类名（用于宽面板，例如事件时间线）。 */
+  readonly panelClassName?: string;
   readonly children: React.ReactNode;
 }
 
 export function ModalShell({
   labelledBy,
   initialFocusRef,
+  panelClassName,
   children,
 }: ModalShellProps): React.ReactElement | null {
   const [mounted, setMounted] = useState(false);
@@ -112,7 +115,7 @@ export function ModalShell({
     <div className="modal-backdrop">
       <div
         ref={containerRef}
-        className="modal"
+        className={panelClassName === undefined ? 'modal' : `modal ${panelClassName}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
