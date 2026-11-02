@@ -30,3 +30,22 @@ export function assertUuid(value: unknown, field: string): asserts value is stri
     throw new AuthError('VALIDATION_FAILED', `${field} 不是合法的标识符`);
   }
 }
+
+/**
+ * 校验并规范化 UUID：先做形态校验，再统一转小写（M2-B3-B1-REV-02）。
+ *
+ * 为什么必须小写：PostgreSQL 的 `uuid` 类型比较时大小写不敏感，
+ * 但**应用层有两处是字符串比较** ——
+ * 1. 幂等内容比较（同一请求重试时大小写可能变）；
+ * 2. advisory lock 的哈希键（`hashtextextended(workId::text, 0)`）。
+ * 不统一大小写会导致「同一个 id、两把锁」以及幂等失效。
+ *
+ * 放在公共模块的原因：锁入口、实体写路径、物品事件写路径必须用**同一套**规则，
+ * 否则任何一处漏掉就会重新引入"大小写不同 = 不同锁/不同资源"的漏洞。
+ *
+ * 错误语义与 `assertUuid` 完全一致：畸形值抛 400 `VALIDATION_FAILED`。
+ */
+export function normalizeUuid(value: unknown, field: string): string {
+  assertUuid(value, field);
+  return value.toLowerCase();
+}

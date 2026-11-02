@@ -19,7 +19,7 @@
 import { AUDIT_ACTIONS, AuthError, writeAuditLog, type RequestMeta } from '@novel/auth';
 import type { Prisma, PrismaClient } from '@novel/db';
 
-import { assertUuid } from './ids.js';
+import { normalizeUuid } from './ids.js';
 import {
   ITEM_EVENT_ROW_SELECT,
   isItemEventType,
@@ -667,20 +667,6 @@ function assertIdempotencyKey(key: string): string {
     );
   }
   return key;
-}
-
-/**
- * 校验并规范化 UUID：先做形态校验，再统一转小写。
- *
- * 为什么必须小写：PostgreSQL 的 `uuid` 类型比较时大小写不敏感，
- * 但**应用层有两处是字符串比较** ——
- * 1. 幂等键命中的内容比较（同一请求重试时大小写可能变）；
- * 2. advisory lock 的哈希键（`hashtextextended(workId::text, 0)`）。
- * 不统一大小写会导致「同一个 id、两把锁」以及幂等失效。
- */
-function normalizeUuid(value: unknown, field: string): string {
-  assertUuid(value, field);
-  return value.toLowerCase();
 }
 
 /** 可选 UUID 规范化：空串 / undefined / null 一律视为未提供。 */

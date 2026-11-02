@@ -353,4 +353,87 @@ describe('M2-B3-B1 物品事件并发边界', () => {
       }
     }
   });
+
+  /* ---------------------------------------------------------------------- */
+  /* M2-B3-B1-REV-02：跨模块并发 + 大小写混合                                */
+  /* ---------------------------------------------------------------------- */
+
+  it('大小写混合的「转手」与「删除该人」并发：仍受同一把锁，绝不出现已删除持有人', async () => {
+    const db = testDb();
+    const authorId = await createAuthor();
+    const workId = await createWork(authorId);
+
+    // 两种大小写组合各跑多轮，覆盖"谁先抢到锁"的两种顺序
+    const combinations: { transferCase: 'upper' | 'lower'; label: string }[] = [
+      { transferCase: 'upper', label: '转手用大写 / 删除用小写' },
+      { transferCase: 'lower', label: '转手用小写 / 删除用大写' },
+    ];
+
+    for (const combination of combinations) {
+      for (let round = 0; round < 4; round += 1) {
+        const itemId = await createItem(workId, authorId, `大小写归属${combination.label}${round}`);
+        const holder = await createCharacter(
+          workId,
+          authorId,
+          `原持有人-${combination.transferCase}-${round}`,
+        );
+        const target = await createCharacter(
+          workId,
+          authorId,
+          `新持有人-${combination.transferCase}-${round}`,
+        );
+        await append(workId, authorId, itemId, 'obtained', { toHolder: holder });
+
+        const transferWorkId =
+          combination.transferCase === 'upper' ? workId.toUpperCase() : workId.toLowerCase();
+        const deleteWorkId =
+          combination.transferCase === 'upper' ? workId.toLowerCase() : workId.toUpperCase();
+
+        const [transferResult, deleteResult] = await Promise.allSettled([
+          appendItemEvent(db, {
+            workId: transferWorkId,
+            authorId,
+            itemId,
+            eventType: 'transferred',
+            toHolder: target,
+            idempotencyKey: key(),
+            meta: META,
+          }),
+          deleteEntity(db, {
+            workId: deleteWorkId,
+            authorId,
+            entityId: target,
+            meta: META,
+          }),
+        ]);
+
+        const succeeded = [transferResult, deleteResult].filter(
+          (result) => result.status === 'fulfilled',
+        );
+        expect(succeeded, `${combination.label} 第 ${round} 轮只能有一个成功`).toHaveLength(1);
+
+        const targetRow = await db.entity.findUniqueOrThrow({ where: { id: target } });
+        const page = await listItemEvents(db, { workId, authorId, itemId });
+        const currentHolderId = page.events[page.events.length - 1]?.toHolder?.id ?? null;
+
+        if (transferResult.status === 'fulfilled') {
+          expect(deleteResult.status).toBe('rejected');
+          expect((deleteResult as PromiseRejectedResult).reason).toMatchObject({
+            code: 'ENTITY_IN_USE',
+          });
+          expect(targetRow.deletedAt).toBeNull();
+          expect(currentHolderId).toBe(target);
+        } else {
+          expect(transferResult.reason).toMatchObject({ code: 'VALIDATION_FAILED' });
+          expect(targetRow.deletedAt).not.toBeNull();
+          expect(currentHolderId).toBe(holder);
+        }
+
+        // 最关键的不变量：任何情况下都不允许"人物已删除但仍是当前持有人"
+        if (targetRow.deletedAt !== null) {
+          expect(currentHolderId).not.toBe(target);
+        }
+      }
+    }
+  });
 });

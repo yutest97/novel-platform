@@ -56,7 +56,7 @@ export type {
   UpdateEntityInput,
 } from './entities.js';
 
-export { assertUuid, isUuid } from './ids.js';
+export { assertUuid, isUuid, normalizeUuid } from './ids.js';
 
 export { WORK_LOCK_NAMESPACE, lockWork, runWorkWrite } from './work-lock.js';
 

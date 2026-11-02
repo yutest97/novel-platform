@@ -26,7 +26,7 @@
 import { AUDIT_ACTIONS, AuthError, writeAuditLog, type RequestMeta } from '@novel/auth';
 import type { Prisma, PrismaClient } from '@novel/db';
 
-import { assertUuid } from './ids.js';
+import { normalizeUuid } from './ids.js';
 import { findItemsHeldBy } from './item-state.js';
 import { requireOwnedWork } from './work-access.js';
 import { isConcurrencyError, uniqueConstraintMarker } from './write-errors.js';
@@ -436,8 +436,8 @@ export async function listEntities(
   db: PrismaClient,
   input: { workId: string; authorId: string; entityType: string },
 ): Promise<EntityView[]> {
-  assertUuid(input.workId, '作品 id');
-  const work = await requireOwnedWork(db, input.workId, input.authorId);
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const work = await requireOwnedWork(db, workId, input.authorId);
   const rulePackage = await requireRulePackage(db, work.genreRulePackage);
   const group = resolveEntityGroup(rulePackage, input.entityType);
   return loadEntitiesForWork(db, work.id, input.entityType, group.schemaRef);
@@ -453,8 +453,8 @@ export async function getSettingsCenter(
   db: PrismaClient,
   input: { workId: string; authorId: string },
 ): Promise<SettingsCenterView> {
-  assertUuid(input.workId, '作品 id');
-  const work = await requireOwnedWork(db, input.workId, input.authorId);
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const work = await requireOwnedWork(db, workId, input.authorId);
   const rulePackage = await requireRulePackage(db, work.genreRulePackage);
   const direction = workDirectionGroup(rulePackage);
 
@@ -511,10 +511,10 @@ export async function updateDirection(
   db: PrismaClient,
   input: UpdateDirectionInput,
 ): Promise<Record<string, unknown>> {
-  assertUuid(input.workId, '作品 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
 
-  const result = await runWorkWrite(db, input.workId, async (tx) => {
-    const work = await requireOwnedWork(tx, input.workId, input.authorId);
+  const result = await runWorkWrite(db, workId, async (tx) => {
+    const work = await requireOwnedWork(tx, workId, input.authorId);
     const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
     const group = workDirectionGroup(rulePackage);
@@ -630,13 +630,13 @@ export async function createEntity(
   db: PrismaClient,
   input: CreateEntityInput,
 ): Promise<EntityView> {
-  assertUuid(input.workId, '作品 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
   const name = normalizeEntityName(input.name);
 
   try {
-    const created = await runWorkWrite(db, input.workId, async (tx) => {
+    const created = await runWorkWrite(db, workId, async (tx) => {
       // 归属校验在锁内、事务内重新执行
-      const work = await requireOwnedWork(tx, input.workId, input.authorId);
+      const work = await requireOwnedWork(tx, workId, input.authorId);
       const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
       // 实体类型来自规则包声明（∩ 本轮支持集），不在这里硬编码
@@ -750,17 +750,17 @@ export async function updateEntity(
   db: PrismaClient,
   input: UpdateEntityInput,
 ): Promise<EntityView> {
-  assertUuid(input.workId, '作品 id');
-  assertUuid(input.entityId, '实体 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const entityId = normalizeUuid(input.entityId, '实体 id');
 
   try {
-    const updated = await runWorkWrite(db, input.workId, async (tx) => {
+    const updated = await runWorkWrite(db, workId, async (tx) => {
       // 归属校验在锁内、事务内重新执行
-      const work = await requireOwnedWork(tx, input.workId, input.authorId);
+      const work = await requireOwnedWork(tx, workId, input.authorId);
       const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
       const entity = await tx.entity.findFirst({
-        where: { id: input.entityId, workId: work.id, deletedAt: null },
+        where: { id: entityId, workId: work.id, deletedAt: null },
         select: { id: true, entityType: true, name: true, orderIndex: true },
       });
       if (entity === null) {
@@ -907,16 +907,16 @@ export interface DeleteEntityInput {
  *   因此"删除后又被并发编辑"不会产生新的版本或审计。
  */
 export async function deleteEntity(db: PrismaClient, input: DeleteEntityInput): Promise<void> {
-  assertUuid(input.workId, '作品 id');
-  assertUuid(input.entityId, '实体 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const entityId = normalizeUuid(input.entityId, '实体 id');
 
   try {
-    await runWorkWrite(db, input.workId, async (tx) => {
-      const work = await requireOwnedWork(tx, input.workId, input.authorId);
+    await runWorkWrite(db, workId, async (tx) => {
+      const work = await requireOwnedWork(tx, workId, input.authorId);
       const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
       const entity = await tx.entity.findFirst({
-        where: { id: input.entityId, workId: work.id, deletedAt: null },
+        where: { id: entityId, workId: work.id, deletedAt: null },
         select: { id: true, entityType: true },
       });
       if (entity === null) {
@@ -1112,14 +1112,14 @@ export async function reorderEntities(
   db: PrismaClient,
   input: ReorderEntitiesInput,
 ): Promise<EntityView[]> {
-  assertUuid(input.workId, '作品 id');
-  for (const id of input.entityIds) {
-    assertUuid(id, '实体 id');
-  }
+  const workId = normalizeUuid(input.workId, '作品 id');
+  // 实体 id 与数据库里的 uuid 是**字符串**比较（Set / updateMany 的 where），
+  // 必须与数据库返回的小写形态一致，否则大写 id 会被判成"不属于当前作品"。
+  const entityIds = input.entityIds.map((id) => normalizeUuid(id, '实体 id'));
 
   try {
-    await runWorkWrite(db, input.workId, async (tx) => {
-      const work = await requireOwnedWork(tx, input.workId, input.authorId);
+    await runWorkWrite(db, workId, async (tx) => {
+      const work = await requireOwnedWork(tx, workId, input.authorId);
       const rulePackage = await requireRulePackage(tx, work.genreRulePackage);
 
       // 类型必须来自规则包声明（∩ 本轮支持集）；每个类型各自独立 1..N
@@ -1131,20 +1131,20 @@ export async function reorderEntities(
       });
       const existingIds = new Set(existing.map((item) => item.id));
 
-      if (input.entityIds.length !== existingIds.size) {
+      if (entityIds.length !== existingIds.size) {
         throw new AuthError('VALIDATION_FAILED', '排序必须包含该类型的全部实体');
       }
-      if (new Set(input.entityIds).size !== input.entityIds.length) {
+      if (new Set(entityIds).size !== entityIds.length) {
         throw new AuthError('VALIDATION_FAILED', '排序列表存在重复');
       }
-      for (const id of input.entityIds) {
+      for (const id of entityIds) {
         if (!existingIds.has(id)) {
           throw new AuthError('VALIDATION_FAILED', '排序列表包含不属于当前作品的实体');
         }
       }
 
       let index = 0;
-      for (const id of input.entityIds) {
+      for (const id of entityIds) {
         index += 1;
         // 条件更新（compare-and-set）：只改"仍未被软删除"的行。
         // 与 update / delete 一样，数据库层面兜底，
@@ -1167,7 +1167,7 @@ export async function reorderEntities(
         detail: {
           workId: work.id,
           entityType: input.entityType,
-          entityCount: input.entityIds.length,
+          entityCount: entityIds.length,
         },
         ip: input.meta.ip,
         userAgent: input.meta.userAgent,
@@ -1178,7 +1178,7 @@ export async function reorderEntities(
   }
 
   return listEntities(db, {
-    workId: input.workId,
+    workId,
     authorId: input.authorId,
     entityType: input.entityType,
   });

@@ -13,6 +13,8 @@
 
 import type { Prisma, PrismaClient } from '@novel/db';
 
+import { normalizeUuid } from './ids.js';
+
 /**
  * 锁命名空间。
  *
@@ -25,12 +27,18 @@ export const WORK_LOCK_NAMESPACE = 'entity:';
 /**
  * 取作品级写锁。
  *
+ * **锁键必须在入口自行规范化**（M2-B3-B1-REV-02）：
+ * 锁键用的是 `workId::text`，而 PostgreSQL 的 uuid 类型比较不区分大小写 ——
+ * 若调用方传大写、别处传小写，同一作品会落到两个不同的哈希键上，锁直接失效。
+ * 因此这里先 `normalizeUuid`（形态校验 + 转小写），**不依赖调用方**。
+ *
  * 取锁语句包在子查询里：`pg_advisory_xact_lock` 返回 void，
  * Prisma 无法反序列化这种结果（会抛 P2010），
  * 用 `SELECT 1 FROM (…)` 把返回值换成可序列化的整数。
  */
 export async function lockWork(tx: Prisma.TransactionClient, workId: string): Promise<void> {
-  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtextextended(${WORK_LOCK_NAMESPACE} || ${workId}::text, 0))) AS lock_acquired`;
+  const normalizedWorkId = normalizeUuid(workId, '作品 id');
+  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtextextended(${WORK_LOCK_NAMESPACE} || ${normalizedWorkId}::text, 0))) AS lock_acquired`;
 }
 
 /**

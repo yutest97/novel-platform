@@ -47,8 +47,11 @@ export function sleep(ms: number): Promise<void> {
  * 持有"作品级实体写锁"，直到调用方提交或回滚事务。
  *
  * 锁键必须与业务实现完全一致：
- * `hashtextextended(<namespace> || <workId>::text, 0)`。
- * 只有这样，才能验证写路径**确实**去取了这把锁 —— 而不是碰巧被行锁挡住。
+ * `hashtextextended(<namespace> || lower(workId)::text, 0)`。
+ *
+ * **这里也做小写规范化**（M2-B3-B1-REV-02）：应用侧 `lockWork` 在生成键之前
+ * 统一 `normalizeUuid`，测试若用原始大小写拼键，测到的会是两把不同的锁 ——
+ * 那不是"应用漏了规范化"，而是测试自己造了一把不存在的锁。
  *
  * 调用方负责 `COMMIT` / `ROLLBACK`。
  */
@@ -57,10 +60,11 @@ export async function holdWorkEntityLock(
   namespace: string,
   workId: string,
 ): Promise<void> {
+  const key = workId.toLowerCase();
   await client.query('BEGIN');
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1 || $2::text, 0))', [
     namespace,
-    workId,
+    key,
   ]);
 }
 
