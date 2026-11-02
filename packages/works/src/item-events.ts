@@ -168,14 +168,14 @@ export async function listItemEvents(
   db: PrismaClient,
   input: ListItemEventsInput,
 ): Promise<ItemEventPage> {
-  assertUuid(input.workId, '作品 id');
-  assertUuid(input.itemId, '物品 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const itemId = normalizeUuid(input.itemId, '物品 id');
 
   const afterSeq = normalizeAfterSeq(input.afterSeq);
   const limit = normalizePageSize(input.limit);
 
-  const work = await requireOwnedWork(db, input.workId, input.authorId);
-  const item = await requireItem(db, work.id, input.itemId, false);
+  const work = await requireOwnedWork(db, workId, input.authorId);
+  const item = await requireItem(db, work.id, itemId, false);
 
   const rows = await db.itemEvent.findMany({
     where: { itemEntityId: item.id },
@@ -201,11 +201,11 @@ export async function getItemState(
   db: PrismaClient,
   input: GetItemStateInput,
 ): Promise<ItemStateView> {
-  assertUuid(input.workId, '作品 id');
-  assertUuid(input.itemId, '物品 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const itemId = normalizeUuid(input.itemId, '物品 id');
 
-  const work = await requireOwnedWork(db, input.workId, input.authorId);
-  const item = await requireItem(db, work.id, input.itemId, false);
+  const work = await requireOwnedWork(db, workId, input.authorId);
+  const item = await requireItem(db, work.id, itemId, false);
 
   const rows = await db.itemEvent.findMany({
     where: { itemEntityId: item.id },
@@ -226,20 +226,21 @@ export async function appendItemEvent(
   db: PrismaClient,
   input: AppendItemEventInput,
 ): Promise<ItemEventMutationResult> {
-  assertUuid(input.workId, '作品 id');
-  assertUuid(input.itemId, '物品 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const itemId = normalizeUuid(input.itemId, '物品 id');
   if (!isItemEventType(input.eventType)) {
     throw new AuthError('VALIDATION_FAILED', '未知的事件类型');
   }
   const eventType = input.eventType;
   const note = normalizeNote(input.note);
   const idempotencyKey = assertIdempotencyKey(input.idempotencyKey);
-  const requestedHolder = normalizeOptionalId(input.toHolder);
+  // 形态校验必须在**进入事务之前**：畸形 id 绝不能交给 Prisma（否则是 500 而不是 400）
+  const requestedHolder = normalizeOptionalUuid(input.toHolder, '持有人 id');
 
   try {
-    return await runWorkWrite(db, input.workId, async (tx) => {
-      const work = await requireOwnedWork(tx, input.workId, input.authorId);
-      const item = await requireItem(tx, work.id, input.itemId, true);
+    return await runWorkWrite(db, workId, async (tx) => {
+      const work = await requireOwnedWork(tx, workId, input.authorId);
+      const item = await requireItem(tx, work.id, itemId, true);
 
       // 1) 幂等查重（锁内、状态机校验之前）
       const existing = await tx.itemEvent.findFirst({
@@ -247,7 +248,10 @@ export async function appendItemEvent(
         select: { ...ITEM_EVENT_ROW_SELECT, note: true },
       });
       if (existing !== null) {
+        // 必须命中**普通事件**：同一幂等键若指向一条冲正行，
+        // 即使 eventType/toHolder/note 形状巧合相同，也绝不能当成同一次请求。
         const same =
+          existing.reversalOf === null &&
           existing.eventType === eventType &&
           (existing.toHolder ?? null) === requestedHolder &&
           (existing.note ?? null) === note;
@@ -323,16 +327,16 @@ export async function reverseItemEvent(
   db: PrismaClient,
   input: ReverseItemEventInput,
 ): Promise<ItemEventMutationResult> {
-  assertUuid(input.workId, '作品 id');
-  assertUuid(input.itemId, '物品 id');
-  assertUuid(input.eventId, '事件 id');
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const itemId = normalizeUuid(input.itemId, '物品 id');
+  const eventId = normalizeUuid(input.eventId, '事件 id');
   const note = normalizeNote(input.note);
   const idempotencyKey = assertIdempotencyKey(input.idempotencyKey);
 
   try {
-    return await runWorkWrite(db, input.workId, async (tx) => {
-      const work = await requireOwnedWork(tx, input.workId, input.authorId);
-      const item = await requireItem(tx, work.id, input.itemId, true);
+    return await runWorkWrite(db, workId, async (tx) => {
+      const work = await requireOwnedWork(tx, workId, input.authorId);
+      const item = await requireItem(tx, work.id, itemId, true);
 
       // 1) 幂等查重（锁内、一切状态校验之前）。
       //    冲正的可控内容 = reversalOf + note。
@@ -341,7 +345,7 @@ export async function reverseItemEvent(
         select: { ...ITEM_EVENT_ROW_SELECT, note: true },
       });
       if (existing !== null) {
-        const same = existing.reversalOf === input.eventId && (existing.note ?? null) === note;
+        const same = existing.reversalOf === eventId && (existing.note ?? null) === note;
         if (!same) {
           throw new AuthError('ITEM_EVENT_IDEMPOTENCY_CONFLICT');
         }
@@ -351,7 +355,7 @@ export async function reverseItemEvent(
       const rows = await loadItemEventRows(tx, item.id);
       const snapshot = replayItemState(rows);
 
-      const target = rows.find((row) => row.id === input.eventId);
+      const target = rows.find((row) => row.id === eventId);
       if (target === undefined) {
         throw new AuthError('NOT_FOUND', '事件不存在');
       }
@@ -665,12 +669,26 @@ function assertIdempotencyKey(key: string): string {
   return key;
 }
 
-/** 可选 id 规范化：空串/undefined 一律视为未提供。 */
-function normalizeOptionalId(value: string | null | undefined): string | null {
+/**
+ * 校验并规范化 UUID：先做形态校验，再统一转小写。
+ *
+ * 为什么必须小写：PostgreSQL 的 `uuid` 类型比较时大小写不敏感，
+ * 但**应用层有两处是字符串比较** ——
+ * 1. 幂等键命中的内容比较（同一请求重试时大小写可能变）；
+ * 2. advisory lock 的哈希键（`hashtextextended(workId::text, 0)`）。
+ * 不统一大小写会导致「同一个 id、两把锁」以及幂等失效。
+ */
+function normalizeUuid(value: unknown, field: string): string {
+  assertUuid(value, field);
+  return value.toLowerCase();
+}
+
+/** 可选 UUID 规范化：空串 / undefined / null 一律视为未提供。 */
+function normalizeOptionalUuid(value: string | null | undefined, field: string): string | null {
   if (value === undefined || value === null || value === '') {
     return null;
   }
-  return value;
+  return normalizeUuid(value, field);
 }
 
 /** afterSeq：非负整数。 */

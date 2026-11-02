@@ -645,4 +645,150 @@ describe('物品事件接口（M2-B3-B1）', () => {
     );
     expect(ok.status).toBe(200);
   });
+
+  /* ---------------------------------------------------------------------- */
+  /* M2-B3-B1-REV-01                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  it('toHolder 非法 UUID → 400，且不写事件、不写审计', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const itemId = await createItem(workId, author.token);
+    const heroId = await createCharacter(workId, author.token, '林青');
+
+    const auditBefore = await db.auditLog.count({ where: { action: 'item.event_recorded' } });
+
+    for (const eventType of ['obtained', 'transferred'] as const) {
+      // transferred 需要先有持有状态；obtained 直接测
+      if (eventType === 'transferred') {
+        await appendRaw(workId, itemId, author.token, {
+          eventType: 'obtained',
+          toHolder: heroId,
+          idempotencyKey: key(),
+        });
+      }
+      for (const bad of ['not-a-uuid', '1234', 'ZZZZZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZZZZZZZZZ']) {
+        const response = await appendRaw(workId, itemId, author.token, {
+          eventType,
+          toHolder: bad,
+          idempotencyKey: key(),
+        });
+        expect(response.status, `${eventType} / ${bad} 应当 400`).toBe(400);
+        expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+          'VALIDATION_FAILED',
+        );
+      }
+    }
+
+    // 只有那一条合法事件
+    expect(await db.itemEvent.count({ where: { itemEntityId: itemId } })).toBe(1);
+    expect(await db.auditLog.count({ where: { action: 'item.event_recorded' } })).toBe(
+      auditBefore + 1,
+    );
+  });
+
+  it('UUID 大小写：大写路径参数与 toHolder 可用，且与后续小写重试命中同一幂等事件', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const itemId = await createItem(workId, author.token);
+    const heroId = await createCharacter(workId, author.token, '林青');
+    const idempotencyKey = key();
+
+    // 路径与 body 全部用大写
+    const first = await eventPost(
+      request(`/api/works/${workId.toUpperCase()}/items/${itemId.toUpperCase()}/events`, {
+        method: 'POST',
+        body: {
+          eventType: 'obtained',
+          toHolder: heroId.toUpperCase(),
+          idempotencyKey,
+        },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      params(workId.toUpperCase(), itemId.toUpperCase()),
+    );
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { event: { id: string }; deduplicated: boolean };
+
+    // 重试用小写 + 同键 → 200 + deduplicated
+    const replay = await appendRaw(workId, itemId, author.token, {
+      eventType: 'obtained',
+      toHolder: heroId,
+      idempotencyKey,
+    });
+    expect(replay.status).toBe(200);
+    const replayBody = (await replay.json()) as { event: { id: string }; deduplicated: boolean };
+    expect(replayBody.deduplicated).toBe(true);
+    expect(replayBody.event.id).toBe(firstBody.event.id);
+
+    // 用大写 eventId 冲正
+    const reversal = await reversalPost(
+      request(
+        `/api/works/${workId}/items/${itemId}/events/${firstBody.event.id.toUpperCase()}/reversal`,
+        { method: 'POST', body: { idempotencyKey: key() }, token: author.token, origin: ORIGIN },
+      ),
+      reversalParams(workId, itemId, firstBody.event.id.toUpperCase()),
+    );
+    expect(reversal.status).toBe(201);
+    const reversalBody = (await reversal.json()) as {
+      event: { reversalOf: string };
+      state: { status: string };
+    };
+    expect(reversalBody.event.reversalOf).toBe(firstBody.event.id);
+    expect(reversalBody.state.status).toBe('unrecorded');
+  });
+
+  it('幂等跨类型：同键命中冲正行 → 409，不返回 deduplicated', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const itemId = await createItem(workId, author.token);
+    const heroId = await createCharacter(workId, author.token, '林青');
+
+    const obtained = await appendRaw(workId, itemId, author.token, {
+      eventType: 'obtained',
+      toHolder: heroId,
+      idempotencyKey: key(),
+    });
+    const obtainedId = ((await obtained.json()) as { event: { id: string } }).event.id;
+
+    const consumed = await appendRaw(workId, itemId, author.token, {
+      eventType: 'consumed',
+      idempotencyKey: key(),
+    });
+    const consumedId = ((await consumed.json()) as { event: { id: string } }).event.id;
+
+    // 用键 K 冲正 consumed → 冲正行形状为 obtained(null→A)
+    const sharedKey = key();
+    const reversal = await reversalPost(
+      request(`/api/works/${workId}/items/${itemId}/events/${consumedId}/reversal`, {
+        method: 'POST',
+        body: { idempotencyKey: sharedKey },
+        token: author.token,
+        origin: ORIGIN,
+      }),
+      reversalParams(workId, itemId, consumedId),
+    );
+    expect(reversal.status).toBe(201);
+
+    const countBefore = await db.itemEvent.count({ where: { itemEntityId: itemId } });
+
+    // 复用同键做普通 append，形状与冲正行一致
+    const conflict = await appendRaw(workId, itemId, author.token, {
+      eventType: 'obtained',
+      toHolder: heroId,
+      idempotencyKey: sharedKey,
+    });
+    expect(conflict.status).toBe(409);
+    const conflictBody = (await conflict.json()) as {
+      error: { code: string };
+      deduplicated?: boolean;
+    };
+    expect(conflictBody.error.code).toBe('ITEM_EVENT_IDEMPOTENCY_CONFLICT');
+    expect(conflictBody.deduplicated).toBeUndefined();
+    expect(await db.itemEvent.count({ where: { itemEntityId: itemId } })).toBe(countBefore);
+
+    // 原来那条获得的事件仍在
+    expect(obtainedId).toBeTruthy();
+  });
 });

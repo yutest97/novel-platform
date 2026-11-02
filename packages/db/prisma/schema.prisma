@@ -283,4 +283,3 @@ model ItemEvent {
   @@index([workId, itemEntityId, seqNo])
   @@map("item_events")
 }
-

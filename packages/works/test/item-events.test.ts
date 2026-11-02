@@ -697,4 +697,127 @@ describe('M2-B3-B1 物品事件流水', () => {
   it('事件类型常量稳定（数据库 CHECK 与代码同一份词汇）', () => {
     expect([...ITEM_EVENT_TYPES]).toEqual(['obtained', 'transferred', 'consumed', 'lost']);
   });
+
+  /* ---------------------------------------------------------------------- */
+  /* M2-B3-B1-REV-01：UUID 严格校验、大小写规范化、幂等跨类型误判           */
+  /* ---------------------------------------------------------------------- */
+
+  it('toHolder 非法 UUID：400 VALIDATION_FAILED，不写事件也不写审计', async () => {
+    const db = testDb();
+    const authorId = await createAuthor();
+    const workId = await createWork(authorId);
+    const itemId = await createItem(workId, authorId);
+    const heroId = await createCharacter(workId, authorId, '林青');
+
+    const auditBefore = await db.auditLog.count({ where: { action: 'item.event_recorded' } });
+
+    // obtained 直接给畸形 id
+    await expect(
+      append(workId, authorId, itemId, 'obtained', { toHolder: 'not-a-uuid' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // transferred 同样（先建立合法持有状态）
+    await append(workId, authorId, itemId, 'obtained', { toHolder: heroId });
+    await expect(
+      append(workId, authorId, itemId, 'transferred', { toHolder: 'not-a-uuid' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+
+    // 只有那一条合法事件，且只产生一条审计
+    expect(await db.itemEvent.count({ where: { itemEntityId: itemId } })).toBe(1);
+    expect(await db.auditLog.count({ where: { action: 'item.event_recorded' } })).toBe(
+      auditBefore + 1,
+    );
+
+    // 畸形 id 没有被当成"未提供"而静默通过
+    await expect(
+      append(workId, authorId, itemId, 'obtained', { toHolder: '1234' }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('UUID 大小写规范化：大写 toHolder / workId / itemId / eventId 都能正确匹配', async () => {
+    const authorId = await createAuthor();
+    const workId = await createWork(authorId);
+    const itemId = await createItem(workId, authorId);
+    const heroId = await createCharacter(workId, authorId, '林青');
+    const sharedKey = key();
+
+    // 首次请求用大写 toHolder + 大写 workId/itemId
+    const first = await appendItemEvent(testDb(), {
+      workId: workId.toUpperCase(),
+      authorId,
+      itemId: itemId.toUpperCase(),
+      eventType: 'obtained',
+      toHolder: heroId.toUpperCase(),
+      idempotencyKey: sharedKey,
+      meta: META,
+    });
+    expect(first.deduplicated).toBe(false);
+    expect(first.event.toHolder?.id).toBe(heroId);
+
+    // 重试改用小写（同一幂等键）→ 必须命中同一条事件
+    const replay = await append(workId, authorId, itemId, 'obtained', {
+      toHolder: heroId,
+      idempotencyKey: sharedKey,
+    });
+    expect(replay.deduplicated).toBe(true);
+    expect(replay.event.id).toBe(first.event.id);
+
+    // 读路径同样接受大写
+    const page = await listItemEvents(testDb(), {
+      workId: workId.toUpperCase(),
+      authorId,
+      itemId: itemId.toUpperCase(),
+    });
+    expect(page.events).toHaveLength(1);
+
+    const state = await stateOf(workId, authorId, itemId);
+    expect(state.holder?.id).toBe(heroId);
+
+    // 冲正时用大写 eventId 必须能找到目标
+    const reverted = await reverseItemEvent(testDb(), {
+      workId,
+      authorId,
+      itemId,
+      eventId: first.event.id.toUpperCase(),
+      idempotencyKey: key(),
+      meta: META,
+    });
+    expect(reverted.event.reversalOf).toBe(first.event.id);
+    expect(reverted.state.status).toBe('unrecorded');
+  });
+
+  it('幂等跨类型：同键命中冲正行时不得当成普通事件（409，不返回 deduplicated）', async () => {
+    const db = testDb();
+    const authorId = await createAuthor();
+    const workId = await createWork(authorId);
+    const itemId = await createItem(workId, authorId);
+    const heroId = await createCharacter(workId, authorId, '林青');
+
+    // 1) 获得 → 消耗
+    await append(workId, authorId, itemId, 'obtained', { toHolder: heroId });
+    const consumed = await append(workId, authorId, itemId, 'consumed');
+
+    // 2) 用幂等键 K 冲正"消耗"→ 生成一条 obtained(null→A) 的冲正行
+    const sharedKey = key();
+    const reversal = await reverse(workId, authorId, itemId, consumed.event.id, {
+      idempotencyKey: sharedKey,
+    });
+    expect(reversal.event.reversalOf).toBe(consumed.event.id);
+    expect(reversal.event.eventType).toBe('obtained');
+    expect(reversal.event.toHolder?.id).toBe(heroId);
+    expect(reversal.event.note).toBeNull();
+
+    const countBefore = await db.itemEvent.count({ where: { itemEntityId: itemId } });
+
+    // 3) 复用同一个键做普通 append，形状与那条冲正行完全一致（obtained→A、无备注）
+    await expect(
+      append(workId, authorId, itemId, 'obtained', {
+        toHolder: heroId,
+        idempotencyKey: sharedKey,
+      }),
+    ).rejects.toMatchObject({ code: 'ITEM_EVENT_IDEMPOTENCY_CONFLICT' });
+
+    // 不增加事件行，也不是 deduplicated
+    expect(await db.itemEvent.count({ where: { itemEntityId: itemId } })).toBe(countBefore);
+  });
 });
