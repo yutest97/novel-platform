@@ -52,6 +52,7 @@ model User {
   sessions  Session[]
   auditLogs AuditLog[] @relation("AuditActor")
   works     Work[]    @relation("WorkAuthor")
+  itemEvents ItemEvent[] @relation("ItemEventCreatedBy")
 
   @@map("users")
 }
@@ -139,6 +140,7 @@ model Work {
   author   User          @relation("WorkAuthor", fields: [authorId], references: [id], onDelete: Cascade)
   settings WorkSetting[]
   entities Entity[]
+  itemEvents ItemEvent[]
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -187,6 +189,9 @@ model Entity {
   work       Work              @relation(fields: [workId], references: [id], onDelete: Cascade)
   attributes EntityAttribute[]
   versions   EntityVersion[]
+  itemEvents ItemEvent[]       @relation("ItemEventItem")
+  itemEventsFrom ItemEvent[]   @relation("ItemEventFromHolder")
+  itemEventsTo   ItemEvent[]   @relation("ItemEventToHolder")
 
   @@index([workId, entityType])
   @@map("entities")
@@ -233,3 +238,49 @@ model EntityVersion {
   @@unique([entityId, versionNo])
   @@map("entity_versions")
 }
+
+/// 物品事件流水（M2-B3-B1）。
+///
+/// **物品持有人只有一个真相：本表的完整回放。**
+/// `item` 规则包里没有 holder 字段，属性表也不存持有人，
+/// 因此不存在"属性与流水不一致"的可能。
+///
+/// 回放口径：冲正行（reversal_of 非空）与其目标行**同时**从有效流里剔除，
+/// 结果等价于"该冲正从未发生过"。冲正行的 from/to 只用于展示。
+///
+/// 只追加不修改：数据库触发器禁止 UPDATE / DELETE；
+/// 录错靠追加冲正事件修正，不改历史行。
+///
+/// **不建 chapter_id**：chapters 表尚不存在，等该迁移落地时同批补列 + FK。
+model ItemEvent {
+  id             String   @id @default(uuid()) @db.Uuid
+  workId         String   @map("work_id") @db.Uuid
+  itemEntityId   String   @map("item_entity_id") @db.Uuid
+  eventType      String   @map("event_type")
+  /// 只由服务端按当前状态推导；接口层不接受客户端提交。
+  fromHolder     String?  @map("from_holder") @db.Uuid
+  toHolder       String?  @map("to_holder") @db.Uuid
+  seqNo          Int      @map("seq_no")
+  reversalOf     String?  @map("reversal_of") @db.Uuid
+  idempotencyKey String   @map("idempotency_key")
+  /// 剧情备注：只落库，不进审计、日志、URL 或 Web Storage。
+  note           String?
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  work     Work   @relation(fields: [workId], references: [id], onDelete: Restrict)
+  item     Entity @relation("ItemEventItem", fields: [itemEntityId], references: [id], onDelete: Restrict)
+  fromHolderEntity Entity? @relation("ItemEventFromHolder", fields: [fromHolder], references: [id], onDelete: Restrict)
+  toHolderEntity   Entity? @relation("ItemEventToHolder", fields: [toHolder], references: [id], onDelete: Restrict)
+  createdByUser    User?   @relation("ItemEventCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  reversedTarget   ItemEvent?  @relation("ItemEventReversal", fields: [reversalOf], references: [id], onDelete: Restrict)
+  reversal         ItemEvent?  @relation("ItemEventReversal")
+
+  @@unique([itemEntityId, seqNo])
+  @@unique([itemEntityId, idempotencyKey])
+  @@unique([reversalOf])
+  @@index([workId, itemEntityId, seqNo])
+  @@map("item_events")
+}
+

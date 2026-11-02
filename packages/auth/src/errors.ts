@@ -24,6 +24,10 @@ export type AuthErrorCode =
   | 'ENTITY_NAME_TAKEN'
   | 'ENTITY_IN_USE'
   | 'ENTITY_TYPE_NOT_ALLOWED'
+  | 'ITEM_EVENT_INVALID_TRANSITION'
+  | 'ITEM_EVENT_NOT_REVERSIBLE'
+  | 'ITEM_EVENT_IDEMPOTENCY_CONFLICT'
+  | 'ITEM_EVENTS_CLOSED'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -50,6 +54,14 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   ENTITY_IN_USE: 409,
   // 实体类型不在当前阶段允许范围内
   ENTITY_TYPE_NOT_ALLOWED: 400,
+  // 物品事件状态机不允许该操作（例如未持有就转手）
+  ITEM_EVENT_INVALID_TRANSITION: 409,
+  // 只允许冲正当前最新、且未被冲正过的事件
+  ITEM_EVENT_NOT_REVERSIBLE: 409,
+  // 同一幂等键被用于不同内容
+  ITEM_EVENT_IDEMPOTENCY_CONFLICT: 409,
+  // 物品已软删除，流水封闭
+  ITEM_EVENTS_CLOSED: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -83,6 +95,10 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   ENTITY_IN_USE: '该实体当前被引用，无法删除',
   // 实体类型不允许
   ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
+  ITEM_EVENT_INVALID_TRANSITION: '当前物品状态不允许该操作',
+  ITEM_EVENT_NOT_REVERSIBLE: '只能冲正当前最新且未被冲正的事件',
+  ITEM_EVENT_IDEMPOTENCY_CONFLICT: '该幂等键已用于不同的事件内容',
+  ITEM_EVENTS_CLOSED: '物品已删除，不能再追加或冲正事件',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

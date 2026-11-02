@@ -36,6 +36,8 @@ export const AUDIT_ACTIONS = {
   ENTITY_UPDATED: 'entity.updated',
   ENTITY_DELETED: 'entity.deleted',
   ENTITY_REORDERED: 'entity.reordered',
+  ITEM_EVENT_RECORDED: 'item.event_recorded',
+  ITEM_EVENT_REVERSED: 'item.event_reversed',
 } as const;
 
 /** 审计动作类型。 */

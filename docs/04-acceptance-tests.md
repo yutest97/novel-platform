@@ -306,7 +306,8 @@
 ## 14. 设定模块验收（M2-B2 / M2-B3-A：境界 / 势力 / 人物 / 物品 / 功法）
 
 M2-B2 交付范围：`realm_level`（境界体系）、`faction`（势力）、`character`（人物）；
-M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），规则包升级到 **xuanhuan@4.0.0**。
+M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），规则包升级到 **xuanhuan@4.0.0**；
+M2-B3-B1 新增 `item_events` 流水（追加 / 冲正 / 回放，**不改规则包**）。
 五类实体共用 `entities / entity_attributes / entity_versions` 通用骨架，五类都有
 **契约、接口、设定中心 UI 与 E2E**。
 **未交付**且不得标记完成：物品持有人与 `item_events` 流水（B3-B，见 `AT-SET-15` 的说明）、
@@ -332,6 +333,11 @@ M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），�
 | AT-SET-13 | item / technique 契约：enum 必填与取值、`holder` 作为未知字段 400、`technique.realmRequirement` 的存在/未删除/同作品/类型一致/禁自引用 | `entities-item-technique.test.ts`、`apps/web/test/settings-api.test.ts` |
 | AT-SET-14 | 删除保护（B3-A 口径）：删除被功法引用的境界 `409` + 引用摘要（含功法名称），解引用后可删；删除物品永远允许 | 同上 |
 | AT-SET-15 | UI：物品 / 功法分区自动出现（顺序 4、5）、两个 enum 只有规则包选项、页面无「持有人」控件、删除被引用境界展示「功法 · X」、五分区排序互不影响、移动端不撑破视口 | `apps/web/e2e/settings-flow.spec.ts` 用例 9、10、21–23 |
+| AT-SET-16 | `item_events` 迁移：应用到已有 v4 数据的库后既有表**逐字节不变**、规则包仍 4.0.0（无 v5）；CHECK（类型/形态/序号/幂等键/备注）、三个唯一索引、append-only 触发器（直接 SQL 的 UPDATE/DELETE 也失败） | `packages/works/test/migration-item-events.test.ts` |
+| AT-SET-17 | 状态机与回放：四类事件的合法/非法转移；冲正行与目标行同时剔除；冲正 obtained/transferred/consumed/lost 均回到冲正前状态；冲正非最新 / 冲正冲正行 / 二次冲正均 409 | `packages/works/test/item-events.test.ts` |
+| AT-SET-18 | 事件接口：`fromHolder` 400、幂等（同键同内容 200+deduplicated、同键异内容 409）、`afterSeq` 分页、软删物品 409 `ITEM_EVENTS_CLOSED` 但历史可读、他人作品 404、管理员 403、畸形 UUID 400 | `apps/web/test/item-events-api.test.ts` |
+| AT-SET-19 | 事件并发：10 并发转手 seq 连续唯一；同一幂等键并发只 1 行；并发冲正只 1 条冲正行；追加与物品软删并发不产生"已删物品上的事件"；转手与删除该人并发二者只成功一个；物品事件写与实体写受**同一把**作品级锁约束 | `packages/works/test/item-events-concurrency.test.ts` |
+| AT-SET-20 | 删除人物：仍是存活物品的当前持有人 → 409 并列出物品；已被转走的历史持有人不阻止删除；事件 DTO 只含 id/name/deleted | `packages/works/test/item-events.test.ts`、`apps/web/test/item-events-api.test.ts` |
 
 ---
 
@@ -352,10 +358,10 @@ M2-B3-A 在此基础上新增 `item`（物品）与 `technique`（功法），�
 | F-WRK-04 | AT-SET-4/5/8（人物设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-05 | AT-SET-4/8（势力设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-06 | AT-SET-1/2/6/10（境界体系）、AT-FLOW-1、AT-CONT-3 |
-| F-WRK-07 | AT-SET-13/14/15（物品名称/类别/品质/获取方式已交付，持有人待 B3-B）、AT-FLOW-1、AT-CHK-4 |
+| F-WRK-07 | AT-SET-13/14/15/16/17/19/20（**已完成**：持有人由事件流回放派生，删除当前持有人 409）、AT-FLOW-1、AT-CHK-4（仍待章节） |
 | F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 |
 | F-WRK-09 | AT-SET-11/13/15（**已完成**）、AT-FLOW-1（功法） |
-| F-WRK-11 | AT-CHK-4（物品流水）——**未交付：B3-B（item_events）** |
+| F-WRK-11 | AT-SET-16/17/18/19（**B3-B1 已完成**：追加 / 冲正 / 回放 / 序号 / append-only）、AT-CHK-4 ——**仍待章节正文，不得标记完成** |
 | F-WRK-15 | AT-CHK-5（认知）——**仍待 M6 事实版本系统交付，M2-B2 未交付** |
 | F-WRK-16 | AT-FORE-1/2/3/4（伏笔） |
 | F-WRK-17 | AT-CHK-6（时间线） |

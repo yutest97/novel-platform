@@ -12,7 +12,9 @@ export default defineConfig({
     environment: 'node',
     include: ['test/**/*.test.ts'],
     fileParallelism: false,
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
+    // 同 `@novel/auth`：迁移用例逐个新建隔离数据库，
+    // 慢主机上 `CREATE DATABASE` 可能耗到几十秒。超时只用于检测挂起。
+    testTimeout: 120_000,
+    hookTimeout: 120_000,
   },
 });

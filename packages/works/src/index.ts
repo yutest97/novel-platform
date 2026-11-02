@@ -58,6 +58,45 @@ export type {
 
 export { assertUuid, isUuid } from './ids.js';
 
+export { WORK_LOCK_NAMESPACE, lockWork, runWorkWrite } from './work-lock.js';
+
+export { requireOwnedWork } from './work-access.js';
+export type { WorkContext } from './work-access.js';
+
+export {
+  DEFAULT_ITEM_EVENT_PAGE_SIZE,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  MAX_ITEM_EVENT_NOTE_LENGTH,
+  MAX_ITEM_EVENT_PAGE_SIZE,
+  MIN_IDEMPOTENCY_KEY_LENGTH,
+  appendItemEvent,
+  getItemState,
+  listItemEvents,
+  reverseItemEvent,
+} from './item-events.js';
+
+export type {
+  AppendItemEventInput,
+  GetItemStateInput,
+  ItemEventMutationResult,
+  ItemEventPage,
+  ItemEventView,
+  ItemHolderRef,
+  ItemStateView,
+  ListItemEventsInput,
+  ReverseItemEventInput,
+} from './item-events.js';
+
+export {
+  ITEM_EVENT_TYPES,
+  findItemsHeldBy,
+  isItemEventType,
+  loadItemEventRows,
+  replayItemState,
+} from './item-state.js';
+
+export type { ItemEventRow, ItemEventType, ItemStateSnapshot, ItemStatus } from './item-state.js';
+
 export {
   MAX_ENTITY_REFS,
   assertFieldSchemaContract,

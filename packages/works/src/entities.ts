@@ -27,6 +27,10 @@ import { AUDIT_ACTIONS, AuthError, writeAuditLog, type RequestMeta } from '@nove
 import type { Prisma, PrismaClient } from '@novel/db';
 
 import { assertUuid } from './ids.js';
+import { findItemsHeldBy } from './item-state.js';
+import { requireOwnedWork } from './work-access.js';
+import { isConcurrencyError, uniqueConstraintMarker } from './write-errors.js';
+import { runWorkWrite, WORK_LOCK_NAMESPACE } from './work-lock.js';
 import {
   assertFieldSchemaContract,
   buildSchemaSummary,
@@ -75,14 +79,14 @@ export function isSupportedEntityType(value: string): value is SupportedEntityTy
 /**
  * 实体写操作的 advisory lock 命名空间。
  *
+ * M2-B3-B1 起锁逻辑抽到 `work-lock.ts`（实体写与物品事件写必须共用同一把锁）。
+ * 这里保留别名，既有并发测试与外部引用无需改动。
+ *
  * 锁键 = `hashtextextended('entity:' || workId, 0)`：
  * 同一作品的所有写操作共用这把锁，不同作品互不影响；
  * 带上 `entity:` 前缀后与其它模块的 advisory lock 不在同一个哈希空间。
- *
- * 导出这个常量，是为了让并发测试能**用同一把锁**构造"锁被占用"的场景，
- * 从而证明实体写操作确实会去取这把锁（而不是碰巧被行锁挡住）。
  */
-export const ENTITY_LOCK_NAMESPACE = 'entity:';
+export const ENTITY_LOCK_NAMESPACE = WORK_LOCK_NAMESPACE;
 
 /** 实体名称长度上限。 */
 export const MAX_ENTITY_NAME_LENGTH = 60;
@@ -122,38 +126,8 @@ export interface SettingsCenterView {
   readonly entityGroups: readonly EntityGroupView[];
 }
 
-/** 内部：作品 + 规则包。 */
-interface WorkContext {
-  readonly id: string;
-  readonly title: string;
-  readonly genreRulePackage: string;
-}
-
-/** 读取作品所需的最小数据库能力（PrismaClient 与事务客户端都满足）。 */
-type WorkReader = Pick<PrismaClient, 'work'>;
-
 /** 读取规则包所需的最小数据库能力。 */
 type RulePackageReader = Pick<PrismaClient, 'rulePackage'>;
-
-/**
- * 读取作品上下文（并确认属于当前作者）。
- *
- * 非所有者一律 404。
- */
-async function requireOwnedWork(
-  db: WorkReader,
-  workId: string,
-  authorId: string,
-): Promise<WorkContext> {
-  const work = await db.work.findFirst({
-    where: { id: workId, authorId },
-    select: { id: true, title: true, genreRulePackage: true },
-  });
-  if (work === null) {
-    throw new AuthError('NOT_FOUND', '作品不存在');
-  }
-  return work;
-}
 
 /**
  * 读取作品对应的规则包（必须是启用中的）。
@@ -349,42 +323,12 @@ async function assertReferences(
 }
 
 /**
- * 同一作品的所有写操作共用的 advisory lock。
+ * 同一作品的所有写操作共用的 advisory lock —— 实现见 `work-lock.ts`。
  *
- * 锁键 = `hashtextextended('entity:' || workId, 0)`：
- * - 用 workId 派生 → 同一作品的写操作互相串行化，不同作品互不影响；
- * - 带 `entity:` 前缀 → 与其它模块的 advisory lock（例如按 userId 的会话锁）
- *   落在不同的哈希空间，不会互相干扰；
- * - 64 位哈希 → 碰撞概率可忽略。
- *
- * 取锁语句包在子查询里，是因为 `pg_advisory_xact_lock` 返回 void，
- * Prisma 无法反序列化（会抛 P2010）。
+ * 实体写与物品事件写（`item-events.ts`）都走 `runWorkWrite`，
+ * 因此二者在同一把锁上串行化；这把锁的细节、以及"锁键值不得修改"的原因
+ * 都记录在 `work-lock.ts`，此处不再重复。
  */
-async function lockWork(tx: Prisma.TransactionClient, workId: string): Promise<void> {
-  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtextextended(${ENTITY_LOCK_NAMESPACE} || ${workId}::text, 0))) AS lock_acquired`;
-}
-
-/**
- * 作品级写事务的统一入口。
- *
- * 顺序固定为：开事务 → 取作品级 advisory lock → **在事务内**做全部校验
- * → 写数据/版本/审计。任何一步抛错都会让整个事务回滚。
- *
- * 超时放宽到 30 秒：并发写会互相等待同一把锁，等待时间算在事务时限里。
- */
-async function runWorkWrite<T>(
-  db: PrismaClient,
-  workId: string,
-  work: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return db.$transaction(
-    async (tx) => {
-      await lockWork(tx, workId);
-      return work(tx);
-    },
-    { maxWait: 15000, timeout: 30000 },
-  );
-}
 
 /** 数据库行 → 实体视图。 */
 function toEntityView(
@@ -989,13 +933,26 @@ export async function deleteEntity(db: PrismaClient, input: DeleteEntityInput): 
         // 所有字段组的 schemaRef 都恒等于 `code@version`（assertGroupSchemaRef 保证）
         `${rulePackage.code}@${rulePackage.version}`,
       );
-      if (referencing.length > 0) {
+
+      // M2-B3-B1：物品持有人由 item_events 回放得出，不在 attributes 里，
+      // 所以上面的属性扫描永远看不到它 —— 这里单独补一段。
+      //
+      // 口径：**只算当前持有人**。历史持有人（已被转走、或事件已被冲正）
+      // 不阻止删除，否则任何一次转手都会把人物永久锁死。
+      const heldItems =
+        entity.entityType === 'character' ? await findItemsHeldBy(tx, work.id, entity.id) : [];
+
+      const blocking: EntityReferenceSummaryItem[] = [
+        ...referencing,
+        ...heldItems.map((item) => ({ id: item.id, entityType: 'item', name: item.name })),
+      ];
+      if (blocking.length > 0) {
         throw new AuthError('ENTITY_IN_USE', undefined, {
           references: {
-            total: referencing.length,
+            total: blocking.length,
             // 只返回定位所需的最小信息：id / 类型 / 名称。
             // 绝不含属性值、秘密或正文。
-            items: referencing.slice(0, MAX_REFERENCE_SUMMARY_ITEMS),
+            items: blocking.slice(0, MAX_REFERENCE_SUMMARY_ITEMS),
           },
         });
       }
@@ -1235,32 +1192,16 @@ export async function reorderEntities(
  *   **绝不**以 500 暴露给调用方。
  */
 function translateEntityErrors(error: unknown): unknown {
-  if (typeof error !== 'object' || error === null) {
-    return error;
-  }
-  const candidate = error as { code?: unknown; meta?: Record<string, unknown> };
-  const meta = candidate.meta ?? {};
-
-  // Prisma 的写冲突 / 死锁：P2034（Transaction failed due to a write conflict
-  // or a deadlock）。映射成稳定的 409，而不是 500。
-  if (candidate.code === 'P2034') {
+  // 写冲突 / 死锁（P2034、40P01、40001）→ 稳定的 409，而不是 500。
+  // 与物品事件写共用同一套判断（write-errors.ts），避免两边口径漂移。
+  if (isConcurrencyError(error)) {
     return new AuthError('CONCURRENT_MODIFICATION');
   }
 
-  // 底层 PostgreSQL 错误（驱动适配器把原生错误包在 P2010 里）。
-  const nativeCode = meta['code'];
-  if (nativeCode === '40P01' || nativeCode === '40001') {
-    return new AuthError('CONCURRENT_MODIFICATION');
-  }
-
-  if (candidate.code !== 'P2002') {
+  const marker = uniqueConstraintMarker(error);
+  if (marker === null) {
     return error;
   }
-
-  const adapter = meta['driverAdapterError'] as
-    { cause?: { constraint?: { index?: unknown } } } | undefined;
-  const index = adapter?.cause?.constraint?.index;
-  const marker = typeof index === 'string' ? index : '';
   if (marker.includes('entity_type') && marker.includes('name')) {
     return new AuthError('ENTITY_NAME_TAKEN');
   }

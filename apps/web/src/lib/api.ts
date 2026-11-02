@@ -25,6 +25,10 @@ export type ApiErrorCode =
   | 'ENTITY_NAME_TAKEN'
   | 'ENTITY_IN_USE'
   | 'ENTITY_TYPE_NOT_ALLOWED'
+  | 'ITEM_EVENT_INVALID_TRANSITION'
+  | 'ITEM_EVENT_NOT_REVERSIBLE'
+  | 'ITEM_EVENT_IDEMPOTENCY_CONFLICT'
+  | 'ITEM_EVENTS_CLOSED'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -48,6 +52,10 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   ENTITY_NAME_TAKEN: '同名实体已存在',
   ENTITY_IN_USE: '该实体当前被引用，无法删除',
   ENTITY_TYPE_NOT_ALLOWED: '不支持该实体类型',
+  ITEM_EVENT_INVALID_TRANSITION: '当前物品状态不允许该操作',
+  ITEM_EVENT_NOT_REVERSIBLE: '只能冲正当前最新且未被冲正的事件',
+  ITEM_EVENT_IDEMPOTENCY_CONFLICT: '该幂等键已用于不同的事件内容',
+  ITEM_EVENTS_CLOSED: '物品已删除，不能再追加或冲正事件',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -467,4 +475,134 @@ export async function reorderEntities(
     body: { entityType, entityIds },
   });
   return (body as { entities: EntityItem[] }).entities;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 物品事件流水（M2-B3-B1）                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** 物品事件类型。 */
+export type ItemEventType = 'obtained' | 'transferred' | 'consumed' | 'lost';
+
+/** 物品生命周期状态。 */
+export type ItemStatus = 'unrecorded' | 'held' | 'consumed' | 'lost';
+
+/**
+ * 事件/状态里的持有人引用。
+ *
+ * **只含定位信息**：id / name / deleted。
+ * 服务端保证不带人物属性、秘密或其它字段。
+ */
+export interface ItemHolderRef {
+  readonly id: string;
+  readonly name: string;
+  readonly deleted: boolean;
+}
+
+/** 一条物品事件。 */
+export interface ItemEventView {
+  readonly id: string;
+  readonly itemId: string;
+  readonly seq: number;
+  readonly eventType: ItemEventType;
+  readonly fromHolder: ItemHolderRef | null;
+  readonly toHolder: ItemHolderRef | null;
+  readonly reversalOf: string | null;
+  readonly reversedBy: string | null;
+  readonly reversed: boolean;
+  readonly note: string | null;
+  readonly createdAt: string;
+}
+
+/** 事件分页。 */
+export interface ItemEventPage {
+  readonly events: readonly ItemEventView[];
+  readonly hasMore: boolean;
+  readonly nextAfterSeq: number;
+}
+
+/** 物品派生状态。 */
+export interface ItemStateView {
+  readonly itemId: string;
+  readonly itemName: string;
+  readonly status: ItemStatus;
+  readonly holder: ItemHolderRef | null;
+  readonly eventCount: number;
+  readonly effectiveEventCount: number;
+  readonly lastSeq: number;
+  readonly lastEventAt: string | null;
+}
+
+/** 写操作结果。 */
+export interface ItemEventMutation {
+  readonly event: ItemEventView;
+  readonly state: ItemStateView;
+  /** 同一幂等键命中既有事件时为 true。 */
+  readonly deduplicated: boolean;
+}
+
+/** 读取物品事件（seq 升序，afterSeq 游标）。 */
+export async function listItemEvents(
+  workId: string,
+  itemId: string,
+  options: { afterSeq?: number; limit?: number } = {},
+): Promise<ItemEventPage> {
+  const params = new URLSearchParams();
+  if (options.afterSeq !== undefined) {
+    params.set('afterSeq', String(options.afterSeq));
+  }
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  const query = params.toString();
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/items/${encodeURIComponent(itemId)}/events${
+      query === '' ? '' : `?${query}`
+    }`,
+  );
+  return body as ItemEventPage;
+}
+
+/**
+ * 追加物品事件。
+ *
+ * 注意：**没有 fromHolder 参数** —— 转出方由服务端按当前状态推导。
+ */
+export async function appendItemEvent(
+  workId: string,
+  itemId: string,
+  input: {
+    eventType: ItemEventType;
+    toHolder?: string | null;
+    note?: string | null;
+    idempotencyKey: string;
+  },
+): Promise<ItemEventMutation> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/items/${encodeURIComponent(itemId)}/events`,
+    { method: 'POST', body: input },
+  );
+  return body as ItemEventMutation;
+}
+
+/** 冲正当前最新事件（服务端推导反向事件类型与双方持有人）。 */
+export async function reverseItemEvent(
+  workId: string,
+  itemId: string,
+  eventId: string,
+  input: { note?: string | null; idempotencyKey: string },
+): Promise<ItemEventMutation> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/items/${encodeURIComponent(itemId)}/events/${encodeURIComponent(eventId)}/reversal`,
+    { method: 'POST', body: input },
+  );
+  return body as ItemEventMutation;
+}
+
+/** 读取物品派生状态（持有人 + 生命周期 + 计数）。 */
+export async function getItemState(workId: string, itemId: string): Promise<ItemStateView> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/items/${encodeURIComponent(itemId)}/state`,
+  );
+  return (body as { state: ItemStateView }).state;
 }

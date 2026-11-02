@@ -450,29 +450,78 @@ v4 迁移只动 `3.0.0`）。
 - 设定值（含人物「秘密」）只存在于组件内存：不写 URL、`localStorage`、`sessionStorage`，
   也不写任何日志。
 
-#### 交付口径（M2-B3-A）
+#### 交付口径（M2-B3-A / B3-B1）
 
 | 需求                                                     | 状态                                                                                           |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | F-WRK-09 功法/能力（名称、类型、境界门槛、效果、副作用） | **完成**：`technique` 五个字段齐全，`realmRequirement` 引用境界，删除被引用境界 → `409` + 摘要 |
-| F-WRK-07 物品/法宝（名称、类别、品质、持有人、获取方式） | **部分交付**：名称/类别/品质/获取方式已交付；**持有人由 M2-B3-B 交付**                         |
-| F-WRK-11 物品获得/消耗/丢失/转手事件流水                 | **未交付**（B3-B）                                                                             |
+| F-WRK-07 物品/法宝（名称、类别、品质、持有人、获取方式） | **完成**：持有人由 `item_events` 回放派生；删除当前持有人 → `409` + 物品清单                   |
+| F-WRK-11 物品获得/消耗/丢失/转手事件流水                 | **完成（B3-B1 后端）**：追加 / 冲正 / 回放 / 序号 / append-only 全部有测试                     |
 | F-WRK-08 资源流水                                        | **未交付**（M2-B4）                                                                            |
 
-#### B3-B 预留契约（仅记录，本轮**不建表、不建路由**）
+> `AT-CHK-4`（正文使用但无转手事件 / 同时被两人持有 → 「物品归属矛盾」）
+> **仍未交付**：它需要章节正文与场景节拍（M2-D/M2-E），不是 B3-B1 能验证的。
 
-`item_events`：`id, work_id, item_entity_id, event_type, from_holder, to_holder,
-seq_no, reversal_of, idempotency_key, note, created_by, created_at`。
+### 物品事件流水（M2-B3-B1）
 
-- 唯一约束 `(item_entity_id, idempotency_key)`；
-- `seq_no` 在作品级锁内按 `item` 取 `max(seq_no) + 1`；
-- `reversal_of` 唯一（被冲正事件只能冲正一次，冲正事件不可再冲正）；
-- 事件类型 `obtained`（from=null，to=人物）/ `transferred`（from/to 为不同人物）/
-  `consumed`、`lost`（from=人物，to=null）；
-- 持有人与物品生命周期状态**由流水回放得出**（不写 `item.holder` 属性）；
-- append-only 触发器禁止 `UPDATE` / `DELETE`；
-- 历史事件中的 holder **不参与**当前删除保护，避免人物被永久锁死；
-- `chapter_id` 暂不建列，等 `chapters` 表落地时同迁移补列与 FK。
+迁移：`packages/db/prisma/migrations/20261104000000_m2b3b_item_events/`。
+**本轮不改规则包**（仍 `xuanhuan@4.0.0`），因此没有 v5。
+
+**唯一真相**：`item` 规则包里没有 `holder` 字段，属性表也不存持有人；
+持有人与生命周期状态**只**由 `item_events` 全量回放得出，不存在双写。
+
+**表约束**
+
+- `(item_entity_id, seq_no)` 唯一；`seq_no` 在作品级锁内取 `max+1`，唯一索引兜底；
+- `(item_entity_id, idempotency_key)` 唯一；
+- `reversal_of` 部分唯一（一个原事件只能被冲正一次）；
+- CHECK：事件类型白名单、每种类型的持有人形态、`seq_no >= 1`、
+  不能冲正自己、幂等键 8–128、`note <= 500`；
+- **append-only 触发器**：`UPDATE` / `DELETE` 直接 SQL 也抛 `restrict_violation`；
+- 外键一律 `ON DELETE RESTRICT`（项目没有作品/实体硬删除入口）；
+- **不建 `chapter_id`**：等 `chapters` 迁移落地时同批补列 + FK。
+
+**状态机**（服务端校验，非法转移 `409 ITEM_EVENT_INVALID_TRANSITION`）
+
+| 当前状态     | obtained | transferred | consumed   | lost   |
+| ------------ | -------- | ----------- | ---------- | ------ |
+| `unrecorded` | → held   | 409         | 409        | 409    |
+| `held`       | 409      | → held      | → consumed | → lost |
+| `consumed`   | → held   | 409         | 409        | 409    |
+| `lost`       | → held   | 409         | 409        | 409    |
+
+**回放口径**：冲正行与其目标行**同时**从有效流剔除，回放等价于"该冲正从未发生"。
+冲正行的 `from/to` 只用于展示，不参与状态计算。
+
+**冲正**：只允许冲正当前最新、且未被冲正过的普通事件；
+冲正通过追加反向事件完成，历史行一个字都不改；
+冲正事件自身不能再被冲正（因此无法连续回退更早的事件）。
+
+**接口**
+
+| 方法 | 路径                                                    | 说明                                                             |
+| ---- | ------------------------------------------------------- | ---------------------------------------------------------------- |
+| GET  | `/api/works/:id/items/:itemId/events?afterSeq=&limit=`  | 事件列表，seq 升序，`limit` 1–100                                |
+| POST | `/api/works/:id/items/:itemId/events`                   | 追加事件（白名单：eventType / toHolder / note / idempotencyKey） |
+| POST | `/api/works/:id/items/:itemId/events/:eventId/reversal` | 冲正（白名单：note / idempotencyKey）                            |
+| GET  | `/api/works/:id/items/:itemId/state`                    | 派生状态：持有人 / 生命周期 / 事件数 / 最后 seq                  |
+
+**客户端不能提交 `from_holder`**：出现即 400（严格白名单，不静默忽略）。
+
+**幂等**：`idempotencyKey` 必填。同键 + 同内容（append 比较 eventType/toHolder/note，
+reversal 比较 reversalOf/note）返回既有事件（HTTP 200，`deduplicated: true`）；
+同键不同内容 → `409 ITEM_EVENT_IDEMPOTENCY_CONFLICT`。
+查重在**锁内、状态机校验之前**执行，否则重试会被误判成"非法转移"。
+
+**删除保护**：删除人物时，若它仍是某**存活物品**的当前持有人 →
+`409 ENTITY_IN_USE` 并列出物品；已被转走的历史持有人**不阻止**删除
+（否则任何一次转手都会把人物永久锁死）。
+
+**审计**：`item.event_recorded` / `item.event_reversed`，
+detail 只有 `workId / itemId / eventId / eventType / seq`（冲正额外记 `reversalOf`）；
+**不含 `note`、不含持有人姓名**。
+
+**未做（B3-B2）**：时间线 UI 与对应 E2E。事件目前只能通过接口读写。
 
 **未交付项（不得标记完成）**：`F-WRK-15 人物「当前知道/不知道」信息清单`
 **仍由 M6 事实版本系统交付**，依赖 `fact_id` + 事实版本
