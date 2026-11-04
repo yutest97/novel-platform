@@ -162,6 +162,45 @@ export function shouldPollTask(status: string | null): boolean {
   return status === 'queued' || status === 'processing';
 }
 
+/** 工作台顶部提示的语义色调。 */
+export type NoticeTone = 'ok' | 'warn';
+
+export interface WorkbenchNotice {
+  readonly text: string;
+  readonly tone: NoticeTone;
+}
+
+/** 等待 Worker 的提示文案；只在 queued/processing 出现。 */
+export const WAITING_WORKER_NOTICE = '已提交生成任务，正在等待 Worker 领取…';
+
+/**
+ * 由任务状态推导顶部提示。
+ *
+ * 提示必须跟着任务状态走，不能停留在提交那一刻：
+ * - `queued` / `processing` → 等待或已请求取消（只有这两个状态允许出现「等待 Worker」）；
+ * - `succeeded` → 生成完成（随后采纳会覆盖为版本提示）；
+ * - `failed` → 返回 null，失败详情只由 `task-error` 展示，避免绿色提示与红色错误同屏；
+ * - `cancelled` → 已取消。
+ */
+export function generationNotice(task: GenerationTaskSummary | null): WorkbenchNotice | null {
+  if (task === null) {
+    return null;
+  }
+  switch (task.status) {
+    case 'queued':
+    case 'processing':
+      return task.cancelRequestedAt === null
+        ? { text: WAITING_WORKER_NOTICE, tone: 'warn' }
+        : { text: '已请求取消生成', tone: 'warn' };
+    case 'succeeded':
+      return { text: '生成完成，候选已保存', tone: 'ok' };
+    case 'cancelled':
+      return { text: '生成任务已取消', tone: 'warn' };
+    default:
+      return null;
+  }
+}
+
 /** 任务是否终态（用于恢复生成按钮）。 */
 export function isTerminalTaskStatus(status: string | null): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';

@@ -4,16 +4,18 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { ChapterListItem } from '../src/lib/api';
+import type { ChapterListItem, GenerationTaskSummary } from '../src/lib/api';
 import {
   DEFAULT_CHAPTER_TARGET_WORDS,
   MAX_CHAPTER_TARGET_WORDS,
   MIN_CHAPTER_TARGET_WORDS,
+  WAITING_WORKER_NOTICE,
   canGenerateChapter,
   chapterBadge,
   chapterStatusLabel,
   clampChapterTargetWords,
   displayPlan,
+  generationNotice,
   isTerminalTaskStatus,
   nextPollDelay,
   shouldPollTask,
@@ -194,6 +196,83 @@ describe('终态步骤文案', () => {
     expect(taskProgressLabel({ ...base, status: 'failed' })).toBe('生成失败');
     expect(taskProgressLabel({ ...base, status: 'cancelled' })).toBe('已取消');
     expect(taskProgressLabel({ ...base, status: 'queued' })).toBe('正在保存候选');
+  });
+});
+
+describe('生成过程提示', () => {
+  function task(overrides: Partial<GenerationTaskSummary> = {}): GenerationTaskSummary {
+    return {
+      id: 'task-1',
+      chapterId: 'chapter-1',
+      status: 'queued',
+      currentStep: null,
+      attemptCount: 1,
+      maxAttempts: 3,
+      cancelRequestedAt: null,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: '2026-11-04T00:00:00.000Z',
+      updatedAt: '2026-11-04T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('queued / processing 才显示等待 Worker', () => {
+    expect(generationNotice(task({ status: 'queued' }))).toEqual({
+      text: WAITING_WORKER_NOTICE,
+      tone: 'warn',
+    });
+    expect(generationNotice(task({ status: 'processing', currentStep: 'write_draft' }))).toEqual({
+      text: WAITING_WORKER_NOTICE,
+      tone: 'warn',
+    });
+  });
+
+  it('已请求取消 → 立即改文案，不再显示等待 Worker', () => {
+    for (const status of ['queued', 'processing']) {
+      const notice = generationNotice(
+        task({ status, cancelRequestedAt: '2026-11-04T00:00:01.000Z' }),
+      );
+      expect(notice?.text).toBe('已请求取消生成');
+      expect(notice?.text).not.toContain('等待 Worker');
+    }
+  });
+
+  it('succeeded → 生成完成，且不再出现等待 Worker', () => {
+    const notice = generationNotice(
+      task({ status: 'succeeded', currentStep: 'persist_candidate' }),
+    );
+    expect(notice).toEqual({ text: '生成完成，候选已保存', tone: 'ok' });
+    expect(notice?.text).not.toContain('等待 Worker');
+  });
+
+  it('failed → 不显示任何顶部提示（失败详情只由 task-error 展示）', () => {
+    expect(
+      generationNotice(
+        task({ status: 'failed', errorCode: 'TASK_MODEL_CONFIG_MISMATCH', errorMessage: 'x' }),
+      ),
+    ).toBeNull();
+  });
+
+  it('cancelled → 生成任务已取消；无任务 → null', () => {
+    expect(generationNotice(task({ status: 'cancelled' }))).toEqual({
+      text: '生成任务已取消',
+      tone: 'warn',
+    });
+    expect(generationNotice(null)).toBeNull();
+    expect(generationNotice(task({ status: 'unknown' }))).toBeNull();
+  });
+
+  it('只有 queued/processing 的文案包含「等待 Worker」', () => {
+    const statuses = ['queued', 'processing', 'succeeded', 'failed', 'cancelled'];
+    for (const status of statuses) {
+      const notice = generationNotice(task({ status }));
+      if (status === 'queued' || status === 'processing') {
+        expect(notice?.text, status).toContain('等待 Worker');
+      } else {
+        expect(notice?.text ?? '', status).not.toContain('等待 Worker');
+      }
+    }
   });
 });
 

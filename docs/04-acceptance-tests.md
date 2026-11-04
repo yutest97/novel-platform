@@ -551,6 +551,7 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 > **不提供**人工编辑、`human` 版本、版本 diff / 恢复、Reviewer / RAG。
 > **A1-4A-REV-01** 追加：取消后作废 requestId（AT-WF-68）、目标字数默认值收敛（AT-WF-67A）、
 > 终态步骤文案改为「最后步骤：…」（AT-WF-67）。
+> **A1-4A-REV-02** 追加：顶部提示随任务状态变化（AT-WF-68A）。
 
 | 编号 | 用例 | 预期 | 自动化位置 |
 | --- | --- | --- | --- |
@@ -561,9 +562,10 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-67 | 生成与轮询 | requestId 仅在组件内存（同内容重复点击复用，终态或取消成功后作废）；1s→5s 轮询；只轮询 queued/processing；六步 `currentStep` 中文（进行中「正在…」、终态「最后步骤：…」）；隐藏页暂停、re-focus 立即刷新；卸载清理 timer | `test/chapter-workbench.test.ts`、`e2e/chapter-workbench.spec.ts` |
 | AT-WF-67A | 目标字数默认值 | 作品目标 1200..10000 与表单 2500..4000 不一致时，表单默认值经 `clampChapterTargetWords` 收敛，页面仍显示作品原始值；1200→2500、6000→4000、NaN/3000.5→3000 | `test/chapter-workbench.test.ts`、`e2e/chapter-workbench.spec.ts` |
 | AT-WF-68 | 取消与关闭态 | queued/processing 显示取消；取消后刷新章节/任务/候选并作废 requestId（即使接口仍返回 processing + cancelRequestedAt，再次生成必须换新 id）；`finalized/abandoned` 无生成控件并显示稳定提示 | 同上 |
+| AT-WF-68A | 生成提示一致性 | 只有 `queued/processing` 显示「正在等待 Worker 领取…」；`succeeded` → 「生成完成，候选已保存」；`cancelled` → 「生成任务已取消」；`failed` → 无顶部提示（只留红色 `task-error`）；`cancelRequestedAt` 非空 → 「已请求取消生成」；采纳成功提示覆盖生成提示；刷新已完成任务不回到等待提示 | `test/chapter-workbench.test.ts`、`e2e/chapter-workbench.spec.ts` |
 | AT-WF-69 | 候选预览 | 章节详情只含摘要；点击候选后才 GET 正文；纯文本 `pre-wrap`；显示字数/状态/时间；结构化计划可折叠 | 同上 |
 | AT-WF-70 | 采纳 | 仅 `candidate` 显示采纳；二次确认；首次 201、重复 200 `deduplicated`；成功后刷新并自动选中最大版本，显示「已生成正式版本 N」；失败不做乐观更新 | 同上 |
 | AT-WF-71 | 正式阅读 | `pre-wrap` 纯文本；显示版本号 / 来源 AI/人工 / 字数 / 时间；刷新后仍在；提示人工编辑下阶段开放 | 同上 |
 | AT-WF-72 | 权限与脱敏 | 401 跳登录；404 显示作品/章节不存在；管理员 403；页面与截图不含邮箱、口令、Cookie、令牌 | 同上 |
 | AT-WF-73 | 移动端 | 390×844 可创建章节、生成、候选预览与正式阅读，`scrollWidth <= viewport + 1` | 同上 |
-| AT-WF-74 | 既有测试不减少 | 全量单测 **679**（A1-3C 651 + A1-4A 21 + REV-01 7）；浏览器 E2E 67 + A1-4A 10 + REV-01 2 = **79** | 全量 `pnpm test`、`playwright test` |
+| AT-WF-74 | 既有测试不减少 | 全量单测 **685**（A1-3C 651 + A1-4A 21 + REV-01 7 + REV-02 6）；浏览器 E2E 67 + A1-4A 10 + REV-01 2 + REV-02 1 = **80** | 全量 `pnpm test`、`playwright test` |

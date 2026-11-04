@@ -831,6 +831,10 @@ CI 只使用 MockProvider / fake fetch，不联网。
 - **进度**：`currentStep` 显示中文（装配设定 / 规划章节 / 冻结合同 / 写正文 / 校验正文 / 保存候选）；
   只有 `queued / processing` 用「正在…」，终态显示「最后步骤：保存候选」；
   `queued / processing` 显示取消；取消后刷新章节、任务与候选，下一次生成必定换新 `requestId`；
+- **顶部提示**：完全由任务状态推导（`generationNotice`），不再停留在提交那一刻——
+  `queued / processing` 显示「正在等待 Worker 领取…」，已请求取消显示「已请求取消生成」，
+  `succeeded` 显示「生成完成，候选已保存」，`cancelled` 显示「生成任务已取消」，
+  `failed` 不显示提示（失败详情只走红色 `task-error`）；采纳成功后由版本提示覆盖；
 - **候选**：章节详情只返回摘要；点击候选后才请求正文；`pre-wrap` 纯文本渲染；
   结构化计划可折叠查看目标 / 场景 / 必须包含；
 - **采纳**：仅 `candidate` 显示按钮，二次确认；成功显示「已生成正式版本 N」并自动选中
@@ -847,8 +851,9 @@ Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无�
 
 **测试**：A1-4A 新增 31 个（只读 API 7、展示纯函数 10、浏览器 E2E 10、
 workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展示纯函数 6、浏览器 E2E 2）；
-全量单测 **679** 个（web 184 / workflow 180 / worker 63 / shared 15 / db 10 /
-auth 95 / works 132）；浏览器 E2E 合计 **79**。
+**REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；全量单测 **685** 个
+（web 190 / workflow 180 / worker 63 / shared 15 / db 10 / auth 95 / works 132）；
+浏览器 E2E 合计 **80**。
 
 ### 浏览器 E2E（Playwright Chromium）
 
@@ -862,7 +867,7 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖（79 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
+覆盖（80 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
 作品流程 / 账号上限）：
 未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
 刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
@@ -900,7 +905,10 @@ events（`limit=50`）→ 未登记空态 → 登记获得（备注不进 URL/st
 页面与截图不含邮箱 / 口令 / Cookie / 令牌 →
 **REV-01**：取消后用**完全相同参数**重新生成换新 `requestId`（测试替身把任务钉在
 queued/processing，取消接口伪造 `processing + cancelRequestedAt`）、页面只跟踪新任务 →
-作品目标字数 1200 时生成表单默认值收敛为 2500、页面仍显示 1200。
+作品目标字数 1200 时生成表单默认值收敛为 2500、页面仍显示 1200 →
+**REV-02**：提交后显示等待 Worker，轮询成功后换成「生成完成，候选已保存」；
+种子任务覆盖 failed（只有红色错误、无绿条）/ cancelled（生成任务已取消）/
+processing + cancelRequestedAt（已请求取消生成）；刷新已完成任务不再回到等待提示。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

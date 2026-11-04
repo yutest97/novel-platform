@@ -17,12 +17,14 @@ import {
  * 前置：
  * - admin-flow.spec.ts 已创建并改密 `e2e-author`，并写入共享凭据；
  * - 有一个**真实 Worker 进程/容器**连接同一数据库（MODEL_PROVIDER=mock）；
- * - 运行 Playwright 的环境需要 DATABASE_URL（仅用于把第 2 章置为 finalized）。
+ * - 运行 Playwright 的环境需要 DATABASE_URL（把第 2 章置为 finalized；
+ *   REV-02 的终态提示用例会种 failed / cancelled / 已请求取消的任务行）。
  *
  * 覆盖：作品详情入口 → 创建章节 → Mock 生成 → 页面轮询到 succeeded →
  * 候选预览 → 采纳 → 正式版本 1 → 刷新后仍在 → finalized 无生成按钮 →
  * 后端权限断言 → 390×844 移动端 →
- * （REV-01）取消后用相同参数重新生成不复用 requestId → 目标字数默认值收敛。
+ * （REV-01）取消后用相同参数重新生成不复用 requestId → 目标字数默认值收敛 →
+ * （REV-02）生成提示随任务状态变化：等待 → 完成 / 失败不出绿条 / 取消。
  */
 
 const screenshotDir = resolve(process.cwd(), '../../docs/screenshots');
@@ -112,15 +114,20 @@ test('2. 创建章节并打开工作台', async () => {
   await page.screenshot({ path: shot('workbench'), fullPage: true });
 });
 
-test('3. 提交 Mock 生成，页面轮询到 succeeded', async () => {
+test('3. 提交 Mock 生成：先显示等待，成功后等待提示消失', async () => {
   await expect(page.getByTestId('generate-target-words')).toHaveValue('3000');
   await page.getByTestId('generate-submit').click();
 
   // 提交后按钮进入生成中；页面必须自行轮询到终态（Worker 真实领取）
   await expect(page.getByTestId('generate-submit')).toBeDisabled();
+  // queued/processing 才允许出现「等待 Worker」
+  await expect(page.getByTestId('workbench-notice')).toContainText('等待 Worker');
+  await expect(page.getByTestId('workbench-notice')).not.toContainText('生成完成');
+
   await expect(page.getByTestId('task-progress')).toContainText('已完成', { timeout: 90_000 });
   await expect(page.getByTestId('candidate-item')).toHaveCount(1, { timeout: 30_000 });
-  await expect(page.getByTestId('workbench-notice')).toContainText('已提交生成任务');
+  await expect(page.getByTestId('workbench-notice')).toContainText('生成完成，候选已保存');
+  await expect(page.getByTestId('workbench-notice')).not.toContainText('等待 Worker');
   await expectNoCredentials(page);
 });
 
@@ -161,10 +168,13 @@ test('5. 采纳候选，自动展示正式版本 1', async () => {
   await page.screenshot({ path: shot('reading'), fullPage: true });
 });
 
-test('6. 刷新后正式正文仍在', async () => {
+test('6. 刷新后正式正文仍在，且不为已完成任务显示等待提示', async () => {
   await page.reload();
   await expect(page.getByTestId('version-reader')).toBeVisible();
   await expect(page.getByTestId('version-item')).toHaveCount(1);
+  // 已完成任务刷新后只显示完成提示，绝不回到「等待 Worker」
+  await expect(page.getByTestId('workbench-notice')).toContainText('生成完成，候选已保存');
+  await expect(page.getByTestId('workbench-notice')).not.toContainText('等待 Worker');
   await expect(page.getByTestId('version-content')).toContainText('风从演武场', {
     timeout: 20_000,
   });
@@ -288,9 +298,12 @@ test('9. 390×844 移动端：创建章节、生成、候选预览与正式阅�
   await expect(mobile.getByTestId('version-content')).toContainText('风从演武场', {
     timeout: 20_000,
   });
-  await mobile.getByTestId('version-reader').scrollIntoViewIfNeeded();
+  // 已完成任务在移动端同样只显示完成提示
+  await expect(mobile.getByTestId('workbench-notice')).toContainText('生成完成，候选已保存');
+  await expect(mobile.getByTestId('workbench-notice')).not.toContainText('等待 Worker');
   await expectNoCredentials(mobile);
-  await mobile.screenshot({ path: shot('mobile-reading'), fullPage: false });
+  // 整页截图：顶部提示与正文阅读区同时可见，便于核验「没有等待提示」
+  await mobile.screenshot({ path: shot('mobile-reading'), fullPage: true });
 
   const readingMetrics = await mobile.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
@@ -422,6 +435,8 @@ test('11. 取消生成后用相同参数重新生成：不复用 requestId，显
     // 取消：即使返回 processing + cancelRequestedAt，幂等键也必须作废
     await page.getByTestId('task-cancel').click();
     await expect(page.getByTestId('task-progress')).toHaveText('尚未提交生成任务');
+    // 取消后不得继续显示「等待 Worker」（真实接口刷新后该章无任务 → 提示整块消失）
+    await expect(page.getByTestId('workbench-notice')).toHaveCount(0);
     // 取消前的轮询是旧任务，清理后再验证新一轮只跟踪新任务
     polledTaskIds.length = 0;
 
@@ -481,4 +496,101 @@ test('12. 作品目标字数越界时，生成表单默认值收敛到合法区�
   // 页面展示作品原始目标，生成表单用收敛后的合法默认值
   await expect(page.getByTestId('chapter-target-words')).toHaveText('1200');
   await expect(page.getByTestId('generate-target-words')).toHaveValue('2500');
+});
+
+/* -------------------------------------------------------------------------- */
+/* A1-4A-REV-02：生成提示必须与实际任务状态一致                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 终态任务的提示：失败只留红色错误、取消显示已取消、取消请求中显示已请求取消。
+ *
+ * 任务行直接种库：`INSERT` 不走 `generation_tasks_status_transition`（那是 BEFORE UPDATE
+ * 触发器），因此能在 Worker 正在运行的前提下把任务钉在指定终态，不依赖执行时序。
+ */
+test('13. 终态任务不显示等待提示：失败 / 已取消 / 已请求取消', async () => {
+  const databaseUrl = process.env['DATABASE_URL'];
+  if (databaseUrl === undefined || databaseUrl.trim() === '') {
+    throw new Error('本用例需要 DATABASE_URL（用于种终态任务）');
+  }
+  const { createHash } = await import('node:crypto');
+  const { createPrismaClient } = await import('@novel/db');
+  const { createChapter } = await import('@novel/workflow');
+  const db = createPrismaClient({ connectionString: databaseUrl });
+
+  async function seedChapter(
+    authorId: string,
+    chapterNo: number,
+    title: string,
+    task: {
+      readonly status: string;
+      readonly extra?: Record<string, unknown>;
+    },
+  ): Promise<string> {
+    const chapter = await createChapter({ db, authorId, workId, chapterNo, title });
+    const requestId = `e2e-${randomUUID()}`;
+    await db.generationTask.create({
+      data: {
+        workId,
+        chapterId: chapter.id,
+        requestId,
+        inputHash: createHash('sha256').update(`${requestId}:3000`).digest('hex'),
+        taskType: 'chapter.draft',
+        status: task.status,
+        inputSnapshot: { targetWords: 3000 },
+        provider: 'mock',
+        model: 'mock-model',
+        attemptCount: 1,
+        maxAttempts: 3,
+        ...(task.extra as Record<string, never>),
+      },
+    });
+    return chapter.id;
+  }
+
+  try {
+    const work = await db.work.findUniqueOrThrow({
+      where: { id: workId },
+      select: { authorId: true },
+    });
+
+    const failedChapterId = await seedChapter(work.authorId, 5, '第五章 失败', {
+      status: 'failed',
+      extra: {
+        errorCode: 'TASK_MODEL_CONFIG_MISMATCH',
+        errorMessageSanitized: '任务模型配置已变化，请重新提交生成任务',
+      },
+    });
+    const cancelledChapterId = await seedChapter(work.authorId, 6, '第六章 已取消', {
+      status: 'cancelled',
+      extra: { cancelRequestedAt: new Date() },
+    });
+    const cancellingChapterId = await seedChapter(work.authorId, 7, '第七章 取消中', {
+      status: 'processing',
+      extra: {
+        lockedBy: 'e2e-seed',
+        leaseUntil: new Date(Date.now() + 60_000),
+        cancelRequestedAt: new Date(),
+      },
+    });
+
+    // 失败：只有 task-error，没有绿色等待提示
+    await page.goto(`/works/${workId}/chapters/${failedChapterId}`);
+    await expect(page.getByTestId('task-error')).toContainText('TASK_MODEL_CONFIG_MISMATCH');
+    await expect(page.getByTestId('workbench-notice')).toHaveCount(0);
+    expect(await page.locator('body').innerText()).not.toContain('等待 Worker');
+
+    // 已取消
+    await page.goto(`/works/${workId}/chapters/${cancelledChapterId}`);
+    await expect(page.getByTestId('workbench-notice')).toHaveText('生成任务已取消');
+    await expect(page.getByTestId('workbench-notice')).not.toContainText('等待 Worker');
+
+    // processing + cancelRequestedAt：显示已请求取消，仍可等待轮询收敛
+    await page.goto(`/works/${workId}/chapters/${cancellingChapterId}`);
+    await expect(page.getByTestId('workbench-notice')).toHaveText('已请求取消生成');
+    await expect(page.getByTestId('task-cancel')).toBeVisible();
+    await expect(page.getByTestId('workbench-notice')).not.toContainText('等待 Worker');
+  } finally {
+    await db.$disconnect();
+  }
 });

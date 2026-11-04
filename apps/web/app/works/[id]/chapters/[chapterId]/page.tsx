@@ -46,6 +46,7 @@ import {
   chapterStatusLabel,
   clampChapterTargetWords,
   displayPlan,
+  generationNotice,
   isTerminalTaskStatus,
   nextPollDelay,
   shouldPollTask,
@@ -53,6 +54,7 @@ import {
   taskStatusLabel,
   taskStepLabelForStatus,
   versionSourceLabel,
+  type WorkbenchNotice,
 } from '@/lib/chapter-workbench';
 import { handleSessionError } from '@/lib/session-errors';
 import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
@@ -79,7 +81,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [pacing, setPacing] = useState('');
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [adoptionNotice, setAdoptionNotice] = useState('');
 
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState('');
@@ -184,6 +186,9 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
 
   /* ----------------------------- 轮询 ----------------------------- */
   const latestTask = detail?.latestTask ?? null;
+  // 采纳提示优先于生成提示；生成提示完全由任务状态推导，不保留提交时的旧文案。
+  const notice: WorkbenchNotice | null =
+    adoptionNotice === '' ? generationNotice(latestTask) : { text: adoptionNotice, tone: 'ok' };
 
   useEffect(() => {
     if (latestTask === null || !shouldPollTask(latestTask.status)) {
@@ -304,7 +309,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     setGenerating(true);
     setGenerateError('');
     setCancelError('');
-    setNotice('');
+    setAdoptionNotice('');
     try {
       const task = await startChapterGeneration(workId, chapterId, {
         requestId: requestIdRef.current.id,
@@ -313,7 +318,6 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       });
       setDetail((previous) => (previous === null ? previous : { ...previous, latestTask: task }));
       pollDelayRef.current = 1_000;
-      setNotice('已提交生成任务，正在等待 Worker 领取…');
       void refreshSession();
     } catch (caught) {
       if (handleSessionError(caught, router)) {
@@ -384,7 +388,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     try {
       const adopted = await adoptChapterCandidate(workId, chapterId, adoptTargetId);
       setAdoptTargetId(null);
-      setNotice(
+      setAdoptionNotice(
         adopted.deduplicated
           ? `正式版本 ${adopted.versionNo} 已存在`
           : `已生成正式版本 ${adopted.versionNo}`,
@@ -472,9 +476,13 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
         </p>
       ) : null}
 
-      {notice === '' ? null : (
-        <p className="alert alert--ok" role="status" data-testid="workbench-notice">
-          {notice}
+      {notice === null ? null : (
+        <p
+          className={notice.tone === 'ok' ? 'alert alert--ok' : 'alert alert--warn'}
+          role="status"
+          data-testid="workbench-notice"
+        >
+          {notice.text}
         </p>
       )}
 
