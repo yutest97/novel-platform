@@ -38,6 +38,8 @@ export type ApiErrorCode =
   | 'CHAPTER_STATE_INVALID_FOR_ADOPTION'
   // 同一作品内章号重复（A1-3B）
   | 'CHAPTER_NO_TAKEN'
+  // 章节已定稿 / 已废弃，不能再生成候选（A1-3B-REV-01）
+  | 'CHAPTER_STATE_INVALID_FOR_GENERATION'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -71,6 +73,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CHAPTER_VERSION_CONFLICT: '章节版本发生冲突，请刷新后重试',
   CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
   CHAPTER_NO_TAKEN: '该章号已被占用',
+  CHAPTER_STATE_INVALID_FOR_GENERATION: '章节当前状态不允许生成候选',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',

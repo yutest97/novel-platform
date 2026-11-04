@@ -13,8 +13,8 @@ import { AUDIT_ACTIONS } from '@novel/auth';
 import type { PrismaClient } from '@novel/db';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { countWords, normalizePlannerOutput } from '../src/chapter/agents.js';
-import { freezeChapterContract } from '../src/chapter/persistence.js';
+import { countWords, normalizePlannerOutput, prepareDraftText } from '../src/chapter/agents.js';
+import { freezeChapterContract, persistChapterCandidate } from '../src/chapter/persistence.js';
 import type { PlannerOutput } from '../src/chapter/types.js';
 import { CHAPTER_DRAFT_TASK_TYPE } from '../src/chapter/types.js';
 import { createChapterDraftWorkflow } from '../src/chapter/workflow.js';
@@ -671,6 +671,110 @@ describe('合同与候选不可变（数据库触发器）', () => {
     expect(
       (await db.chapterCandidate.findUniqueOrThrow({ where: { id: candidate.id } })).content,
     ).toBe(candidate.content);
+  });
+});
+
+describe('章节关闭（finalized / abandoned）后的竞态保护', () => {
+  it('任务排队后章节被定稿 → Worker failed，合同/候选/版本均为 0', async () => {
+    const fixture = await newFixture();
+    const { provider } = createChapterProvider(
+      {},
+      { plan: defaultPlannerOutput(fixture), text: longDraft() },
+    );
+    const { task } = await createTask(fixture);
+    await db.chapter.update({
+      where: { id: fixture.chapterId },
+      data: { status: 'finalized' },
+    });
+
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('failed');
+
+    const row = await taskRow(task.id);
+    expect(row.errorCode).toBe('TASK_INPUT_INVALID');
+    expect(await db.chapterContract.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect(await db.chapterVersion.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect((await chapterRow(fixture.chapterId)).status).toBe('finalized');
+  });
+
+  it('任务排队后章节被废弃 → 同样禁止写入', async () => {
+    const fixture = await newFixture();
+    const { provider } = createChapterProvider(
+      {},
+      { plan: defaultPlannerOutput(fixture), text: longDraft() },
+    );
+    const { task } = await createTask(fixture);
+    await db.chapter.update({
+      where: { id: fixture.chapterId },
+      data: { status: 'abandoned' },
+    });
+
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('failed');
+
+    expect((await taskRow(task.id)).errorCode).toBe('TASK_INPUT_INVALID');
+    expect(await db.chapterContract.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect((await chapterRow(fixture.chapterId)).status).toBe('abandoned');
+  });
+
+  it('context 之后、候选之前被定稿 → 持久化失败且无候选', async () => {
+    const fixture = await newFixture();
+    const { task } = await createTask(fixture);
+    const claimed = await claimNextTask(db, { workerId: 'chapter-worker', leaseMs: 5_000 });
+    expect(claimed?.id).toBe(task.id);
+
+    const plan = normalizePlannerOutput(defaultPlannerOutput(fixture) as unknown as PlannerOutput, {
+      allowedCharacters: fixture.characters.map((entity) => entity.name),
+      targetWords: 3000,
+    });
+    const fence = {
+      taskId: task.id,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      workerId: 'chapter-worker',
+      authorId: fixture.authorId,
+    };
+
+    // 合同冻结成功（章节 → outlined），随后章节被定稿
+    const contract = await freezeChapterContract({ db, fence, plan });
+    expect((await chapterRow(fixture.chapterId)).status).toBe('outlined');
+    await db.chapter.update({
+      where: { id: fixture.chapterId },
+      data: { status: 'finalized' },
+    });
+
+    await expect(
+      persistChapterCandidate({
+        db,
+        fence,
+        contract,
+        draft: prepareDraftText(longDraft()),
+        plan,
+      }),
+    ).rejects.toMatchObject({ code: 'TASK_INPUT_INVALID' });
+
+    expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect(await db.chapterVersion.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    // 合同是冻结后、定稿前写入的，保留；章节状态不允许被回退
+    expect((await chapterRow(fixture.chapterId)).status).toBe('finalized');
+  });
+
+  it('其它允许状态（drafting / in_review）不受影响，仍可生成', async () => {
+    for (const status of ['drafting', 'in_review'] as const) {
+      const fixture = await newFixture();
+      await db.chapter.update({ where: { id: fixture.chapterId }, data: { status } });
+      const { provider } = createChapterProvider(
+        {},
+        { plan: defaultPlannerOutput(fixture), text: longDraft() },
+      );
+      const { task } = await createTask(fixture);
+
+      await expect(runnerFor(provider).runOnce()).resolves.toBe('succeeded');
+
+      expect((await taskRow(task.id)).errorCode).toBeNull();
+      expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(1);
+      expect((await chapterRow(fixture.chapterId)).status).toBe('in_review');
+    }
   });
 });
 

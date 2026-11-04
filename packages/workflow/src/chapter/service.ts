@@ -21,7 +21,7 @@ import {
 } from '@novel/works';
 
 import { createGenerationTask, toGenerationTaskView, type GenerationTaskView } from '../queue.js';
-import { CHAPTER_DRAFT_TASK_TYPE, type ChapterStyle } from './types.js';
+import { CHAPTER_DRAFT_TASK_TYPE, isChapterOpenForGeneration, type ChapterStyle } from './types.js';
 
 /** 章节标题上限（与数据库 CHECK 一致）。 */
 export const MAX_CHAPTER_TITLE_LENGTH = 200;
@@ -334,12 +334,30 @@ export interface StartChapterDraftInput {
  *
  * - `input_snapshot` 只含 `targetWords` / `style`；
  * - provider / model 由调用方从**服务端配置**解析后传入，请求体永远不参与；
+ * - **状态闸门**：`finalized / abandoned` 章节直接 409，不建任务、不写审计；
+ *   Worker 侧还有第二道检查，覆盖"排队期间被定稿"的竞态；
  * - 同一 `(workId, requestId)` 同内容返回既有任务（`created=false`），
  *   不同内容由 `createGenerationTask` 返回 `TASK_REQUEST_CONFLICT`。
  */
 export async function startChapterDraft(
   input: StartChapterDraftInput,
 ): Promise<{ readonly task: ChapterTaskSummaryView; readonly created: boolean }> {
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const chapterId = normalizeUuid(input.chapterId, '章节 id');
+
+  // 先校验作品归属：非作者不能通过状态码探测他人章节是否存在。
+  await requireOwnedWork(input.db, workId, input.authorId);
+  const chapter = await input.db.chapter.findFirst({
+    where: { id: chapterId, workId },
+    select: { status: true },
+  });
+  if (chapter === null) {
+    throw new AuthError('NOT_FOUND', '章节不存在');
+  }
+  if (!isChapterOpenForGeneration(chapter.status)) {
+    throw new AuthError('CHAPTER_STATE_INVALID_FOR_GENERATION');
+  }
+
   const snapshot: { targetWords?: number; style?: Partial<ChapterStyle> } = {};
   if (input.targetWords !== undefined) {
     snapshot.targetWords = input.targetWords;
@@ -350,8 +368,8 @@ export async function startChapterDraft(
 
   const { task, created } = await createGenerationTask(input.db, {
     authorId: input.authorId,
-    workId: input.workId,
-    chapterId: input.chapterId,
+    workId,
+    chapterId,
     requestId: input.requestId,
     taskType: CHAPTER_DRAFT_TASK_TYPE,
     inputSnapshot: snapshot,

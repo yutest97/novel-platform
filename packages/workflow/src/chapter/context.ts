@@ -16,6 +16,7 @@ import { parseRuleFieldSchema, type FieldDefinition, type FieldGroup } from '@no
 import { NonRetryableTaskError } from '../errors.js';
 import { MAX_CONTEXT_SNIPPET_CHARS } from '../queue.js';
 import {
+  isChapterOpenForGeneration,
   MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,
   MIN_CONTRACT_TARGET_WORDS,
@@ -163,10 +164,15 @@ export async function buildChapterDraftContext(
 
   const chapter = await db.chapter.findFirst({
     where: { id: input.chapterId, workId: work.id },
-    select: { id: true, chapterNo: true, title: true },
+    select: { id: true, chapterNo: true, title: true, status: true },
   });
   if (chapter === null) {
     notFound('章节不存在');
+  }
+  // 章节可能在任务排队期间被定稿 / 废弃：这是不可重试的输入问题，
+  // 直接失败，不写合同、不写候选（不为已关闭章节自动重开）。
+  if (!isChapterOpenForGeneration(chapter.status)) {
+    throw new NonRetryableTaskError('TASK_INPUT_INVALID', '章节已定稿或已废弃，不能继续生成');
   }
 
   const rulePackage = await db.rulePackage.findUnique({
@@ -295,6 +301,7 @@ export async function buildChapterDraftContext(
       id: chapter.id,
       chapterNo: chapter.chapterNo,
       title: chapter.title,
+      status: chapter.status,
     },
     style,
     targetWords,

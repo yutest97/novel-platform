@@ -14,7 +14,13 @@ import type { Prisma, PrismaClient } from '@novel/db';
 import { runWorkWrite } from '@novel/works';
 
 import { NonRetryableTaskError, TaskLeaseLostError } from '../errors.js';
-import type { FrozenContract, PlannerOutput, PlannerScene, ValidatedDraft } from './types.js';
+import {
+  isChapterOpenForGeneration,
+  type FrozenContract,
+  type PlannerOutput,
+  type PlannerScene,
+  type ValidatedDraft,
+} from './types.js';
 
 /** 写入步骤的归属信息（全部来自当前任务，不接受请求体）。 */
 export interface TaskFence {
@@ -139,6 +145,10 @@ async function assertTaskFence(tx: Prisma.TransactionClient, fence: TaskFence): 
 /**
  * 章节状态迁移（只允许从白名单状态升级，不降级）。
  *
+ * 两条硬约束：
+ * - 章节已 `finalized / abandoned` → **抛错**，绝不静默返回后继续写合同或候选；
+ * - 其余情况下，若当前状态已在目标之后（例如已是 `in_review`），保持原状不降级。
+ *
  * 状态真正变化时写一条 `chapter.status_changed` 审计。
  */
 async function ensureChapterStatus(
@@ -156,6 +166,11 @@ async function ensureChapterStatus(
   const row = rows[0];
   if (row === undefined) {
     throw new NonRetryableTaskError('TASK_INPUT_INVALID', '章节不存在');
+  }
+  // 章节在任务执行期间被定稿 / 废弃：停止写入，让任务落到 failed。
+  // 注意不能走下面的"保持原状"分支 —— 那会静默写合同 / 候选。
+  if (!isChapterOpenForGeneration(row.status)) {
+    throw new NonRetryableTaskError('TASK_INPUT_INVALID', '章节已定稿或已废弃，不能继续生成');
   }
   if (row.status === to || !allowedFrom.includes(row.status)) {
     return;

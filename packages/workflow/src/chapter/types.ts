@@ -22,6 +22,29 @@ export const MAX_DRAFT_CHARS = 200_000;
 /** 单类上下文实体（人物 / 境界 / 势力）最多进入 Agent 的条数。 */
 export const MAX_CONTEXT_ENTITIES_PER_TYPE = 50;
 
+/**
+ * 允许生成候选的章节状态。
+ *
+ * 与采纳共用同一组"开放"状态：`finalized / abandoned` 是关闭态，
+ * 既不能再生成，也不能再采纳（不为已定稿章节自动重开）。
+ */
+export const GENERATION_CHAPTER_STATUSES = [
+  'planned',
+  'outlined',
+  'drafting',
+  'in_review',
+] as const;
+
+/**
+ * 章节是否允许生成候选。
+ *
+ * 用"白名单"而不是"黑名单"：将来新增状态时默认拒绝，
+ * 不会因为忘记更新判断而让已关闭的章节继续生成。
+ */
+export function isChapterOpenForGeneration(status: string): boolean {
+  return (GENERATION_CHAPTER_STATUSES as readonly string[]).includes(status);
+}
+
 /** 写作风格参数（由任务输入覆盖，缺省从作品方向推导）。 */
 export interface ChapterStyle {
   readonly tone: string;
@@ -67,6 +90,8 @@ export interface ChapterDraftContext {
     readonly id: string;
     readonly chapterNo: number;
     readonly title: string;
+    /** 读取时的章节状态（已校验为可生成）。 */
+    readonly status: string;
   };
   readonly style: ChapterStyle;
   readonly targetWords: number;

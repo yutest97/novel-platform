@@ -706,10 +706,15 @@ runWorkWrite（作品级 advisory lock）
 - 采纳直接调用 `adoptChapterCandidate`，响应只有版本摘要（不含正文）；
 - 章号重复 `409 CHAPTER_NO_TAKEN`；章节 `finalized / abandoned` 采纳
   `409 CHAPTER_STATE_INVALID_FOR_ADOPTION`；
+- **章节状态边界（生成 / 采纳统一）**：`finalized / abandoned` 章节提交生成
+  → `409 CHAPTER_STATE_INVALID_FOR_GENERATION`（不建任务、不写审计）；
+  Worker 执行时再校验一次（`TASK_INPUT_INVALID`，不可重试），
+  覆盖"排队期间被定稿"的竞态；不会为已定稿章节自动重开；
 - 前端只新增 `apps/web/src/lib/api.ts` 的类型与客户端函数，**没有页面**。
 
-**测试**：A1-3B 新增 18 个（`test/chapter-api.test.ts`）；web 包 **154** 个；
-全量单测 **576** 个。
+**测试**：A1-3B 系列（含 REV-01）新增 24 个（`test/chapter-api.test.ts` 20 /
+`test/chapter-workflow.test.ts` +4）；web 包 **156** 个、workflow 包 **172** 个；
+全量单测 **582** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 

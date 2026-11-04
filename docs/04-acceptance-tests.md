@@ -538,4 +538,6 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-55 | 采纳 | 201 + `versionNo=1` / `chapterStatus=in_review` / `deduplicated=false`，响应不含正文；重复采纳 200 + `deduplicated=true`，版本仍 1 条 | 同上 |
 | AT-WF-56 | 采纳边界 | `finalized` 章节 → 409 `CHAPTER_STATE_INVALID_FOR_ADOPTION`；跨作品候选 → 404；缺 Origin → 403；未知字段 → 400 | 同上 |
 | AT-WF-57 | 响应脱敏 | 任务 / 候选 / 采纳响应不含 `inputSnapshot`、`requestId`、API Key 或正文错误细节 | 同上 |
-| AT-WF-58 | 既有测试不减少 | 既有 558 个测试全绿；A1-3B 新增 18 个（web 154） | 全量 `pnpm test` |
+| AT-WF-59 | 生成入口状态闸门（A1-3B-REV-01） | `finalized` / `abandoned` 章节提交生成 → 409 `CHAPTER_STATE_INVALID_FOR_GENERATION`，任务数与审计数均不变；`planned/outlined/drafting/in_review` 均可创建任务 | `test/chapter-api.test.ts` |
+| AT-WF-60 | Worker 侧竞态保护（A1-3B-REV-01） | 任务排队后章节被 `finalized` / `abandoned` → Worker `failed`（`TASK_INPUT_INVALID`），合同 / 候选 / 正式版本均 0；合同冻结后、候选写入前被定稿 → 持久化抛错、无候选；`drafting / in_review` 不受影响 | `test/chapter-workflow.test.ts` |
+| AT-WF-58 | 既有测试不减少 | 既有 576 个测试全绿；A1-3B-REV-01 新增 6 个（workflow 172 / web 156） | 全量 `pnpm test` |

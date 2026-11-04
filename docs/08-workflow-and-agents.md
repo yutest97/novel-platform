@@ -554,6 +554,26 @@ HTTP 层只做四件事：**会话与 Origin 校验 → 请求体白名单 → �
 `cancelGenerationTask` / `fetchChapterCandidate` / `adoptChapterCandidate` 函数。
 本轮**没有页面**：客户端函数只被测试与后续 A1-4 的工作台使用。
 
+### 14.6 章节状态边界（生成与采纳统一）
+
+| 章节状态 | 提交生成任务 | Worker 执行 | 采纳候选 |
+| --- | --- | --- | --- |
+| `planned / outlined / drafting / in_review` | ✅ 201 | ✅ 正常推进 | ✅（推进到 `in_review`） |
+| `finalized / abandoned` | ❌ 409 `CHAPTER_STATE_INVALID_FOR_GENERATION` | ❌ 不可重试 `TASK_INPUT_INVALID` | ❌ 409 `CHAPTER_STATE_INVALID_FOR_ADOPTION` |
+
+- **入口闸门**：`startChapterDraft` 先校验作品归属，再读章节状态；
+  关闭态直接 409，**不建 `generation_task`、不写审计**；
+- **Worker 第二道闸门**（覆盖"排队期间被定稿"的竞态）：
+  - `buildChapterDraftContext` 读到关闭态 → 抛 `TASK_INPUT_INVALID`（不可重试），
+    任务 `failed`，不冻结合同；
+  - `ensureChapterStatus` 不再"静默保持原状"：读到关闭态直接抛错，
+    防止合同冻结 / 候选写入越过定稿；
+- **不自动重开**：已定稿章节不会因为生成请求被改回开放态；重新打开属于后续功能；
+- 采纳沿用 A1-3A 自身的检查（`ADOPTABLE_CHAPTER_STATUSES`），
+  与生成使用同一组开放状态，但错误码保持独立；
+- 允许状态在生成过程中不受影响：`drafting / in_review` 直接进入流程，
+  终态仍是 `in_review`。
+
 ---
 
 ## 15. A1-4 预告（不在本轮）

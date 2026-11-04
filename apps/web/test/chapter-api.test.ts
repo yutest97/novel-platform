@@ -497,6 +497,55 @@ describe('生成任务', () => {
     expect(await db.generationTask.count({ where: { chapterId: chapter.id } })).toBe(0);
   });
 
+  it('finalized / abandoned 章节不能提交生成：409、不建任务、不写审计', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const chapter = await createChapter(workId, author.token);
+
+    for (const status of ['finalized', 'abandoned'] as const) {
+      await db.chapter.update({ where: { id: chapter.id }, data: { status } });
+      const tasksBefore = await db.generationTask.count({ where: { chapterId: chapter.id } });
+      const auditsBefore = await db.auditLog.count();
+
+      const response = await generatePost(
+        request(`/api/works/${workId}/chapters/${chapter.id}/generate`, {
+          method: 'POST',
+          body: { requestId: `req-${randomUUID()}` },
+          token: author.token,
+        }),
+        chapterParams(workId, chapter.id),
+      );
+
+      expect(response.status, status).toBe(409);
+      expect((await response.json()) as unknown).toMatchObject({
+        error: { code: 'CHAPTER_STATE_INVALID_FOR_GENERATION' },
+      });
+      expect(await db.generationTask.count({ where: { chapterId: chapter.id } })).toBe(tasksBefore);
+      expect(await db.auditLog.count()).toBe(auditsBefore);
+    }
+
+    expect(await db.generationTask.count({ where: { chapterId: chapter.id } })).toBe(0);
+  });
+
+  it('planned / outlined / drafting / in_review 均可创建生成任务', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    let chapterNo = 1;
+
+    for (const status of ['planned', 'outlined', 'drafting', 'in_review'] as const) {
+      const chapter = await createChapter(workId, author.token, chapterNo);
+      chapterNo += 1;
+      await db.chapter.update({ where: { id: chapter.id }, data: { status } });
+
+      const { task, status: httpStatus } = await startTask(workId, chapter.id, author.token, {
+        requestId: `req-${randomUUID()}`,
+      });
+      expect(httpStatus, status).toBe(201);
+      expect(task['status'], status).toBe('queued');
+      expect(task['chapterId']).toBe(chapter.id);
+    }
+  });
+
   it('同 requestId 同输入 → 返回同一任务（200）；异输入 → 409 TASK_REQUEST_CONFLICT', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);
