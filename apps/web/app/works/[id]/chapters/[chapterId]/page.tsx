@@ -1,18 +1,21 @@
 'use client';
 
 /**
- * 章节工作台（A1-4A）。
+ * 章节工作台（A1-4A / A1-4B-B）。
  *
- * 作者在这里完成：提交生成 → 查看进度/取消 → 预览候选 → 采纳 → 阅读正式正文。
+ * 作者在这里完成：提交生成 → 查看进度/取消 → 预览候选 → 采纳 → 阅读正式正文
+ * → 手工编辑 Markdown 并保存为新的 human 版本。
  *
  * 边界：
- * - 只读正文用 `pre-wrap` 纯文本渲染，不使用 `dangerouslySetInnerHTML`；
+ * - 只读正文用 `pre-wrap` 纯文本渲染，Markdown 编辑器是 textarea，
+ *   全程不使用 `dangerouslySetInnerHTML`，不渲染任何用户输入的 HTML；
  * - 候选正文只在点击某个候选后才请求，避免一次加载所有长文；
  * - requestId 只存在组件内存（useRef），同一内容重复点击复用同一个 id；
  *   任务进入终态或**取消成功**后立即作废，下一次生成必定换新 id；
- * - 目标字数默认值收敛到 2500..4000（页面仍显示作品原始目标）；
- * - 轮询只针对 queued/processing；页面隐藏时暂停，重新可见立即刷新一次；
- * - 不提供人工编辑、human 版本、diff 或版本恢复（A1-4B 起再评估）。
+ * - 编辑草稿只存在组件内存：不写 URL / localStorage / sessionStorage，
+ *   有未保存修改时取消需二次确认，离开页面有 beforeunload 提示；
+ * - 只允许编辑**最新**正式版本：旧版本只读，不能把旧版本 id 当作 baseVersionId；
+ * - 仍不提供版本 diff 与历史版本恢复（A1-4B-C）。
  */
 
 import Link from 'next/link';
@@ -32,6 +35,7 @@ import {
   fetchWork,
   formatDateTime,
   messageOf,
+  saveHumanChapterVersion,
   startChapterGeneration,
   type ChapterCandidateDetail,
   type ChapterDetail,
@@ -56,6 +60,16 @@ import {
   versionSourceLabel,
   type WorkbenchNotice,
 } from '@/lib/chapter-workbench';
+import {
+  MAX_HUMAN_CONTENT_CHARS,
+  canEditSelectedVersion,
+  draftMetrics,
+  editorErrorNotice,
+  editorMetricsLabel,
+  editorTarget,
+  isDraftDirty,
+  type EditorErrorNotice,
+} from '@/lib/chapter-editor';
 import { handleSessionError } from '@/lib/session-errors';
 import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
 
@@ -93,6 +107,18 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [adoptTargetId, setAdoptTargetId] = useState<string | null>(null);
   const [adopting, setAdopting] = useState(false);
   const [adoptError, setAdoptError] = useState('');
+
+  // 人工编辑器（A1-4B-B）：草稿只存在组件内存，不写 URL / localStorage / sessionStorage。
+  const [editor, setEditor] = useState<{
+    readonly baseVersionId: string | null;
+    readonly baseline: string;
+    readonly versionNo: number | null;
+  } | null>(null);
+  const [draft, setDraft] = useState('');
+  const [savingVersion, setSavingVersion] = useState(false);
+  const [editorError, setEditorError] = useState<EditorErrorNotice | null>(null);
+  const [closingEditor, setClosingEditor] = useState(false);
+  const [reloadingLatest, setReloadingLatest] = useState(false);
 
   const targetInitialized = useRef(false);
   const selectedVersionIdRef = useRef<string | null>(null);
@@ -273,6 +299,140 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     };
   }, [latestTask?.id, latestTask?.status, workId, router, refreshDetailAndVersions]);
 
+  /* ----------------------------- 人工编辑 ----------------------------- */
+  const draftDirty = editor !== null && isDraftDirty(draft, editor.baseline);
+
+  // 有未保存修改时离开页面要提示；草稿本身不落任何存储，刷新即丢失。
+  useEffect(() => {
+    if (!draftDirty) {
+      return;
+    }
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      event.preventDefault();
+      // 现代浏览器忽略自定义文案，但仍需要 returnValue 才会弹确认。
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [draftDirty]);
+
+  const openEditor = useCallback(async (): Promise<void> => {
+    const target = editorTarget(versions);
+    setEditorError(null);
+    if (target.mode === 'first') {
+      setEditor({ baseVersionId: null, baseline: '', versionNo: null });
+      setDraft('');
+      return;
+    }
+    const latestId = target.baseVersionId;
+    if (latestId === null) {
+      return;
+    }
+    try {
+      // 已经打开过最新版本时直接复用，避免重复拉长文。
+      const version =
+        selectedVersion?.id === latestId
+          ? selectedVersion
+          : await fetchChapterVersion(workId, chapterId, latestId);
+      setSelectedVersion(version);
+      selectedVersionIdRef.current = version.id;
+      setEditor({
+        baseVersionId: latestId,
+        baseline: version.content,
+        versionNo: version.versionNo,
+      });
+      setDraft(version.content);
+    } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      setLoadError(messageOf(caught));
+    }
+  }, [versions, selectedVersion, workId, chapterId, router]);
+
+  function requestCloseEditor(): void {
+    if (savingVersion) {
+      return;
+    }
+    if (editor !== null && isDraftDirty(draft, editor.baseline)) {
+      setClosingEditor(true);
+      return;
+    }
+    setEditor(null);
+    setDraft('');
+    setEditorError(null);
+  }
+
+  async function handleSaveDraft(): Promise<void> {
+    if (editor === null || savingVersion) {
+      return;
+    }
+    // 客户端只做预览校验；字数与正文合法性以服务端为准。
+    if (!draftMetrics(draft).canSave) {
+      setEditorError({ text: '章节正文不合法，请检查字数和内容', reloadable: false });
+      return;
+    }
+    setSavingVersion(true);
+    setEditorError(null);
+    try {
+      const saved = await saveHumanChapterVersion(workId, chapterId, {
+        content: draft,
+        baseVersionId: editor.baseVersionId,
+      });
+      setEditor(null);
+      setDraft('');
+      setClosingEditor(false);
+      setAdoptionNotice(`已保存正式版本 ${saved.versionNo}`);
+      await refreshDetailAndVersions({ selectLatest: true });
+      void refreshSession();
+    } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      // 失败保留草稿：作者写下的内容不能因为一次冲突就丢掉。
+      const code = caught instanceof ApiError ? caught.code : '';
+      setEditorError(editorErrorNotice(code, messageOf(caught)));
+    } finally {
+      setSavingVersion(false);
+    }
+  }
+
+  /** 基线冲突后重新载入最新版本（草稿被替换，需作者确认后手动再改）。 */
+  async function handleReloadLatest(): Promise<void> {
+    if (reloadingLatest || savingVersion) {
+      return;
+    }
+    setReloadingLatest(true);
+    try {
+      const nextVersions = await fetchChapterVersions(workId, chapterId);
+      setVersions(nextVersions);
+      const target = editorTarget(nextVersions);
+      if (target.mode === 'first' || target.baseVersionId === null) {
+        setEditor({ baseVersionId: null, baseline: '', versionNo: null });
+        setDraft('');
+        setEditorError(null);
+        return;
+      }
+      const version = await fetchChapterVersion(workId, chapterId, target.baseVersionId);
+      setSelectedVersion(version);
+      selectedVersionIdRef.current = version.id;
+      setEditor({
+        baseVersionId: version.id,
+        baseline: version.content,
+        versionNo: version.versionNo,
+      });
+      setDraft(version.content);
+      setEditorError(null);
+    } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      setEditorError({ text: messageOf(caught), reloadable: true });
+    } finally {
+      setReloadingLatest(false);
+    }
+  }
+
   /* ----------------------------- 生成 ----------------------------- */
   async function handleGenerate(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -428,6 +588,10 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const plan = selectedCandidate === null ? null : displayPlan(selectedCandidate.structuredPlan);
   const adoptCandidate =
     detail?.candidates.find((candidate) => candidate.id === adoptTargetId) ?? null;
+  const latestVersion = versions[0] ?? null;
+  const editorMetrics = draftMetrics(draft);
+  const canEditCurrentVersion = canEditSelectedVersion(selectedVersion?.id ?? null, versions);
+  const editingVersionNo = editor?.versionNo ?? null;
 
   return (
     <main className="page">
@@ -731,10 +895,31 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
           )}
 
           <div className="card">
-            <h2>正式版本</h2>
+            <div className="status-row">
+              <h2>正式版本</h2>
+              {editor !== null ? null : versions.length === 0 ? (
+                <button
+                  type="button"
+                  className="btn-secondary btn-small"
+                  onClick={() => void openEditor()}
+                  data-testid="editor-open"
+                >
+                  手动创建第一版
+                </button>
+              ) : canEditCurrentVersion ? (
+                <button
+                  type="button"
+                  className="btn-secondary btn-small"
+                  onClick={() => void openEditor()}
+                  data-testid="editor-open"
+                >
+                  编辑最新版本（版本 {latestVersion?.versionNo ?? ''}）
+                </button>
+              ) : null}
+            </div>
             {versions.length === 0 ? (
               <p className="hint" data-testid="versions-empty">
-                还没有正式版本。采纳候选后会生成版本 1。
+                还没有正式版本。采纳候选后会生成版本 1，也可以手动创建第一版。
               </p>
             ) : (
               <ul className="version-list" data-testid="version-list">
@@ -748,6 +933,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                           : 'version-item'
                       }
                       onClick={() => void openVersion(version.id)}
+                      disabled={editor !== null}
                       data-testid="version-item"
                     >
                       <span>版本 {version.versionNo}</span>
@@ -760,6 +946,25 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                 ))}
               </ul>
             )}
+
+            {versions.length > 0 && !canEditCurrentVersion && editor === null ? (
+              <p className="hint" data-testid="version-readonly-hint">
+                历史版本只读，请先选择最新版本再编辑。
+                <button
+                  type="button"
+                  className="btn-secondary btn-small"
+                  onClick={() => {
+                    const latest = versions[0];
+                    if (latest !== undefined) {
+                      void openVersion(latest.id);
+                    }
+                  }}
+                  data-testid="version-select-latest"
+                >
+                  选择最新版本
+                </button>
+              </p>
+            ) : null}
 
             {selectedVersion === null ? null : (
               <div data-testid="version-reader">
@@ -782,10 +987,84 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                     {selectedVersion.content}
                   </pre>
                 )}
-                <p className="hint">人工编辑将在下一阶段开放。</p>
               </div>
             )}
           </div>
+
+          {editor === null ? null : (
+            <div className="card" data-testid="chapter-editor">
+              <div className="status-row">
+                <h2>
+                  {editingVersionNo === null
+                    ? '手动创建第一版'
+                    : `编辑版本 ${editingVersionNo}（将保存为新版本）`}
+                </h2>
+                <span className="badge" data-testid="editor-dirty">
+                  {draftDirty ? '有未保存修改' : '无修改'}
+                </span>
+              </div>
+              <p className="hint" data-testid="editor-metrics">
+                {editorMetricsLabel(editorMetrics)}
+              </p>
+              <textarea
+                className="editor-textarea"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+                    event.preventDefault();
+                    void handleSaveDraft();
+                  }
+                }}
+                disabled={savingVersion}
+                maxLength={MAX_HUMAN_CONTENT_CHARS + 1}
+                spellCheck={false}
+                aria-label="章节正文（Markdown 纯文本）"
+                data-testid="editor-textarea"
+              />
+              <p className="hint">
+                纯文本 Markdown：换行与符号按原样保存，不会渲染 HTML。草稿只存在于本页内存，
+                刷新或取消后丢失。
+              </p>
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => void handleSaveDraft()}
+                  disabled={savingVersion}
+                  aria-busy={savingVersion}
+                  data-testid="editor-save"
+                >
+                  {savingVersion ? '保存中…' : '保存为新的正式版本'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={requestCloseEditor}
+                  disabled={savingVersion}
+                  data-testid="editor-cancel"
+                >
+                  取消
+                </button>
+                {editorError?.reloadable === true ? (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void handleReloadLatest()}
+                    disabled={savingVersion || reloadingLatest}
+                    data-testid="editor-reload"
+                  >
+                    {reloadingLatest ? '载入中…' : '载入最新版本'}
+                  </button>
+                ) : null}
+              </div>
+              {editorError === null ? null : (
+                <p className="alert alert--error" role="alert" data-testid="editor-error">
+                  {editorError.text}
+                </p>
+              )}
+            </div>
+          )}
         </>
       )}
 
@@ -803,6 +1082,23 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
           }}
         />
       )}
+
+      {closingEditor && editor !== null ? (
+        <ConfirmDialog
+          title="放弃未保存的修改"
+          message="当前正文还没有保存，取消后草稿会丢失。确认放弃？"
+          confirmLabel="放弃修改"
+          danger
+          busy={savingVersion}
+          onConfirm={() => {
+            setClosingEditor(false);
+            setEditor(null);
+            setDraft('');
+            setEditorError(null);
+          }}
+          onCancel={() => setClosingEditor(false)}
+        />
+      ) : null}
     </main>
   );
 }

@@ -32,6 +32,11 @@ import {
 
 const screenshotDir = resolve(process.cwd(), '../../docs/screenshots');
 const shot = (name: string): string => resolve(screenshotDir, `a1_4a-${name}.png`);
+/** A1-4B-B 人工编辑器截图（与 A1-4A 区分前缀）。 */
+const shot4b = (name: string): string => resolve(screenshotDir, `a1_4b-${name}.png`);
+
+/** Ctrl+S / Cmd+S（按运行平台选择修饰键）。 */
+const SAVE_SHORTCUT = process.platform === 'darwin' ? 'Meta+s' : 'Control+s';
 
 const WORK_TITLE = `章节工作台-${randomUUID().slice(0, 8)}`;
 
@@ -620,4 +625,258 @@ test('13. 终态任务不显示等待提示：失败 / 已取消 / 已请求取�
   } finally {
     await db.$disconnect();
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* A1-4B-B：Markdown 人工编辑器与 human 版本保存                               */
+/* -------------------------------------------------------------------------- */
+
+/** 生成一段满足 1200 非空白字符下限的正文。 */
+function longDraft(marker: string): string {
+  return `${marker}\n\n${'雨落在青瓦上，他数着更声。'.repeat(120)}`;
+}
+
+/** 断言当前页面没有进入任何浏览器存储（草稿 / 正文不得落地）。 */
+async function expectNothingStored(target: Page, needle: string): Promise<void> {
+  const stored = await target.evaluate(() =>
+    JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }),
+  );
+  expect(stored).not.toContain(needle);
+  expect(target.url()).not.toContain(needle);
+}
+
+test('14. 编辑版本 1 并用 Ctrl/Cmd+S 保存为人工版本 2', async () => {
+  await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(page.getByTestId('version-content')).toContainText('风从演武场', {
+    timeout: 20_000,
+  });
+  await expect(page.getByTestId('version-source')).toHaveText('AI');
+
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  await expect(textarea).toBeVisible();
+
+  // pre-fill 当前最新正式正文
+  const original = await textarea.inputValue();
+  expect(original.length).toBeGreaterThanOrEqual(1200);
+  expect(original).toContain('风从演武场');
+
+  const edited = `${original}\n\n（人工修订）他把剑收回鞘中，转身走进雨里。${'雨声压在檐上。'.repeat(80)}`;
+  await textarea.fill(edited);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+  await expect(page.getByTestId('editor-metrics')).toContainText('非空白字符');
+  await expect(page.getByTestId('editor-metrics')).toContainText('已达可保存下限');
+  await expectNoCredentials(page);
+  await page.getByTestId('chapter-editor').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: shot4b('editor-desktop'), fullPage: true });
+
+  // Ctrl/Cmd+S 保存（阻止浏览器默认行为）
+  await textarea.focus();
+  await page.keyboard.press(SAVE_SHORTCUT);
+
+  await expect(page.getByTestId('workbench-notice')).toContainText('已保存正式版本 2');
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+  await expect(page.getByTestId('version-item')).toHaveCount(2);
+  // 最新版本自动选中，来源显示「人工」
+  await expect(page.getByTestId('version-source')).toHaveText('人工');
+  await expect(page.getByTestId('version-content')).toContainText('人工修订');
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  await expectNoCredentials(page);
+  await page.screenshot({ path: shot4b('human-version'), fullPage: true });
+});
+
+test('15. 刷新后版本 2 仍在；版本 1 只读且正文未变', async () => {
+  await page.reload();
+  await expect(page.getByTestId('version-item')).toHaveCount(2);
+  await expect(page.getByTestId('version-source')).toHaveText('人工');
+  await expect(page.getByTestId('version-content')).toContainText('人工修订');
+
+  // 切到版本 1：旧内容原样保留（append-only），且不提供可保存编辑器
+  await page.getByTestId('version-item').nth(1).click();
+  await expect(page.getByTestId('version-source')).toHaveText('AI');
+  const v1 = await page.getByTestId('version-content').innerText();
+  expect(v1).toContain('风从演武场');
+  expect(v1).not.toContain('人工修订');
+  await expect(page.getByTestId('version-readonly-hint')).toContainText('历史版本只读');
+  await expect(page.getByTestId('editor-open')).toHaveCount(0);
+
+  // 选择最新版本后可再次编辑
+  await page.getByTestId('version-select-latest').click();
+  await expect(page.getByTestId('editor-open')).toContainText('编辑最新版本（版本 2）');
+  await expectNoCredentials(page);
+});
+
+test('16. 未保存草稿点击取消需要二次确认，且草稿不落存储', async () => {
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  const typed = `${original}\n未保存的修改`;
+  await textarea.fill(typed);
+
+  await page.getByTestId('editor-cancel').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('放弃未保存的修改');
+
+  // 先不放弃：草稿仍在
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(page.getByTestId('editor-textarea')).toHaveValue(typed);
+
+  // 再放弃：编辑器关闭
+  await page.getByTestId('editor-cancel').click();
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+
+  await expectNothingStored(page, '未保存的修改');
+  const body = await page.locator('body').innerText();
+  expect(body).not.toContain(ADMIN_EMAIL);
+});
+
+test('17. 正文过短保存失败：稳定错误文案且草稿保留', async () => {
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  await textarea.fill('太短了。');
+  await expect(page.getByTestId('editor-metrics')).toContainText('还需');
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+  await page.getByTestId('editor-save').click();
+  await expect(page.getByTestId('editor-error')).toHaveText('章节正文不合法，请检查字数和内容');
+  // 草稿没有被清空，版本数也没变
+  await expect(page.getByTestId('editor-textarea')).toHaveValue('太短了。');
+  await expect(page.getByTestId('version-item')).toHaveCount(2);
+
+  // 放弃草稿，避免影响后续用例
+  await page.getByTestId('editor-cancel').click();
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+});
+
+test('18. 基线冲突：保留草稿，并提供「载入最新版本」', async () => {
+  await page.route('**/api/works/*/chapters/*/versions', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'CHAPTER_VERSION_CONFLICT', message: '章节版本发生冲突，请刷新后重试' },
+      }),
+    });
+  });
+
+  try {
+    await page.getByTestId('editor-open').click();
+    const textarea = page.getByTestId('editor-textarea');
+    const original = await textarea.inputValue();
+    const typed = `${original}\n冲突用例的草稿。`;
+    await textarea.fill(typed);
+
+    await page.getByTestId('editor-save').click();
+    await expect(page.getByTestId('editor-error')).toHaveText(
+      '正文已被其他操作更新，请重新载入最新版本',
+    );
+    // 草稿保留，并给出重新载入入口
+    await expect(page.getByTestId('editor-textarea')).toHaveValue(typed);
+    await expect(page.getByTestId('editor-reload')).toBeVisible();
+    await expect(page.getByTestId('version-item')).toHaveCount(2);
+  } finally {
+    await page.unroute('**/api/works/*/chapters/*/versions');
+  }
+
+  // 载入最新版本：基线换成当前最新，草稿替换为最新正文，错误消失
+  await page.getByTestId('editor-reload').click();
+  await expect(page.getByTestId('editor-error')).toHaveCount(0);
+  await expect(page.getByTestId('editor-reload')).toHaveCount(0);
+  await expect(page.getByTestId('editor-textarea')).toHaveValue(/人工修订/);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('无修改');
+
+  await page.getByTestId('editor-cancel').click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+});
+
+test('19. 无正式版本时可手动创建版本 1', async () => {
+  await page.goto(`/works/${workId}/chapters`);
+  // 前面的用例已经建了 7 章（含种库的 5~7 章），这里按当前数量 +1 断言，避免硬编码漂移。
+  // 先等列表渲染完再取数量：`count()` 不会等待，刚 goto 完可能读到 0。
+  await expect(page.getByTestId('chapter-item').last()).toBeVisible();
+  const before = await page.getByTestId('chapter-item').count();
+  await page.getByTestId('chapter-create-no').fill('8');
+  await page.getByTestId('chapter-create-title').fill('第八章 手写');
+  await page.getByTestId('chapter-create-submit').click();
+  await expect(page.getByTestId('chapter-item')).toHaveCount(before + 1);
+
+  await page.getByTestId('chapter-open').last().click();
+  await expect(page.getByTestId('chapter-heading')).toContainText('第 8 章');
+  await expect(page.getByTestId('versions-empty')).toBeVisible();
+  await expect(page.getByTestId('editor-open')).toHaveText('手动创建第一版');
+
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  await expect(textarea).toHaveValue('');
+  await textarea.fill(longDraft('（手动首版）他第一次握剑，掌心全是汗。'));
+  await expect(page.getByTestId('editor-metrics')).toContainText('已达可保存下限');
+  await page.getByTestId('editor-save').click();
+
+  await expect(page.getByTestId('workbench-notice')).toContainText('已保存正式版本 1');
+  await expect(page.getByTestId('version-item')).toHaveCount(1);
+  await expect(page.getByTestId('version-source')).toHaveText('人工');
+  await expect(page.getByTestId('version-content')).toContainText('他第一次握剑');
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  await expectNoCredentials(page);
+});
+
+test('20. 390×844 移动端编辑、保存、刷新阅读，不撑破视口', async ({ browser }) => {
+  const mobileContext = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  const mobile = await mobileContext.newPage();
+  await login(mobile, authorEmail, authorPassword);
+
+  await mobile.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(mobile.getByTestId('version-item')).toHaveCount(2);
+  await mobile.getByTestId('editor-open').click();
+
+  const textarea = mobile.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  await textarea.fill(`${original}\n（移动端修订）${'夜风穿过廊下。'.repeat(40)}`);
+  await expect(mobile.getByTestId('editor-metrics')).toContainText('非空白字符');
+
+  const metrics = await mobile.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+  await expectNoCredentials(mobile);
+  await mobile.screenshot({ path: shot4b('editor-mobile'), fullPage: false });
+
+  await mobile.getByTestId('editor-save').click();
+  await expect(mobile.getByTestId('workbench-notice')).toContainText('已保存正式版本 3');
+  await expect(mobile.getByTestId('version-item')).toHaveCount(3);
+
+  // 刷新后仍能读到最新正文
+  await mobile.reload();
+  await expect(mobile.getByTestId('version-content')).toContainText('移动端修订');
+  await expect(mobile.getByTestId('version-source')).toHaveText('人工');
+
+  const readingMetrics = await mobile.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(readingMetrics.scrollWidth).toBeLessThanOrEqual(readingMetrics.viewportWidth + 1);
+
+  // 截图与页面不含口令 / 邮箱 / Cookie / 令牌
+  await expectNoCredentials(mobile);
+  const cookies = await mobileContext.cookies();
+  const body = await mobile.locator('body').innerText();
+  for (const value of cookies.map((cookie) => cookie.value).filter((v) => v.length > 0)) {
+    expect(body).not.toContain(value);
+  }
+  expect(body).not.toContain('Bearer ');
+  expect(body).not.toContain(ADMIN_EMAIL);
+
+  await mobileContext.close();
 });

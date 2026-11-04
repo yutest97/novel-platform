@@ -1,12 +1,12 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-4B-A（人工章节版本保存：服务 + API）**。
+> 当前阶段：**A1-4B-B（Markdown 人工编辑器与 human 版本保存 UI）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
 A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
-A1-4B-A 人工版本保存 API（**暂无编辑器 UI / diff / 恢复**）。
+A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器（**仍无版本 diff / 恢复**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -874,9 +874,9 @@ Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无�
 **测试**：A1-4A 新增 31 个（只读 API 7、展示纯函数 10、浏览器 E2E 10、
 workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展示纯函数 6、浏览器 E2E 2）；
 **REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；
-**A1-4B-A** 再补 18 个（人工版本保存 API）；全量单测 **703** 个
-（web 208 / workflow 180 / worker 63 / shared 15 / db 10 / auth 95 / works 132）；
-浏览器 E2E 合计 **80**。
+**A1-4B-A** 再补 18 个（人工版本保存 API）；**A1-4B-B** 再补 13 个（编辑器纯逻辑）；
+全量单测 **716** 个（web 221 / workflow 180 / worker 63 / shared 15 / db 10 /
+auth 95 / works 132）；浏览器 E2E 合计 **87**（80 + 编辑器 7）。
 
 ### 人工章节版本保存（A1-4B-A）
 
@@ -908,6 +908,31 @@ source / wordCount / parentVersionId`，**不含正文**；审计失败整体回
 - 前端客户端：`saveHumanChapterVersion(workId, chapterId, { content, baseVersionId })`
   返回 `HumanChapterVersionSummary`。
 
+### 章节人工编辑（A1-4B-B）
+
+章节工作台的「正式版本」区提供编辑入口，作者用 **Markdown 纯文本 textarea** 修订正文：
+
+| 场景           | 入口                                           | `baseVersionId`      |
+| -------------- | ---------------------------------------------- | -------------------- |
+| 还没有正式版本 | 「手动创建第一版」                             | `null`（生成版本 1） |
+| 已选中最新版本 | 「编辑最新版本（版本 N）」                     | 当前最大版本 id      |
+| 选中旧版本     | 只显示「历史版本只读，请先选择最新版本再编辑」 | —（不提供编辑器）    |
+
+- textarea 预填最新正式正文；实时显示**非空白字符数**、距 1200 下限还差多少、
+  是否有未保存修改；字数只做预览，**不随请求提交**（服务端重新计算）；
+- `Ctrl+S` / `Cmd+S` 保存并阻止浏览器默认行为；
+- 有未保存修改时：取消需二次确认，`beforeunload` 会提示；保存中禁用输入与按钮；
+- 草稿**只存在组件内存**：不写 URL / localStorage / sessionStorage，刷新即丢失；
+- 保存成功 → 关闭编辑器、提示「已保存正式版本 N」、刷新版本列表与章节状态、
+  自动选中最新版本并展示正文，旧版本原样保留；
+- 保存失败**保留草稿**并按稳定错误码提示：
+  `CHAPTER_CONTENT_INVALID`、`CHAPTER_STATE_INVALID_FOR_SAVE`、
+  `CHAPTER_VERSION_CONFLICT`（附「载入最新版本」按钮）、`CONCURRENT_MODIFICATION`；
+- 全程纯文本渲染（`pre-wrap`），不使用 `dangerouslySetInnerHTML`；
+- 编辑期间禁止切换版本；新 human 版本来源显示「人工」，AI 版本仍显示「AI」。
+
+**仍不提供**：版本 diff、历史版本恢复、局部重写（A1-4B-C）。
+
 ### 浏览器 E2E（Playwright Chromium）
 
 ```bash
@@ -925,7 +950,7 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖（80 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
+覆盖（87 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
 作品流程 / 账号上限）：
 未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
 刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
@@ -966,7 +991,11 @@ queued/processing，取消接口伪造 `processing + cancelRequestedAt`）、页
 作品目标字数 1200 时生成表单默认值收敛为 2500、页面仍显示 1200 →
 **REV-02**：提交后显示等待 Worker，轮询成功后换成「生成完成，候选已保存」；
 种子任务覆盖 failed（只有红色错误、无绿条）/ cancelled（生成任务已取消）/
-processing + cancelRequestedAt（已请求取消生成）；刷新已完成任务不再回到等待提示。
+processing + cancelRequestedAt（已请求取消生成）；刷新已完成任务不再回到等待提示 →
+**A1-4B-B**：编辑版本 1 → `Ctrl/Cmd+S` 保存为人工版本 2 → 刷新后仍在、版本 1 只读且未变
+→ 未保存取消需确认、草稿不落存储 → 短正文稳定报错并保留草稿 → 替身注入
+`CHAPTER_VERSION_CONFLICT` 后可「载入最新版本」→ 无版本时手动创建版本 1 →
+390×844 移动端编辑、保存、刷新阅读。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

@@ -2,7 +2,7 @@
 
 - 版本：v1.1
 - 日期：2026-11-04
-- 当前基线：`d04d167`（A1-4A 已验收）+ A1-4B-A（本地提交）
+- 当前基线：`98ec202`（A1-4B-A 已验收）+ A1-4B-B（本地提交）
 - 状态：执行中
 
 ---
@@ -45,7 +45,8 @@
 | **A1-3C** | Worker 常驻运行与后端端到端闭环 | `apps/worker` 常驻轮询、`chapter.draft` 注册、Provider 单次构造、provider/model 预检（`TASK_MODEL_CONFIG_MISMATCH`）、循环状态机与健康检查、优雅关闭、后端 e2e；**无章节 UI** | 已完成（本地提交）+ REV-01 |
 | **A1-4A** | 章节工作台（生成 / 轮询 / 候选采纳 / 正式阅读） | 章节列表与创建、章节工作台、Mock/真实 Worker 生成、1s→5s 轮询、取消、候选预览、采纳、正式版本阅读、3 个只读 API、E2E；**无人工编辑**；REV-01 修取消后重新生成、目标字数默认值与终态步骤文案；REV-02 修生成提示与任务状态一致性 | 已完成 + REV-01/02（本地提交） |
 | **A1-4B-A** | 人工章节版本保存（服务 + API） | `POST /chapters/:chapterId/versions`、`saveHumanChapterVersion`（`baseVersionId` 乐观并发 + 章节行锁）、`source='human'` 追加版本、`finalized → in_review`、`CHAPTER_CONTENT_INVALID` / `CHAPTER_STATE_INVALID_FOR_SAVE`、审计 `chapter.version_created`；**无 UI** | **本轮完成** |
-| **A1-4B-B** | 章节编辑与版本管理 UI | Markdown 编辑器、人工保存入口、版本 diff / 恢复、定稿流程 | 待开始 |
+| **A1-4B-B** | Markdown 人工编辑器与 human 版本保存 UI | 正式版本区编辑入口（首版 / 最新版本）、textarea 纯文本编辑、实时字数下限提示、dirty 状态、`Ctrl/Cmd+S` 保存、取消二次确认与 `beforeunload`、冲突后「载入最新版本」、旧版本只读、移动端可用；**无 diff / 恢复** | **本轮完成** |
+| **A1-4B-C** | 版本 diff 与历史恢复 | 版本间差异对比、历史版本恢复为新版本、定稿流程 | 待开始 |
 | **A2** | 连续性与事实（个人版） | 章节事实提取、人物/资源状态回写、跨章一致性提示 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
@@ -108,3 +109,4 @@
 | 2026-11-04 | A1-4A-CI-FIX-01/02：Docker 启动顺序（先 postgres → 宿主串迁移 → 起四服务）落到 CI 与 `verify-local.sh`，并加无 Docker 的顺序守卫 |
 | 2026-11-04 | A1-4A-CI-FIX-02B：Playwright 步骤显式注入宿主机 `DATABASE_URL`（127.0.0.1 + 本次 run 的 E2E 库），守卫新增 4 组夹具 |
 | 2026-11-05 | A1-4B-A：人工章节版本保存（服务 + API），baseVersionId 乐观并发、finalized 回 in_review、审计 chapter.version_created |
+| 2026-11-05 | A1-4B-B：章节工作台 Markdown 人工编辑器（`Ctrl+S`、dirty 取消确认、冲突重新载入、首版手写），A1-4B-C 承接 diff / 恢复 |

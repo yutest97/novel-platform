@@ -818,3 +818,38 @@ fieldset.field legend {
   cursor: pointer;
   font-weight: 600;
 }
+
+/* ---------------- 人工编辑器（A1-4B-B） ---------------- */
+
+.editor-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 24rem;
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  line-height: 1.8;
+  resize: vertical;
+}
+
+.editor-textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.editor-textarea:disabled {
+  background: #f5f6f8;
+  color: #555;
+}
+
+@media (max-width: 40rem) {
+  .editor-textarea {
+    min-height: 18rem;
+    font-size: 0.9rem;
+  }
+}

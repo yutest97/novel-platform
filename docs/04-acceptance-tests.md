@@ -589,3 +589,20 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-83 | 权限与白名单 | 跨作品 / 跨章节 404；管理员 403；缺 Origin 403；未登录 401；`source` / `versionNo` / `createdBy` / 归属 / 时间戳 → 400；缺 `baseVersionId` → 400 | 同上 |
 | AT-WF-84 | 审计与回滚 | 审计 `chapter.version_created` 的 detail 只含 7 个字段、不含正文；审计写入失败 → 版本与章节状态整体回滚 | 同上 |
 | AT-WF-85 | 既有测试不减少 | 全量单测 **703**（A1-4A 685 + A1-4B-A 18）；浏览器 E2E 仍 **80** | 全量 `pnpm test`、`playwright test` |
+
+## 23. 章节人工编辑器验收（A1-4B-B）
+
+> 对应 `docs/07-master-roadmap.md` A1-4B-B、`README`「章节人工编辑」。
+> 本轮只开放**编辑器与保存 UI**：**不提供**版本 diff、历史版本恢复、局部重写、定稿流程按钮。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-86 | 编辑入口 | 无正式版本时显示「手动创建第一版」（`baseVersionId=null`）；有版本时只在选中**最新**版本时显示「编辑最新版本（版本 N）」；选中旧版本显示「历史版本只读，请先选择最新版本再编辑」且不提供编辑器 | `e2e/chapter-workbench.spec.ts` |
+| AT-WF-87 | 编辑器 | textarea 预填最新正式正文；实时显示非空白字符数、距 1200 下限差额、是否 dirty；`Ctrl/Cmd+S` 保存并阻止默认行为；保存中禁用输入与按钮；草稿不写 URL / localStorage / sessionStorage | `test/chapter-editor.test.ts`、`e2e/chapter-workbench.spec.ts` |
+| AT-WF-88 | 保存成功 | 关闭编辑器、提示「已保存正式版本 N」、刷新版本列表与章节状态、自动选中最新版本并展示正文；旧版本原样保留；新版本来源显示「人工」，AI 版本仍显示「AI」；刷新后仍在 | 同上 |
+| AT-WF-89 | 未保存保护 | 有修改时点击取消弹二次确认（可继续编辑）；`beforeunload` 提示；放弃后草稿消失且未落存储 | 同上 |
+| AT-WF-90 | 失败处理 | 短正文 → `CHAPTER_CONTENT_INVALID` 且草稿保留；`CHAPTER_VERSION_CONFLICT` → 「正文已被其他操作更新，请重新载入最新版本」+「载入最新版本」按钮，草稿保留；`CONCURRENT_MODIFICATION` 可重试；`CHAPTER_STATE_INVALID_FOR_SAVE` 稳定文案；会话错误走统一处理 | 同上 |
+| AT-WF-91 | 首版手写 | 无正式版本时手动创建版本 1（`source=human`、`parentVersionId=null`），章节进入 `in_review` | 同上 |
+| AT-WF-92 | 移动端 | 390×844 可编辑、保存、刷新阅读，`scrollWidth <= viewport + 1` | 同上 |
+| AT-WF-93 | 安全 | Markdown 以纯文本编辑与 `pre-wrap` 阅读，不使用 `dangerouslySetInnerHTML`；页面、DOM 与截图不含口令 / 邮箱 / Cookie / 令牌 / 其它作者数据 | 同上 |
+| AT-WF-94 | 既有测试不减少 | 全量单测 **716**（703 + 编辑器纯逻辑 13）；浏览器 E2E 80 + 7 = **87** | 全量 `pnpm test`、`playwright test` |

@@ -888,7 +888,12 @@ runWorkWrite（作品级 advisory lock）
 | `CONCURRENT_MODIFICATION` | 409 | 数据库死锁 / 序列化失败（可重试） |
 | `NOT_FOUND` | 404 | 作品 / 章节不属于当前作者 |
 
-### 17.7 与 A1-4B-B 的边界
+### 17.7 编辑器与后续阶段
 
-仍**不提供**：Markdown 编辑器 UI、版本 diff、版本恢复、局部重写、定稿流程按钮。
+A1-4B-B 已在本契约之上提供 **Markdown 人工编辑器**（章节工作台「正式版本」区）：
+textarea 纯文本编辑、实时非空白字符数、`Ctrl/Cmd+S` 保存、dirty 取消确认、
+冲突后「载入最新版本」、无版本时手写首版。编辑器只调用本节的
+`POST /chapters/:chapterId/versions`，**不新增服务端契约**；字数仍由服务端重算。
+
+**仍不提供**：版本 diff、历史版本恢复、局部重写、定稿流程按钮（A1-4B-C）。
 人工版本 append-only（数据库触发器兜底），旧版本永久保留。
