@@ -334,29 +334,23 @@ export interface StartChapterDraftInput {
  *
  * - `input_snapshot` 只含 `targetWords` / `style`；
  * - provider / model 由调用方从**服务端配置**解析后传入，请求体永远不参与；
- * - **状态闸门**：`finalized / abandoned` 章节直接 409，不建任务、不写审计；
- *   Worker 侧还有第二道检查，覆盖"排队期间被定稿"的竞态；
- * - 同一 `(workId, requestId)` 同内容返回既有任务（`created=false`），
- *   不同内容由 `createGenerationTask` 返回 `TASK_REQUEST_CONFLICT`。
+ * - **幂等优先于状态**：同一 `(workId, requestId)` 已存在任务时**不检查章节状态**，
+ *   直接由 `createGenerationTask` 比较 `input_hash`：
+ *   同内容返回既有任务（`created=false`），异内容 `TASK_REQUEST_CONFLICT`；
+ * - **只有新请求**才受章节状态限制：`finalized / abandoned` → 409
+ *   `CHAPTER_STATE_INVALID_FOR_GENERATION`，不建任务、不写审计；
+ * - 新请求创建过程中章节被并发关闭的竞态，仍由 Worker 侧
+ *   （`buildChapterDraftContext` / `ensureChapterStatus`）兜底。
  */
 export async function startChapterDraft(
   input: StartChapterDraftInput,
 ): Promise<{ readonly task: ChapterTaskSummaryView; readonly created: boolean }> {
   const workId = normalizeUuid(input.workId, '作品 id');
   const chapterId = normalizeUuid(input.chapterId, '章节 id');
+  const requestId = assertRequestId(input.requestId);
 
-  // 先校验作品归属：非作者不能通过状态码探测他人章节是否存在。
+  // 先校验作品归属：非作者不能通过任何错误码探测他人作品 / 章节。
   await requireOwnedWork(input.db, workId, input.authorId);
-  const chapter = await input.db.chapter.findFirst({
-    where: { id: chapterId, workId },
-    select: { status: true },
-  });
-  if (chapter === null) {
-    throw new AuthError('NOT_FOUND', '章节不存在');
-  }
-  if (!isChapterOpenForGeneration(chapter.status)) {
-    throw new AuthError('CHAPTER_STATE_INVALID_FOR_GENERATION');
-  }
 
   const snapshot: { targetWords?: number; style?: Partial<ChapterStyle> } = {};
   if (input.targetWords !== undefined) {
@@ -366,11 +360,23 @@ export async function startChapterDraft(
     snapshot.style = input.style;
   }
 
+  // 幂等优先：已有同 requestId 的任务时跳过章节状态检查。
+  // 这里不自己比较 input_hash，统一交给 createGenerationTask ——
+  // 避免两条路径的哈希口径漂移（尤其是旧任务）。
+  const existing = await input.db.generationTask.findUnique({
+    where: { workId_requestId: { workId, requestId } },
+    select: { id: true },
+  });
+  if (existing === null) {
+    // 只有新请求才受章节关闭限制。
+    await assertChapterOpenForGeneration(input.db, workId, chapterId);
+  }
+
   const { task, created } = await createGenerationTask(input.db, {
     authorId: input.authorId,
     workId,
     chapterId,
-    requestId: input.requestId,
+    requestId,
     taskType: CHAPTER_DRAFT_TASK_TYPE,
     inputSnapshot: snapshot,
     provider: input.provider,
@@ -378,4 +384,30 @@ export async function startChapterDraft(
   });
 
   return { task: toTaskSummary(task), created };
+}
+
+/** 读取 requestId 并校验长度（1..128，与数据库 CHECK 一致）。 */
+function assertRequestId(value: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 128) {
+    throw new AuthError('VALIDATION_FAILED', 'requestId 长度必须在 1..128');
+  }
+  return value;
+}
+
+/** 新请求的章节状态闸门：章节必须存在且处于开放状态。 */
+async function assertChapterOpenForGeneration(
+  db: PrismaClient,
+  workId: string,
+  chapterId: string,
+): Promise<void> {
+  const chapter = await db.chapter.findFirst({
+    where: { id: chapterId, workId },
+    select: { status: true },
+  });
+  if (chapter === null) {
+    throw new AuthError('NOT_FOUND', '章节不存在');
+  }
+  if (!isChapterOpenForGeneration(chapter.status)) {
+    throw new AuthError('CHAPTER_STATE_INVALID_FOR_GENERATION');
+  }
 }

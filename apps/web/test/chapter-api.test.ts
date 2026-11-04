@@ -546,6 +546,86 @@ describe('生成任务', () => {
     }
   });
 
+  it('幂等优先：章节定稿后同 requestId 同内容重试 → 200 返回原任务，不新增任务', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const chapter = await createChapter(workId, author.token);
+    const requestId = `req-${randomUUID()}`;
+
+    const first = await startTask(workId, chapter.id, author.token, {
+      requestId,
+      targetWords: 3000,
+    });
+    expect(first.status).toBe(201);
+    await db.chapter.update({ where: { id: chapter.id }, data: { status: 'finalized' } });
+
+    const retry = await startTask(workId, chapter.id, author.token, {
+      requestId,
+      targetWords: 3000,
+    });
+    expect(retry.status).toBe(200);
+    expect(retry.task['id']).toBe(first.task['id']);
+    expect(await db.generationTask.count({ where: { chapterId: chapter.id } })).toBe(1);
+  });
+
+  it('幂等优先：定稿后同 requestId 异内容 → 409 TASK_REQUEST_CONFLICT（不是状态错误）', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const chapter = await createChapter(workId, author.token);
+    const requestId = `req-${randomUUID()}`;
+
+    const first = await startTask(workId, chapter.id, author.token, {
+      requestId,
+      targetWords: 3000,
+    });
+    expect(first.status).toBe(201);
+    await db.chapter.update({ where: { id: chapter.id }, data: { status: 'finalized' } });
+
+    const response = await generatePost(
+      request(`/api/works/${workId}/chapters/${chapter.id}/generate`, {
+        method: 'POST',
+        body: { requestId, targetWords: 3200 },
+        token: author.token,
+      }),
+      chapterParams(workId, chapter.id),
+    );
+    expect(response.status).toBe(409);
+    expect((await response.json()) as unknown).toMatchObject({
+      error: { code: 'TASK_REQUEST_CONFLICT' },
+    });
+    expect(await db.generationTask.count({ where: { chapterId: chapter.id } })).toBe(1);
+  });
+
+  it('已有任务后，全新 requestId 在 finalized / abandoned 章节仍被状态闸门拦下', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+
+    for (const status of ['finalized', 'abandoned'] as const) {
+      const chapter = await createChapter(workId, author.token, status === 'finalized' ? 1 : 2);
+      const first = await startTask(workId, chapter.id, author.token, {
+        requestId: `req-${randomUUID()}`,
+      });
+      expect(first.status, status).toBe(201);
+
+      await db.chapter.update({ where: { id: chapter.id }, data: { status } });
+      const tasksBefore = await db.generationTask.count({ where: { chapterId: chapter.id } });
+
+      const response = await generatePost(
+        request(`/api/works/${workId}/chapters/${chapter.id}/generate`, {
+          method: 'POST',
+          body: { requestId: `req-${randomUUID()}` },
+          token: author.token,
+        }),
+        chapterParams(workId, chapter.id),
+      );
+      expect(response.status, status).toBe(409);
+      expect((await response.json()) as unknown).toMatchObject({
+        error: { code: 'CHAPTER_STATE_INVALID_FOR_GENERATION' },
+      });
+      expect(await db.generationTask.count({ where: { chapterId: chapter.id } })).toBe(tasksBefore);
+    }
+  });
+
   it('同 requestId 同输入 → 返回同一任务（200）；异输入 → 409 TASK_REQUEST_CONFLICT', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);

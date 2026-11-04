@@ -32,13 +32,7 @@ import {
   uniqueConstraintMarker,
 } from '@novel/works';
 
-/** 允许采纳候选的章节状态（`in_review` 时保持，其余三种推进到 `in_review`）。 */
-const ADOPTABLE_CHAPTER_STATUSES: readonly string[] = [
-  'planned',
-  'outlined',
-  'drafting',
-  'in_review',
-];
+import { isChapterOpenForGeneration } from './types.js';
 
 /** 采纳后章节进入的状态。 */
 const ADOPTED_CHAPTER_STATUS = 'in_review';
@@ -218,7 +212,9 @@ export async function adoptChapterCandidate(
         throw new AuthError('CHAPTER_CANDIDATE_NOT_ADOPTABLE');
       }
 
-      if (!ADOPTABLE_CHAPTER_STATUSES.includes(chapter.status)) {
+      // 与生成共用同一份"章节开放状态"白名单（types.ts），
+      // 但错误码保持独立：采纳是 CHAPTER_STATE_INVALID_FOR_ADOPTION。
+      if (!isChapterOpenForGeneration(chapter.status)) {
         throw new AuthError('CHAPTER_STATE_INVALID_FOR_ADOPTION', '章节已定稿或已废弃');
       }
 

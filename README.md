@@ -710,11 +710,14 @@ runWorkWrite（作品级 advisory lock）
   → `409 CHAPTER_STATE_INVALID_FOR_GENERATION`（不建任务、不写审计）；
   Worker 执行时再校验一次（`TASK_INPUT_INVALID`，不可重试），
   覆盖"排队期间被定稿"的竞态；不会为已定稿章节自动重开；
+- **requestId 幂等优先**：同 `(workId, requestId)` 已有任务时跳过章节状态检查，
+  同内容返回原任务、异内容 `TASK_REQUEST_CONFLICT`；只有新请求受章节关闭限制；
+  生成与采纳共用 `isChapterOpenForGeneration` 白名单；
 - 前端只新增 `apps/web/src/lib/api.ts` 的类型与客户端函数，**没有页面**。
 
-**测试**：A1-3B 系列（含 REV-01）新增 24 个（`test/chapter-api.test.ts` 20 /
-`test/chapter-workflow.test.ts` +4）；web 包 **156** 个、workflow 包 **172** 个；
-全量单测 **582** 个。
+**测试**：A1-3B 系列（含 REV-01/02）新增 27 个（`test/chapter-api.test.ts` 23 /
+`test/chapter-workflow.test.ts` +4）；web 包 **159** 个、workflow 包 **172** 个；
+全量单测 **585** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 

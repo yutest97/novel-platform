@@ -561,16 +561,36 @@ HTTP 层只做四件事：**会话与 Origin 校验 → 请求体白名单 → �
 | `planned / outlined / drafting / in_review` | ✅ 201 | ✅ 正常推进 | ✅（推进到 `in_review`） |
 | `finalized / abandoned` | ❌ 409 `CHAPTER_STATE_INVALID_FOR_GENERATION` | ❌ 不可重试 `TASK_INPUT_INVALID` | ❌ 409 `CHAPTER_STATE_INVALID_FOR_ADOPTION` |
 
-- **入口闸门**：`startChapterDraft` 先校验作品归属，再读章节状态；
-  关闭态直接 409，**不建 `generation_task`、不写审计**；
-- **Worker 第二道闸门**（覆盖"排队期间被定稿"的竞态）：
+**`startChapterDraft` 的判定顺序（幂等优先）**
+
+```
+规范化 workId / chapterId / requestId
+  → 校验作品归属（他人作品 404）
+  → 查 (workId, requestId) 是否已有任务
+       ├─ 有：跳过章节状态检查，交给 createGenerationTask 比较 input_hash
+       │       ├─ 同内容 → 200 + 既有任务（不新增、不重复审计）
+       │       └─ 异内容 → 409 TASK_REQUEST_CONFLICT
+       └─ 无：检查章节存在且处于开放状态
+               ├─ finalized / abandoned → 409 CHAPTER_STATE_INVALID_FOR_GENERATION
+               └─ 通过 → 创建任务
+```
+
+- **requestId 幂等优先于章节状态检查**：已存在同 `(workId, requestId)` 的任务时，
+  即使章节随后被定稿 / 废弃，同内容重试仍返回原任务、异内容仍报
+  `TASK_REQUEST_CONFLICT` —— 不会因为章节关闭把"重试"变成另一种错误；
+- **只有新请求受章节关闭限制**：关闭态不建 `generation_task`、不写审计；
+- **不绕过 `input_hash`**：幂等路径不自己比较内容，统一走 `createGenerationTask`，
+  避免两条路径的指纹口径漂移；
+- **Worker 第二道闸门**（覆盖"新请求创建过程中章节被并发关闭"的竞态）：
   - `buildChapterDraftContext` 读到关闭态 → 抛 `TASK_INPUT_INVALID`（不可重试），
     任务 `failed`，不冻结合同；
   - `ensureChapterStatus` 不再"静默保持原状"：读到关闭态直接抛错，
     防止合同冻结 / 候选写入越过定稿；
+- **统一白名单**：生成与采纳共用 `types.ts` 的 `isChapterOpenForGeneration`
+  （`planned / outlined / drafting / in_review`）；采纳的错误码保持独立
+  （`CHAPTER_STATE_INVALID_FOR_ADOPTION`），已在 `adopted` 的候选在关闭章节重复采纳
+  仍返回既有版本（幂等分支先于状态检查，行为未变）；
 - **不自动重开**：已定稿章节不会因为生成请求被改回开放态；重新打开属于后续功能；
-- 采纳沿用 A1-3A 自身的检查（`ADOPTABLE_CHAPTER_STATUSES`），
-  与生成使用同一组开放状态，但错误码保持独立；
 - 允许状态在生成过程中不受影响：`drafting / in_review` 直接进入流程，
   终态仍是 `in_review`。
 
