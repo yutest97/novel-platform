@@ -290,6 +290,7 @@ FK `work_id → works` **ON DELETE RESTRICT**。本轮不建卷/大纲表。
 | work_id | uuid FK→works | 作品隔离；RESTRICT |
 | chapter_id | uuid nullable FK→chapters | A1-1 允许为空；A1-2 正文任务必填 |
 | request_id | text | 客户端逻辑请求 id；与 work_id 组成幂等键 |
+| input_hash | text | 请求内容的 SHA-256（64 位小写 hex）；覆盖 6 个语义字段，**不含正文/prompt** |
 | task_type | text | 工作流类型（A1-1 为自由字符串，A1-2 收敛枚举） |
 | status | text | `queued / processing / succeeded / failed / cancelled` |
 | current_step | text nullable | 最近完成的步骤名（检查点） |
@@ -302,7 +303,8 @@ FK `work_id → works` **ON DELETE RESTRICT**。本轮不建卷/大纲表。
 | created_at / updated_at | timestamptz | |
 
 `UNIQUE(work_id, request_id)`；`status` 白名单；`attempt_count <= max_attempts`；
-`processing` 必须有锁与租约、其它状态必须没有；状态迁移由触发器校验，终态不可修改。
+`processing` 必须有锁与租约、其它状态必须没有；`char_length(input_hash) = 64`
+且必须是 `^[0-9a-f]{64}$`；状态迁移由触发器校验，终态不可修改。
 
 **状态机**：
 
@@ -316,8 +318,12 @@ queued ──claim──▶ processing ──complete──▶ succeeded
 
 **幂等与租约**：
 
-- 同 `work_id + request_id` 只创建一条任务；并发创建由唯一索引兜底，
-  冲突时返回既有任务（`created=false`）；
+- 同 `work_id + request_id` 只创建一条任务，且**只有 `input_hash` 相同才复用**：
+  同指纹返回既有任务（`created=false`）；异指纹稳定报 `TASK_REQUEST_CONFLICT`（409），
+  不覆盖、不新建；并发同键异内容由唯一索引兜底为一胜一冲突；
+- `input_hash` 覆盖 `chapterId / taskType / inputSnapshot / provider / model / maxAttempts`；
+  `inputSnapshot` 先转 canonical JSON（对象 key 递归排序、数组保持顺序），
+  拒绝 undefined / 函数 / BigInt / 循环引用等不可稳定序列化的值；
 - Worker 用 `FOR UPDATE SKIP LOCKED` 领取 `queued`，写锁与租约、`attempt_count + 1`；
 - 心跳失败（0 行）立即停止后续步骤；旧 Worker 的任何写入都带
   `locked_by` fencing，不会覆盖新 Worker；
@@ -336,7 +342,7 @@ completion_tokens, latency_ms, success, error_code, created_at`。
 | --- | --- | --- |
 | `status = pending/running` | `queued/processing` | 与"领取 queued"的队列语义一致 |
 | `UNIQUE(user_id, request_id)` | `UNIQUE(work_id, request_id)` | 任务天然属于作品；同作者不同作品可复用 request_id |
-| `request_payload` + `input_hash` | `input_snapshot`（无指纹） | A1-1 不做入参冲突 409；调用方保证 request_id 与内容一一对应 |
+| `request_payload` + `input_hash` | `input_snapshot` + `input_hash`（canonical JSON 的 SHA-256） | 只覆盖 6 个语义字段；同键异指纹 409 `TASK_REQUEST_CONFLICT` |
 | `scope` / `task_type` 枚举 / `progress` | 暂未落地 | A1-2 接入 Planner/Writer 时按实际任务类型收敛 |
 | `total_tokens` | 由两列相加得出 | 少一列冗余，避免不一致 |
 

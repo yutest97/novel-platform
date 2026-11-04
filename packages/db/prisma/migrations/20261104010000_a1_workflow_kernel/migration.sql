@@ -17,7 +17,10 @@
 --    因此不会留下"永久 processing"的行。
 --
 -- 4. `(work_id, request_id)` 唯一：同一逻辑请求只创建一个任务。
---    任务创建是幂等的（冲突时返回既有行）。
+--    `input_hash` 是 request_id 背后内容的 SHA-256 指纹（64 位小写十六进制）：
+--    同键同指纹 → 返回既有行（created=false）；同键异指纹 → 应用层稳定报
+--    TASK_REQUEST_CONFLICT，不覆盖、不新建。指纹只覆盖会影响任务语义的字段，
+--    不包含正文 / prompt / 密钥。
 --
 -- 5. `task_contexts` 只存"引用 + 摘要"，snippet ≤ 500；
 --    `llm_call_logs` 只存 token / 延迟 / 成功标志 / 稳定 error_code，
@@ -72,6 +75,8 @@ CREATE TABLE "generation_tasks" (
     -- 章节可为空：A1-1 允许非章节型任务（例如测试工作流），A1-2 起正文任务必填
     "chapter_id" UUID,
     "request_id" TEXT NOT NULL,
+    -- request_id 的输入指纹（SHA-256 hex）；见文件头第 4 条
+    "input_hash" TEXT NOT NULL,
     "task_type" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'queued',
     "current_step" TEXT,
@@ -126,6 +131,10 @@ ALTER TABLE "generation_tasks" ADD CONSTRAINT "generation_tasks_lease_check"
 -- 标识符长度（接口层同样校验，这里是兜底）
 ALTER TABLE "generation_tasks" ADD CONSTRAINT "generation_tasks_request_id_length_check"
     CHECK (char_length("request_id") BETWEEN 1 AND 128);
+
+-- 只接受 SHA-256 小写十六进制摘要：长度不是 64 或掺入原文都会被拒绝
+ALTER TABLE "generation_tasks" ADD CONSTRAINT "generation_tasks_input_hash_check"
+    CHECK (char_length("input_hash") = 64 AND "input_hash" ~ '^[0-9a-f]{64}$');
 
 ALTER TABLE "generation_tasks" ADD CONSTRAINT "generation_tasks_task_type_length_check"
     CHECK (char_length("task_type") BETWEEN 1 AND 64);

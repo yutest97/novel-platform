@@ -88,6 +88,15 @@ export {
 } from './kernel.js';
 
 export {
+  CanonicalJsonError,
+  TASK_INPUT_HASH_LENGTH,
+  canonicalJsonStringify,
+  hashTaskRequest,
+  serializeTaskRequestFingerprint,
+  type TaskRequestFingerprintInput,
+} from './request-hash.js';
+
+export {
   DEFAULT_LEASE_MS,
   DEFAULT_MAX_ATTEMPTS,
   MAX_CONTEXT_SNIPPET_CHARS,

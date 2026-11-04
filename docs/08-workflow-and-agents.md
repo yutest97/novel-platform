@@ -55,15 +55,19 @@ WorkerRunner (apps/worker 未来接入)
 | 表 | 作用 | 关键约束 |
 | --- | --- | --- |
 | `chapters` | 最小章节骨架 | `UNIQUE(work_id, chapter_no)`、`chapter_no >= 1`、状态六态、FK works RESTRICT |
-| `generation_tasks` | 任务队列 + 租约 | `UNIQUE(work_id, request_id)`、状态白名单、processing 必须有锁/租约、状态迁移触发器、终态不可变 |
+| `generation_tasks` | 任务队列 + 租约 | `UNIQUE(work_id, request_id)`、`input_hash`（64 位 SHA-256）、状态白名单、processing 必须有锁/租约、状态迁移触发器、终态不可变 |
 | `task_contexts` | 任务引用的上下文摘要 | `(task_id, context_type, ref_id)` 唯一、snippet ≤ 500、rank ≥ 0 |
 | `llm_call_logs` | 模型调用计量 | 只有 token/延迟/成功/error_code；**没有 prompt/正文列** |
 
 设计细节：
 
 - `input_snapshot` 只放结构化输入（≤ 64 KiB），**不放 prompt、正文、API Key**；
+- `input_hash` 是请求内容的 SHA-256（64 位小写 hex），覆盖
+  `chapterId / taskType / inputSnapshot / provider / model / maxAttempts`；
+  只存摘要，表里没有正文或完整 prompt 列；
 - `error_message_sanitized` 只存服务端映射后的固定文案；
-- `generation_tasks.chapter_id` 在 A1-1 允许为空（非章节型任务）；A1-2 起正文任务必填；
+- `generation_tasks.chapter_id` 在 A1-1 **有意允许为空**（非章节型任务）；
+  A1-2 由服务层按 `task_type` 强制章节任务必填（不在本轮实现）；
 - 与早期数据模型的差异见 `03-data-model.md` §3.8。
 
 ---
@@ -81,6 +85,17 @@ queued ──claim──▶ processing ──complete──▶ succeeded
 succeeded / failed / cancelled 为终态，不可修改。
 ```
 
+**取消优先于成功与失败**：`processing` 中只要 `cancel_requested_at` 非空，
+终态就只能是 `cancelled` —— 即使步骤正常返回、或抛出的是可重试错误、或
+`attempt_count` 还没用尽，都不会写成 `succeeded`，也不会回到 `queued`。
+
+- 判断与写入在**同一条 UPDATE** 里完成：
+  - `completeTask` 用 `CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'succeeded' END`，
+    返回 `succeeded | cancelled | lost`；
+  - `failTask` 同一个 `CASE` 先判取消，再判重试，返回 `queued | failed | cancelled | lost`；
+  - 两者都清空 `locked_by / lease_until`；取消时 `error_code / error_message_sanitized`
+    置 `NULL`（取消不是失败，不留错误码）；
+- Worker 只按 finalize 的返回值写 outcome，不再"先查取消、再写状态"；
 - 迁移合法性由数据库触发器 `generation_tasks_status_transition` 兜底，
   直接用 SQL 也绕不过去；
 - 每次 Worker 写入都带 `locked_by = 当前 Worker`（fencing）：
@@ -106,13 +121,24 @@ succeeded / failed / cancelled 为终态，不可修改。
 
 ---
 
-## 7. 幂等
+## 7. 幂等（request_id + input_hash）
 
-- 创建：`(work_id, request_id)` 唯一。已存在时返回既有任务（`created=false`），
-  不覆盖输入、不新增行；并发创建只有一个成功。
+- `(work_id, request_id)` 唯一，且**只有 `input_hash` 相同才算同一个请求**：
+  - 同键同指纹 → 返回既有任务，`created=false`，不覆盖、不新增；
+  - 同键异指纹 → `TASK_REQUEST_CONFLICT`（409），不覆盖、不新建。
+- `input_hash` 覆盖所有影响任务语义的字段：
+  `chapterId / taskType / inputSnapshot / provider / model / maxAttempts`；
+  其中 `chapterId` 使用规范化后的小写 UUID。
+- `inputSnapshot` 先转 **canonical JSON** 再算 SHA-256：
+  - 对象 key 递归排序；数组保持原顺序；
+  - 拒绝 `undefined`、函数、Symbol、BigInt、非有限数字、非纯对象（如 `Date`）、
+    循环引用与过深嵌套 —— 这些值无法稳定序列化，必须报 `VALIDATION_FAILED`，
+    而不是像 `JSON.stringify` 那样静默丢弃。
+- 落库的只有 64 位小写十六进制摘要（数据库 `CHECK` 兜底），
+  **不含正文、完整 prompt 或 API Key**。
+- 并发：两条不同内容的请求同时用同一个 `request_id`，唯一索引保证只有一条能插入，
+  另一个在读回既有行后比较指纹并稳定报冲突 —— 结果必然是"一行任务 + 一个冲突"。
 - 执行：同一条任务重试只增加 `attempt_count`，不新建任务。
-- A1-1 **不做输入指纹比较**：同一 `request_id` 配不同输入会返回原任务；
-  调用方必须把 `request_id` 与逻辑请求一一对应（A1-2 若需要，再引入 input_hash 与 409）。
 
 ---
 
@@ -192,13 +218,14 @@ interface AgentDefinition {
 | Worker | 真实 PostgreSQL + 测试工作流（含 Agent 集成、心跳、取消、重试、崩溃恢复） |
 | 迁移 | 全新空库执行全部 migration；既有表不动 |
 
-A1-1 新增 98 个测试；既有 390 个测试不减少。
+A1-1 系列（含 A1-1-REV-01）新增 118 个测试；既有 390 个测试不减少。
 
 ---
 
 ## 12. A1-2 预告（不在本轮）
 
 - 注册 `planner.chapter` 与 `writer.draft` 两个 Agent（promptVersion 从 1.0.0 起）；
+- 按 `task_type` 强制章节任务必填 `chapter_id`（A1-1 有意允许为空）；
 - 新增章节生成任务类型与 API（会话 authorId）；
 - 生成 API 只创建任务并返回 taskId，不直接返回正文；
 - 章节工作台读取任务进度与候选；

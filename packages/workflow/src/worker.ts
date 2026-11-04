@@ -7,6 +7,8 @@
  *   3. 启动心跳定时器（续租失败立即 abort，停止后续步骤）；
  *   4. 交给 WorkflowKernel 按固定步骤执行，每步写 current_step；
  *   5. 完成 / 重试 / 失败 / 取消四选一，全部带 `locked_by` fencing。
+ *      成功与取消共用一个终态入口：`cancel_requested_at` 在同一条 UPDATE 里
+ *      原子判断，取消优先于成功与失败（含可重试错误）。
  *
  * 崩溃语义：进程直接消失不会写任何终态；租约到期后由其它 Worker 的 sweep
  * 重新排队或判失败，因此不会留下"永久 processing"。
@@ -28,7 +30,6 @@ import {
   failTask,
   getTaskCancellationState,
   heartbeatTask,
-  markTaskCancelled,
   sweepExpiredTasks,
   updateTaskStep,
   type GenerationTaskView,
@@ -187,12 +188,16 @@ export class WorkerRunner {
       return 'lease-lost';
     }
     if (cancellation.cancelRequested) {
-      return (await markTaskCancelled(this.db, {
+      // 取消是终态结论：与"完成"共用同一条原子 UPDATE，避免与并发完成互相覆盖。
+      const finalStatus = await completeTask(this.db, {
         taskId: task.id,
         workerId: this.workerId,
-      }))
-        ? 'cancelled'
-        : 'lease-lost';
+      });
+      if (finalStatus === 'lost') {
+        return 'lease-lost';
+      }
+      this.logger.info('task cancelled', { taskId: task.id, taskType: task.taskType });
+      return 'cancelled';
     }
 
     const controller = new AbortController();
@@ -218,7 +223,7 @@ export class WorkerRunner {
     timer.unref();
 
     try {
-      const result = await this.kernel.execute(
+      await this.kernel.execute(
         {
           taskId: task.id,
           workId: task.workId,
@@ -249,21 +254,24 @@ export class WorkerRunner {
         },
       );
 
-      if (result.status === 'cancelled') {
-        const ok = await markTaskCancelled(this.db, {
-          taskId: task.id,
-          workerId: this.workerId,
-        });
-        this.logger.info('task cancelled', { taskId: task.id, taskType: task.taskType });
-        return ok ? 'cancelled' : 'lease-lost';
+      // 本地已判定租约丢失：不写任何终态，交给 sweep 回收（避免误写成功）。
+      if (leaseLost) {
+        this.logger.warn('task lease lost', { taskId: task.id });
+        return 'lease-lost';
       }
 
-      const ok = await completeTask(this.db, {
+      // 成功与取消共用同一个终态入口：`cancel_requested_at` 在 SQL 里原子判断，
+      // 因此"步骤刚跑完、取消刚好到达"也不会被写成 succeeded。
+      const finalStatus = await completeTask(this.db, {
         taskId: task.id,
         workerId: this.workerId,
       });
-      if (!ok) {
+      if (finalStatus === 'lost') {
         return 'lease-lost';
+      }
+      if (finalStatus === 'cancelled') {
+        this.logger.info('task cancelled', { taskId: task.id, taskType: task.taskType });
+        return 'cancelled';
       }
       this.logger.info('task succeeded', { taskId: task.id, taskType: task.taskType });
       return 'succeeded';
@@ -284,6 +292,10 @@ export class WorkerRunner {
       if (status === 'lost') {
         this.logger.warn('task lease lost while failing', { taskId: task.id });
         return 'lease-lost';
+      }
+      if (status === 'cancelled') {
+        this.logger.info('task cancelled', { taskId: task.id, taskType: task.taskType });
+        return 'cancelled';
       }
       this.logger.warn('task failed', {
         taskId: task.id,

@@ -161,6 +161,113 @@ describe('创建任务（幂等 + 权限）', () => {
   });
 });
 
+describe('request_id + input_hash 幂等', () => {
+  it('同 requestId + 同内容（key 顺序不同）返回既有任务', async () => {
+    const requestId = `req-${randomUUID()}`;
+    const first = await createGenerationTask(
+      db,
+      taskInput({
+        requestId,
+        inputSnapshot: { chapterNo: 1, options: { tone: 'plain', length: 100 } },
+      }),
+    );
+    const second = await createGenerationTask(
+      db,
+      taskInput({
+        requestId,
+        inputSnapshot: { options: { length: 100, tone: 'plain' }, chapterNo: 1 },
+      }),
+    );
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.task.id).toBe(first.task.id);
+    expect(second.task.inputHash).toBe(first.task.inputHash);
+    expect(first.task.inputHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(await db.generationTask.count({ where: { workId, requestId } })).toBe(1);
+  });
+
+  it('六个语义字段任一变化 → TASK_REQUEST_CONFLICT，不覆盖也不新建', async () => {
+    const requestId = `req-${randomUUID()}`;
+    const base: Parameters<typeof createGenerationTask>[1] = taskInput({
+      requestId,
+      inputSnapshot: { alpha: 1, beta: { gamma: 2 } },
+    });
+    const first = await createGenerationTask(db, base);
+
+    const variants: { label: string; overrides: Partial<typeof base> }[] = [
+      { label: 'chapterId', overrides: { chapterId: null } },
+      { label: 'taskType', overrides: { taskType: 'test.other' } },
+      { label: 'inputSnapshot', overrides: { inputSnapshot: { alpha: 2 } } },
+      { label: 'provider', overrides: { provider: 'openai-compatible' } },
+      { label: 'model', overrides: { model: 'other-model' } },
+      { label: 'maxAttempts', overrides: { maxAttempts: 5 } },
+    ];
+
+    for (const { label, overrides } of variants) {
+      await expect(
+        createGenerationTask(db, { ...base, ...overrides }),
+        label,
+      ).rejects.toMatchObject({ code: 'TASK_REQUEST_CONFLICT' });
+    }
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: first.task.id } });
+    expect(row.inputHash).toBe(first.task.inputHash);
+    expect(row.inputSnapshot).toEqual({ alpha: 1, beta: { gamma: 2 } });
+    expect(await db.generationTask.count({ where: { workId, requestId } })).toBe(1);
+  });
+
+  it('并发同 requestId + 不同内容：只有一行任务与一个冲突', async () => {
+    const requestId = `req-${randomUUID()}`;
+    const results = await Promise.allSettled([
+      createGenerationTask(db, taskInput({ requestId, inputSnapshot: { variant: 'a' } })),
+      createGenerationTask(db, taskInput({ requestId, inputSnapshot: { variant: 'b' } })),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    expect(rejected?.status).toBe('rejected');
+    if (rejected?.status === 'rejected') {
+      expect(rejected.reason).toMatchObject({ code: 'TASK_REQUEST_CONFLICT' });
+    }
+    expect(await db.generationTask.count({ where: { workId, requestId } })).toBe(1);
+  });
+
+  it('input_hash 只存 64 位摘要；不可稳定序列化的快照被拒绝且不建行', async () => {
+    const requestId = `req-${randomUUID()}`;
+    const { task } = await createGenerationTask(
+      db,
+      taskInput({ requestId, inputSnapshot: { secret: 'sk-live-SECRET' } }),
+    );
+
+    expect(task.inputHash).toHaveLength(64);
+    const rows = await db.$queryRaw<{ hash: string; len: number }[]>`
+      SELECT input_hash AS hash, char_length(input_hash)::int AS len
+        FROM generation_tasks WHERE id = ${task.id}
+    `;
+    expect(rows[0]?.len).toBe(64);
+    expect(rows[0]?.hash).toBe(task.inputHash);
+    expect(rows[0]?.hash).not.toContain('sk-live');
+
+    // 数据库兜底：长度不是 64 的摘要不能落库
+    await expect(
+      db.$executeRaw`UPDATE generation_tasks SET input_hash = 'too-short' WHERE id = ${task.id}`,
+    ).rejects.toThrow();
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    for (const snapshot of [{ a: undefined }, { fn: () => 1 }, { n: 1n }, cyclic]) {
+      await expect(
+        createGenerationTask(
+          db,
+          taskInput({ requestId: `req-${randomUUID()}`, inputSnapshot: snapshot }),
+        ),
+      ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    }
+    expect(await db.generationTask.count({ where: { workId, requestId } })).toBe(1);
+  });
+});
+
 describe('章节与作品的隔离', () => {
   it('同一作品内章号唯一；不同作品可有相同章号', async () => {
     await expect(createTestChapter(db, workId, 1)).rejects.toThrow();
@@ -220,7 +327,7 @@ describe('领取 / 心跳 / 完成（fencing）', () => {
     await expect(
       heartbeatTask(db, { taskId: task.id, workerId: WORKER_A, leaseMs: 5_000 }),
     ).resolves.toBe(false);
-    await expect(completeTask(db, { taskId: task.id, workerId: WORKER_A })).resolves.toBe(false);
+    await expect(completeTask(db, { taskId: task.id, workerId: WORKER_A })).resolves.toBe('lost');
     await expect(markTaskCancelled(db, { taskId: task.id, workerId: WORKER_A })).resolves.toBe(
       false,
     );
@@ -238,7 +345,9 @@ describe('领取 / 心跳 / 完成（fencing）', () => {
   it('完成后进入终态，且不可再修改', async () => {
     const { task } = await createGenerationTask(db, taskInput());
     await claimNextTask(db, { workerId: WORKER_A, leaseMs: 5_000 });
-    await expect(completeTask(db, { taskId: task.id, workerId: WORKER_A })).resolves.toBe(true);
+    await expect(completeTask(db, { taskId: task.id, workerId: WORKER_A })).resolves.toBe(
+      'succeeded',
+    );
 
     const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
     expect(row.status).toBe('succeeded');
@@ -345,6 +454,68 @@ describe('重试与失败', () => {
     const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
     expect(row.status).toBe('failed');
     expect(row.attemptCount).toBe(1);
+  });
+});
+
+describe('取消优先于完成与失败', () => {
+  it('processing 中取消后 completeTask → cancelled，不写 succeeded', async () => {
+    const { task } = await createGenerationTask(db, taskInput());
+    await claimNextTask(db, { workerId: WORKER_A, leaseMs: 5_000 });
+    await requestTaskCancellationForAuthor(db, { authorId, workId, taskId: task.id });
+
+    await expect(completeTask(db, { taskId: task.id, workerId: WORKER_A })).resolves.toBe(
+      'cancelled',
+    );
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('cancelled');
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+    expect(row.errorCode).toBeNull();
+    expect(row.errorMessageSanitized).toBeNull();
+  });
+
+  it('取消标志下 failTask 即使可重试且仍有次数也进入 cancelled，不 requeue', async () => {
+    const { task } = await createGenerationTask(db, taskInput({ maxAttempts: 5 }));
+    await claimNextTask(db, { workerId: WORKER_A, leaseMs: 5_000 });
+    await requestTaskCancellationForAuthor(db, { authorId, workId, taskId: task.id });
+
+    await expect(
+      failTask(db, {
+        taskId: task.id,
+        workerId: WORKER_A,
+        errorCode: 'MODEL_TIMEOUT',
+        message: '模型服务超时',
+        retryable: true,
+      }),
+    ).resolves.toBe('cancelled');
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('cancelled');
+    expect(row.attemptCount).toBe(1);
+    expect(row.errorCode).toBeNull();
+    expect(row.errorMessageSanitized).toBeNull();
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+
+    // 不会重新进入队列
+    await expect(claimNextTask(db, { workerId: WORKER_B, leaseMs: 5_000 })).resolves.toBeNull();
+  });
+
+  it('取消 + 租约过期 → sweep 进入 cancelled，不留下永久 processing', async () => {
+    const { task } = await createGenerationTask(db, taskInput());
+    await claimNextTask(db, { workerId: WORKER_A, leaseMs: 5_000 });
+    await requestTaskCancellationForAuthor(db, { authorId, workId, taskId: task.id });
+    await expireLease(task.id);
+
+    const swept = await sweepExpiredTasks(db);
+    expect(swept.cancelled).toBeGreaterThanOrEqual(1);
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('cancelled');
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+    expect(row.errorCode).toBeNull();
   });
 });
 

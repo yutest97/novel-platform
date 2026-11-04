@@ -161,8 +161,8 @@
 
 | 编号 | 用例 | 预期 |
 | --- | --- | --- |
-| AT-Q1 | **同 request_id 并发提交**（同一用户两个请求同 request_id 同时到达） | 仅产生 1 个 task（`UNIQUE(user_id, request_id)` 阻止并发重复提交） |
-| AT-Q2 | **同 request_id、不同 input_hash** | 返回 `409 REQUEST_ID_REUSED`（request_id 被用于不同入参） |
+| AT-Q1 | **同 request_id 并发提交**（同一作品两个请求同 request_id 同时到达） | 仅产生 1 个 task（`UNIQUE(work_id, request_id)` 阻止并发重复提交） |
+| AT-Q2 | **同 request_id、不同 input_hash** | 返回 `409 TASK_REQUEST_CONFLICT`（request_id 被用于不同内容，不覆盖、不新建） |
 | AT-Q3 | **不同 request_id、相同 input_hash**（用户明确再次生成） | **允许**创建新任务（input_hash 无唯一约束） |
 | AT-Q4 | **任务完成后再生成**（同用户、新 request_id、同输入） | 允许创建新任务，产生新候选，不影响旧版本 |
 | AT-Q5 | **Worker 自动重试**（租约过期/崩溃后重抢） | **同一 task**，`attempt_count + 1`，不新建 task |
@@ -451,11 +451,11 @@ B3-B2 交付 item 卡片入口、时间线（分页 / 冲正关系）、追加�
 | AT-WF-5 | 租约过期可恢复 | 过期后 sweep 重新排队；新 Worker 可完成；旧 Worker 写入全部 0 行 | `test/queue.test.ts`、`test/worker.test.ts` |
 | AT-WF-6 | heartbeat 延长租约 | `lease_until` 明显后移；执行期间可观察到心跳更新 | `test/queue.test.ts`、`test/worker.test.ts` |
 | AT-WF-7 | attempt_count / max_attempts | 未用尽回到 queued；用尽转 failed；不可重试一次即 failed | `test/queue.test.ts`、`test/worker.test.ts` |
-| AT-WF-8 | cancel_requested_at 阻止后续步骤 | 步骤之间检测到取消即停止；queued 取消后不再被领取 | `test/kernel.test.ts`、`test/worker.test.ts`、`test/queue.test.ts` |
-| AT-WF-9 | 同 work_id + request_id 只创建一个任务 | 并发创建只有一行；第二次返回既有任务 | `test/queue.test.ts` |
+| AT-WF-8 | cancel_requested_at 阻止后续步骤，且优先于完成/失败 | 步骤之间检测到取消即停止；queued 取消后不再被领取；processing 中取消后即使步骤成功或抛可重试错误也进入 cancelled，不 requeue、不写 succeeded，且清空锁/租约/错误字段 | `test/kernel.test.ts`、`test/worker.test.ts`、`test/queue.test.ts` |
+| AT-WF-9 | 同 work_id + request_id 只创建一个任务（request_id + input_hash） | 同键同指纹（对象 key 顺序不同）返回既有任务；chapterId/taskType/inputSnapshot/provider/model/maxAttempts 任一变化 → `TASK_REQUEST_CONFLICT`；并发同键异内容只有一行 + 一个冲突；`input_hash` 为 64 位摘要，不含正文/prompt | `test/queue.test.ts`、`test/request-hash.test.ts` |
 | AT-WF-10 | 非法状态迁移被拒绝 | queued→succeeded 被数据库拒绝；终态不可再修改 | `test/queue.test.ts` |
 | AT-WF-11 | chapters 数据隔离 | `UNIQUE(work_id, chapter_no)`；不同作品可同章号；跨作品章节不能建任务 | `test/queue.test.ts` |
-| AT-WF-12 | 既有测试不减少 | 既有 390 个测试全绿；A1-1 新增 98 个 | 全量 `pnpm test` |
+| AT-WF-12 | 既有测试不减少 | 既有 390 个测试全绿；A1-1 系列（含 REV-01）新增 118 个 | 全量 `pnpm test` |
 
 **未交付（不得标记完成）**：Planner/Writer 流水线、生成 API、章节 UI、
 `chapter_contracts / chapter_candidates / chapter_versions`、Reviewer/Continuity/Fact、

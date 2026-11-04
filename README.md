@@ -600,14 +600,19 @@ MODEL_TIMEOUT_MS=60000
 - `FOR UPDATE SKIP LOCKED` 领取 `queued`，写 `locked_by / lease_until / heartbeat_at`，`attempt_count + 1`；
 - 心跳失败立即停止后续步骤；租约过期由 sweep 回收（取消优先 → 次数用尽判 failed → 其余回 queued）；
 - 所有 Worker 写都带 `locked_by` fencing，旧 Worker 不会覆盖新 Worker；
-- 崩溃不会留下永久 `processing`；同一 `work_id + request_id` 只创建一个任务。
+- 崩溃不会留下永久 `processing`；同一 `work_id + request_id` 只创建一个任务；
+- `input_hash`（canonical JSON 的 SHA-256）覆盖
+  `chapterId / taskType / inputSnapshot / provider / model / maxAttempts`：
+  同键同指纹返回既有任务，异指纹 `TASK_REQUEST_CONFLICT`，不覆盖、不新建；
+- **取消优先**：`cancel_requested_at` 非空时，成功、失败与重试都收敛为 `cancelled`，
+  不写 `succeeded`、不回 `queued`，并清空锁、租约与错误字段。
 
 **权限与日志**：A1-1 **没有新增公开 API**；作者侧服务（创建/读取/取消）必须传会话里的
 `authorId` 并经 `requireOwnedWork`，管理员没有普通任务入口（测试覆盖 404）。
 任务与模型日志只记录 ids / 状态 / 稳定错误码，不含 API Key、prompt、正文或模型原始错误。
 
-**测试**：A1-1 新增 98 个（Provider 14 / Schema 20 / Agent 15 / Kernel 11 / Queue 20 / Worker 13 /
-Mock 5），全量单测 **488** 个。
+**测试**：A1-1 系列（含 A1-1-REV-01）新增 118 个（Provider 14 / Schema 20 / Agent 15 /
+Kernel 11 / Queue 27 / Worker 15 / Mock 5 / canonical JSON + 指纹 11），全量单测 **508** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 

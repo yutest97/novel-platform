@@ -311,6 +311,8 @@ model Chapter {
 /// 生成任务（A1-1 工作流内核）。
 ///
 /// - `(work_id, request_id)` 唯一：同一逻辑请求只创建一个任务；
+/// - `input_hash` 是 request_id 背后内容的 SHA-256 指纹：同键同指纹返回既有行，
+///   同键异指纹稳定报 TASK_REQUEST_CONFLICT（不覆盖、不新建）；
 /// - status 只允许 queued → processing → succeeded/failed/cancelled，
 ///   processing 可回到 queued（重试）；迁移合法性与"终态不可变"
 ///   由数据库触发器兜底；
@@ -323,6 +325,8 @@ model GenerationTask {
   workId                String    @map("work_id") @db.Uuid
   chapterId             String?   @map("chapter_id") @db.Uuid
   requestId             String    @map("request_id")
+  /// SHA-256(hex)，64 位；不含正文 / prompt / 密钥
+  inputHash             String    @map("input_hash")
   taskType              String    @map("task_type")
   status                String    @default("queued")
   currentStep           String?   @map("current_step")

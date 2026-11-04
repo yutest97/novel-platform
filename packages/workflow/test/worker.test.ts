@@ -324,6 +324,64 @@ describe('WorkerRunner', () => {
     expect(row.cancelRequestedAt).not.toBeNull();
   });
 
+  it('取消后抛出可重试错误 → cancelled，不 requeue（取消优先于重试）', async () => {
+    let taskId = '';
+    const runner = runnerWith([
+      {
+        name: 'cancel-then-fail',
+        run: async () => {
+          await db.generationTask.update({
+            where: { id: taskId },
+            data: { cancelRequestedAt: new Date() },
+          });
+          throw new RetryableTaskError('MODEL_TIMEOUT', '模型服务超时');
+        },
+      },
+    ]);
+    const { task } = await createTask(`req-${randomUUID()}`, 5);
+    taskId = task.id;
+
+    await expect(runner.runOnce()).resolves.toBe('cancelled');
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('cancelled');
+    expect(row.attemptCount).toBe(1);
+    expect(row.errorCode).toBeNull();
+    expect(row.errorMessageSanitized).toBeNull();
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+
+    // 不会回到 queued 被再次领取
+    await expect(runner.runOnce()).resolves.toBe('idle');
+  });
+
+  it('步骤正常完成但取消已到达 → 不写 succeeded', async () => {
+    let taskId = '';
+    const runner = runnerWith([
+      {
+        name: 'only',
+        run: async () => {
+          await db.generationTask.update({
+            where: { id: taskId },
+            data: { cancelRequestedAt: new Date() },
+          });
+        },
+      },
+    ]);
+    const { task } = await createTask();
+    taskId = task.id;
+
+    await expect(runner.runOnce()).resolves.toBe('cancelled');
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('cancelled');
+    expect(row.currentStep).toBe('only');
+    expect(row.errorCode).toBeNull();
+    expect(row.errorMessageSanitized).toBeNull();
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+  });
+
   it('queued 阶段取消后不会被领取', async () => {
     const run = vi.fn(async () => undefined);
     const runner = runnerWith([{ name: 'never', run }]);

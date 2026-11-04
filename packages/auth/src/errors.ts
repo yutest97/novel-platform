@@ -28,6 +28,7 @@ export type AuthErrorCode =
   | 'ITEM_EVENT_NOT_REVERSIBLE'
   | 'ITEM_EVENT_IDEMPOTENCY_CONFLICT'
   | 'ITEM_EVENTS_CLOSED'
+  | 'TASK_REQUEST_CONFLICT'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -62,6 +63,8 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   ITEM_EVENT_IDEMPOTENCY_CONFLICT: 409,
   // 物品已软删除，流水封闭
   ITEM_EVENTS_CLOSED: 409,
+  // 同一 requestId 被用于不同内容（任务创建幂等冲突）
+  TASK_REQUEST_CONFLICT: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -99,6 +102,8 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   ITEM_EVENT_NOT_REVERSIBLE: '只能冲正当前最新且未被冲正的事件',
   ITEM_EVENT_IDEMPOTENCY_CONFLICT: '该幂等键已用于不同的事件内容',
   ITEM_EVENTS_CLOSED: '物品已删除，不能再追加或冲正事件',
+  // 不要求客户端换 requestId，也不回显任何输入内容
+  TASK_REQUEST_CONFLICT: '该 requestId 已用于不同的请求内容',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

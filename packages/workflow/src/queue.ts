@@ -8,6 +8,13 @@
  *     │                   └──cancel──────────▶ cancelled
  *     └──cancel（尚未领取）──────────────────▶ cancelled
  *
+ * 取消优先：一旦 `cancel_requested_at` 非空，无论当前步骤是成功还是失败
+ * （含可重试错误），终态一律是 `cancelled`，不会回到 queued、不会写成 succeeded。
+ * 该判断在 `completeTask` / `failTask` 的同一条 UPDATE 里原子完成。
+ *
+ * 幂等：`(work_id, request_id)` 唯一；`input_hash` 相同才视为同一请求，
+ * 不同则 `TASK_REQUEST_CONFLICT`（不覆盖、不新建）。
+ *
  * 关键不变量（数据库约束 + 触发器兜底，见迁移 SQL）：
  * - `(work_id, request_id)` 唯一：创建任务幂等；
  * - processing 必须持有 locked_by + lease_until；
@@ -26,6 +33,8 @@ import { randomUUID } from 'node:crypto';
 import { AuthError } from '@novel/auth';
 import type { PrismaClient } from '@novel/db';
 import { normalizeUuid, requireOwnedWork } from '@novel/works';
+
+import { CanonicalJsonError, canonicalJsonStringify, hashTaskRequest } from './request-hash.js';
 
 /** 任务状态（与数据库 CHECK 一致）。 */
 export const TASK_STATUSES = ['queued', 'processing', 'succeeded', 'failed', 'cancelled'] as const;
@@ -52,6 +61,8 @@ export interface GenerationTaskView {
   readonly workId: string;
   readonly chapterId: string | null;
   readonly requestId: string;
+  /** 请求内容的 SHA-256 指纹（64 位小写 hex），不含正文 / prompt。 */
+  readonly inputHash: string;
   readonly taskType: string;
   readonly status: TaskStatus;
   readonly currentStep: string | null;
@@ -81,6 +92,7 @@ interface TaskRowShape {
   workId: string;
   chapterId: string | null;
   requestId: string;
+  inputHash: string;
   taskType: string;
   status: string;
   currentStep: string | null;
@@ -105,6 +117,7 @@ interface RawTaskRow {
   work_id: string;
   chapter_id: string | null;
   request_id: string;
+  input_hash: string;
   task_type: string;
   status: string;
   current_step: string | null;
@@ -129,6 +142,7 @@ function toView(row: TaskRowShape): GenerationTaskView {
     workId: row.workId,
     chapterId: row.chapterId,
     requestId: row.requestId,
+    inputHash: row.inputHash,
     taskType: row.taskType,
     status: row.status as TaskStatus,
     currentStep: row.currentStep,
@@ -154,6 +168,7 @@ function fromRaw(row: RawTaskRow): GenerationTaskView {
     workId: row.work_id,
     chapterId: row.chapter_id,
     requestId: row.request_id,
+    inputHash: row.input_hash,
     taskType: row.task_type,
     status: row.status as TaskStatus,
     currentStep: row.current_step,
@@ -222,8 +237,12 @@ export interface CreateGenerationTaskInput {
 /**
  * 创建任务（幂等）。
  *
- * 同 `(workId, requestId)` 已存在时返回既有任务且 `created=false`，
- * 不会覆盖既有输入 —— 调用方应把 request_id 当作逻辑请求的幂等键。
+ * 同 `(workId, requestId)` 已存在时：
+ * - `input_hash` 相同 → 返回既有任务且 `created=false`，不覆盖、不新增；
+ * - `input_hash` 不同 → `TASK_REQUEST_CONFLICT`（409），不覆盖、不新增。
+ *
+ * 指纹覆盖 `chapterId / taskType / inputSnapshot / provider / model / maxAttempts`，
+ * `inputSnapshot` 先转 canonical JSON（对象 key 递归排序、数组保持顺序）。
  */
 export async function createGenerationTask(
   db: TaskReader & Pick<PrismaClient, 'generationTask'>,
@@ -259,16 +278,25 @@ export async function createGenerationTask(
 
   let snapshotJson: string;
   try {
-    snapshotJson = JSON.stringify(input.inputSnapshot);
-  } catch {
-    throw invalid('inputSnapshot 必须是可序列化的 JSON');
-  }
-  if (snapshotJson === undefined) {
-    throw invalid('inputSnapshot 不能是 undefined');
+    snapshotJson = canonicalJsonStringify(input.inputSnapshot);
+  } catch (error) {
+    if (error instanceof CanonicalJsonError) {
+      throw invalid(`inputSnapshot 必须是可稳定序列化的 JSON（${error.message}）`);
+    }
+    throw error;
   }
   if (snapshotJson.length > MAX_INPUT_SNAPSHOT_CHARS) {
     throw invalid(`inputSnapshot 不能超过 ${MAX_INPUT_SNAPSHOT_CHARS} 个字符`);
   }
+
+  const inputHash = hashTaskRequest({
+    chapterId,
+    taskType,
+    inputSnapshot: input.inputSnapshot,
+    provider,
+    model,
+    maxAttempts,
+  });
 
   try {
     const row = await db.generationTask.create({
@@ -276,6 +304,7 @@ export async function createGenerationTask(
         workId,
         chapterId,
         requestId,
+        inputHash,
         taskType,
         inputSnapshot: input.inputSnapshot as never,
         provider,
@@ -293,6 +322,10 @@ export async function createGenerationTask(
     });
     if (existing === null) {
       throw error;
+    }
+    if (existing.inputHash !== inputHash) {
+      // 不覆盖既有任务，也不回显任何一侧的输入内容。
+      throw new AuthError('TASK_REQUEST_CONFLICT');
     }
     return { task: toView(existing), created: false };
   }
@@ -345,6 +378,8 @@ export async function requestTaskCancellationForAuthor(
     UPDATE generation_tasks
        SET status = 'cancelled',
            cancel_requested_at = clock_timestamp(),
+           error_code = NULL,
+           error_message_sanitized = NULL,
            locked_by = NULL,
            lease_until = NULL,
            updated_at = clock_timestamp()
@@ -459,16 +494,28 @@ export async function updateTaskStep(
   return affected > 0;
 }
 
-/** 标记成功；返回 false 表示租约已丢失（调用方必须停止写入）。 */
+/**
+ * 标记成功或取消（唯一终态入口）。
+ *
+ * 在**同一条 UPDATE** 里原子判断 `cancel_requested_at`：
+ * - 有取消标记 → `cancelled`（取消优先于完成）；
+ * - 无取消标记 → `succeeded`；
+ * - 租约已被抢占 / 状态不再是 processing → 0 行，返回 `lost`。
+ *
+ * 两种终态都清空锁、租约与错误字段：取消不是失败，不应留下错误码。
+ */
 export async function completeTask(
-  db: Pick<PrismaClient, '$executeRaw'>,
+  db: Pick<PrismaClient, '$queryRaw'>,
   input: { readonly taskId: string; readonly workerId: string },
-): Promise<boolean> {
+): Promise<'succeeded' | 'cancelled' | 'lost'> {
   const taskId = normalizeUuid(input.taskId, '任务 id');
   const workerId = assertText(input.workerId, 'workerId', 128);
-  const affected = await db.$executeRaw`
+  const rows = await db.$queryRaw<{ status: string }[]>`
     UPDATE generation_tasks
-       SET status = 'succeeded',
+       SET status = CASE
+             WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+             ELSE 'succeeded'
+           END,
            error_code = NULL,
            error_message_sanitized = NULL,
            locked_by = NULL,
@@ -477,11 +524,16 @@ export async function completeTask(
      WHERE id = ${taskId}
        AND locked_by = ${workerId}
        AND status = 'processing'
+    RETURNING status
   `;
-  return affected > 0;
+  const row = rows[0];
+  if (row === undefined) {
+    return 'lost';
+  }
+  return row.status === 'cancelled' ? 'cancelled' : 'succeeded';
 }
 
-/** 标记取消（Worker 观察到 cancel_requested_at 后调用）。 */
+/** 显式取消（不依赖 cancel_requested_at；Worker 已统一走 completeTask）。 */
 export async function markTaskCancelled(
   db: Pick<PrismaClient, '$executeRaw'>,
   input: { readonly taskId: string; readonly workerId: string },
@@ -491,6 +543,8 @@ export async function markTaskCancelled(
   const affected = await db.$executeRaw`
     UPDATE generation_tasks
        SET status = 'cancelled',
+           error_code = NULL,
+           error_message_sanitized = NULL,
            locked_by = NULL,
            lease_until = NULL,
            updated_at = clock_timestamp()
@@ -504,6 +558,9 @@ export async function markTaskCancelled(
 /**
  * 记录失败。
  *
+ * 取消优先：只要 `cancel_requested_at` 非空，无论错误是否可重试、次数是否用尽，
+ * 一律进入 `cancelled`，**不会回到 queued**，也不会留下错误码。
+ * 其余情况：
  * - `retryable=true` 且 attempt_count < max_attempts → 回到 queued；
  * - 否则 → failed（终态）。
  *
@@ -518,7 +575,7 @@ export async function failTask(
     readonly message: string;
     readonly retryable: boolean;
   },
-): Promise<'queued' | 'failed' | 'lost'> {
+): Promise<'queued' | 'failed' | 'cancelled' | 'lost'> {
   const taskId = normalizeUuid(input.taskId, '任务 id');
   const workerId = assertText(input.workerId, 'workerId', 128);
   const errorCode = assertText(input.errorCode, 'errorCode', 64);
@@ -527,11 +584,18 @@ export async function failTask(
   const rows = await db.$queryRaw<{ status: string }[]>`
     UPDATE generation_tasks
        SET status = CASE
+             WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
              WHEN ${input.retryable} AND attempt_count < max_attempts THEN 'queued'
              ELSE 'failed'
            END,
-           error_code = ${errorCode},
-           error_message_sanitized = ${message},
+           error_code = CASE
+             WHEN cancel_requested_at IS NOT NULL THEN NULL
+             ELSE ${errorCode}
+           END,
+           error_message_sanitized = CASE
+             WHEN cancel_requested_at IS NOT NULL THEN NULL
+             ELSE ${message}
+           END,
            locked_by = NULL,
            lease_until = NULL,
            updated_at = clock_timestamp()
@@ -544,7 +608,10 @@ export async function failTask(
   if (row === undefined) {
     return 'lost';
   }
-  return row.status === 'queued' ? 'queued' : 'failed';
+  if (row.status === 'queued') {
+    return 'queued';
+  }
+  return row.status === 'cancelled' ? 'cancelled' : 'failed';
 }
 
 /**
@@ -560,6 +627,8 @@ export async function sweepExpiredTasks(
   const cancelled = await db.$executeRaw`
     UPDATE generation_tasks
        SET status = 'cancelled',
+           error_code = NULL,
+           error_message_sanitized = NULL,
            locked_by = NULL,
            lease_until = NULL,
            updated_at = clock_timestamp()
