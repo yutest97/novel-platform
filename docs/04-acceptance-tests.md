@@ -569,3 +569,23 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-72 | 权限与脱敏 | 401 跳登录；404 显示作品/章节不存在；管理员 403；页面与截图不含邮箱、口令、Cookie、令牌 | 同上 |
 | AT-WF-73 | 移动端 | 390×844 可创建章节、生成、候选预览与正式阅读，`scrollWidth <= viewport + 1` | 同上 |
 | AT-WF-74 | 既有测试不减少 | 全量单测 **685**（A1-3C 651 + A1-4A 21 + REV-01 7 + REV-02 6）；浏览器 E2E 67 + A1-4A 10 + REV-01 2 + REV-02 1 = **80** | 全量 `pnpm test`、`playwright test` |
+
+## 22. 人工章节版本保存验收（A1-4B-A）
+
+> 对应 `docs/07-master-roadmap.md` A1-4B-A、`docs/08` 第 17 节。
+> 本轮只开放**服务层与 HTTP API**（以及前端客户端函数）：
+> **不提供** Markdown 编辑器 UI、版本 diff / 恢复、局部重写、定稿流程按钮。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-75 | 首版 | 无正式版本时 `baseVersionId=null` → 201，`versionNo=1`、`source=human`、`parentVersionId=null`，章节进入 `in_review` | `test/chapter-human-version.test.ts` |
+| AT-WF-76 | 追加版本 | 基于版本 1 保存 → `versionNo=2`、`parentVersionId=版本 1`；版本 1 原样保留 | 同上 |
+| AT-WF-77 | 字数服务端计算 | 服务端 `trim` 后写入，`wordCount` 按非空白字符重新计算，忽略客户端任何字数声明 | 同上 |
+| AT-WF-78 | 正文校验 | 空白 / <1200 非空白字符 / >200000 字符 → 400 `CHAPTER_CONTENT_INVALID`，文案「章节正文不合法，请检查字数和内容」，不产生版本 | 同上 |
+| AT-WF-79 | 基线冲突 | 旧 `baseVersionId`、或已有版本却传 `null` → 409 `CHAPTER_VERSION_CONFLICT`，无新版本 | 同上 |
+| AT-WF-80 | 并发同 base | 两个并发请求同一 base → 恰好 201 + 409，只新增一个版本，版本号连续 | 同上 |
+| AT-WF-81 | 并发不同 base | 不跳号、不覆盖；旧 base 一方 409 | 同上 |
+| AT-WF-82 | 章节状态 | `finalized` 保存后回到 `in_review`；`abandoned` → 409 `CHAPTER_STATE_INVALID_FOR_SAVE`；`planned/outlined/drafting` 保存后进入 `in_review` | 同上 |
+| AT-WF-83 | 权限与白名单 | 跨作品 / 跨章节 404；管理员 403；缺 Origin 403；未登录 401；`source` / `versionNo` / `createdBy` / 归属 / 时间戳 → 400；缺 `baseVersionId` → 400 | 同上 |
+| AT-WF-84 | 审计与回滚 | 审计 `chapter.version_created` 的 detail 只含 7 个字段、不含正文；审计写入失败 → 版本与章节状态整体回滚 | 同上 |
+| AT-WF-85 | 既有测试不减少 | 全量单测 **703**（A1-4A 685 + A1-4B-A 18）；浏览器 E2E 仍 **80** | 全量 `pnpm test`、`playwright test` |

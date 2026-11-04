@@ -16,6 +16,12 @@ export {
   type AdoptionMeta,
 } from './adoption.js';
 export {
+  normalizeHumanContent,
+  saveHumanChapterVersion,
+  type SaveHumanChapterVersionInput,
+  type SavedHumanChapterVersion,
+} from './human.js';
+export {
   MAX_CHAPTER_NO,
   MAX_CHAPTER_TITLE_LENGTH,
   createChapter,
@@ -44,6 +50,9 @@ export {
   MAX_DRAFT_CHARS,
   MIN_CONTRACT_TARGET_WORDS,
   MIN_DRAFT_WORDS,
+  SAVED_CHAPTER_STATUS,
+  SAVE_CHAPTER_STATUSES,
+  isChapterOpenForSave,
 } from './types.js';
 export type {
   AssembledContext,

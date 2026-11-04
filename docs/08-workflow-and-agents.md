@@ -1,10 +1,10 @@
-# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A / A1-3B / A1-3C / REV-01）
+# 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4）
 
-- 版本：v1.5
-- 日期：2026-11-04
+- 版本：v1.6
+- 日期：2026-11-05
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
-  `20261104030000_a1_chapter_versions`（A1-3B / A1-3C 均无新增迁移）
+  `20261104030000_a1_chapter_versions`（A1-3B / A1-3C / A1-4A / A1-4B-A 均无新增迁移）
 
 ---
 
@@ -795,10 +795,100 @@ POST .../adopt                                 201，versionNo=1，chapter in_re
 
 ---
 
-## 16. A1-4 预告（不在本轮）
+## 16. A1-4A：章节工作台（已完成）
 
-- 章节工作台（列表 / 正文阅读 / 候选查看与采纳按钮 / 任务轮询）；
-- 正式版本读取接口与版本列表；
-- 人工修订（`source='human'`）；
-- 重新生成与差异对比；
-- 仍不接 Reviewer / RAG。
+- 章节列表与创建、章节工作台（生成 / 轮询 / 取消 / 候选预览 / 采纳 / 正式阅读）；
+- 只读 API：章节列表、版本摘要、版本正文；
+- 与 A1-4B 的边界：**没有**编辑器、`human` 版本、diff / 恢复。
+
+## 17. A1-4B-A：人工章节版本保存
+
+> 本轮**只有服务层与 HTTP API**（+ 前端客户端函数）：没有 Markdown 编辑器、
+> 没有版本恢复 / diff、没有局部重写，也不写候选表。
+
+### 17.1 路由与 DTO
+
+| 方法 | 路径 | 说明 | 成功 |
+| --- | --- | --- | --- |
+| POST | `/api/works/:workId/chapters/:chapterId/versions` | 保存人工版本 | 201 `{ version }` |
+
+**严格白名单**：`content`（string）、`baseVersionId`（string \| null）。
+
+```jsonc
+// 请求（首版）
+{ "content": "……", "baseVersionId": null }
+// 请求（基于当前最新版本）
+{ "content": "……", "baseVersionId": "<当前最大版本的 id>" }
+// 响应（201，**不含正文**）
+{ "version": { "versionId", "versionNo", "wordCount", "source": "human",
+               "parentVersionId", "chapterStatus" } }
+```
+
+- `source` / `versionNo` / `createdBy` / `chapterId` / `workId` / 任何时间戳提交即 400；
+- `baseVersionId` **必须显式出现**：漏传 → 400（不能默认成 null），
+  `null` 表示"预期章节还没有正式版本"；
+- 写接口校验 Origin；只允许作品作者（他人作品 404、管理员 403、未登录 401）；
+- 请求体上限放宽到 150 万字符（正文可到 20 万字符，JSON 转义会放大长度），
+  长度校验仍由服务层统一报 `CHAPTER_CONTENT_INVALID`。
+
+### 17.2 事务与并发（`saveHumanChapterVersion`）
+
+```
+runWorkWrite（作品级 advisory lock）
+  → requireOwnedWork
+  → SELECT … FROM chapters WHERE id=? AND work_id=? FOR UPDATE
+  → 读当前最大版本 latest
+  → baseVersionId 与 latest 比对：不一致 → 409（绝不 last-write-wins）
+  → 插入 chapter_versions(version_no = latest.version_no + 1,
+        source='human', source_candidate_id=NULL,
+        parent_version_id=baseVersionId, created_by=作者)
+  → 章节 status → in_review
+  → 审计 chapter.version_created
+```
+
+- **同 base 并发**：作品锁 + 章节行锁把写入串行化，第一个提交后第二个读到的
+  latest 已变 → 恰好一个 201、一个 409，只新增一个版本；
+- **不同 base 并发**：`baseVersionId=null` 且已有版本 → 直接 409；
+  版本号只由 `max+1` 决定，不会跳号，也不会覆盖旧版本；
+- 唯一约束（`chapter_id + version_no`）与死锁分别翻译成
+  `CHAPTER_VERSION_CONFLICT` 与 `CONCURRENT_MODIFICATION`（都可重试）。
+
+### 17.3 章节状态
+
+| 保存前 | 保存后 | 说明 |
+| --- | --- | --- |
+| `planned` / `outlined` / `drafting` / `in_review` | `in_review` | 推进或保持 |
+| `finalized` | `in_review` | 定稿后修订：允许保存，章节回到待定稿 |
+| `abandoned` | 不变 | 拒绝：`409 CHAPTER_STATE_INVALID_FOR_SAVE` |
+
+白名单见 `SAVE_CHAPTER_STATUSES` / `isChapterOpenForSave`（新增状态默认拒绝）。
+
+### 17.4 正文校验
+
+- 服务端 `trim` 后判断：空 → 拒绝；
+- 大于 200000 字符 → 拒绝（与数据库 CHECK 一致）；
+- 少于 1200 个非空白字符（`countWords`，与 AI 候选同一口径）→ 拒绝；
+- 三类统一 `400 CHAPTER_CONTENT_INVALID`，文案「章节正文不合法，请检查字数和内容」；
+  不回显正文、不提示差多少字；
+- `wordCount` 由服务端按 `trim` 后的正文重新计算，**不接受客户端提交**。
+
+### 17.5 审计
+
+`chapter.version_created`，detail **只有**
+`workId / chapterId / versionId / versionNo / source / wordCount / parentVersionId`；
+不含正文、不含 prompt。审计失败 → 整个事务回滚（版本与章节状态一起回退）。
+
+### 17.6 错误码
+
+| 错误码 | HTTP | 触发 |
+| --- | --- | --- |
+| `CHAPTER_CONTENT_INVALID` | 400 | 正文空白 / 过短 / 超长 |
+| `CHAPTER_VERSION_CONFLICT` | 409 | `baseVersionId` 不是当前最大版本，或版本号唯一冲突 |
+| `CHAPTER_STATE_INVALID_FOR_SAVE` | 409 | 章节已废弃 |
+| `CONCURRENT_MODIFICATION` | 409 | 数据库死锁 / 序列化失败（可重试） |
+| `NOT_FOUND` | 404 | 作品 / 章节不属于当前作者 |
+
+### 17.7 与 A1-4B-B 的边界
+
+仍**不提供**：Markdown 编辑器 UI、版本 diff、版本恢复、局部重写、定稿流程按钮。
+人工版本 append-only（数据库触发器兜底），旧版本永久保留。

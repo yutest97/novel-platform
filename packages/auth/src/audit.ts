@@ -43,6 +43,7 @@ export const AUDIT_ACTIONS = {
   CHAPTER_CANDIDATE_ADOPTED: 'chapter.candidate_adopted',
   CHAPTER_CREATED: 'chapter.created',
   CHAPTER_STATUS_CHANGED: 'chapter.status_changed',
+  CHAPTER_VERSION_CREATED: 'chapter.version_created',
 } as const;
 
 /** 审计动作类型。 */

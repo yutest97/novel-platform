@@ -27,6 +27,23 @@ export const CHAPTER_GENERATE_FIELDS = ['requestId', 'targetWords', 'style'] as 
 /** 采纳候选的允许字段（`requestId` 可选，仅用于追踪）。 */
 export const CANDIDATE_ADOPT_FIELDS = ['requestId'] as const;
 
+/**
+ * 保存人工版本的允许字段（A1-4B-A）。
+ *
+ * 只有正文与基线版本：`source` / `versionNo` / `createdBy` / `chapterId` /
+ * `workId` / 时间戳全部由服务端决定，提交即 400。
+ */
+export const HUMAN_VERSION_FIELDS = ['content', 'baseVersionId'] as const;
+
+/**
+ * 人工版本请求体上限（**字符数**）。
+ *
+ * 正文允许到 200000 字符；JSON 转义（换行 / 引号 / 控制字符）会放大长度，
+ * 这里留足余量，避免把"正文超长"误判成"请求体过大"——
+ * 后者应由服务层统一报 `CHAPTER_CONTENT_INVALID`。
+ */
+export const HUMAN_VERSION_BODY_MAX_LENGTH = 1_500_000;
+
 const STYLE_FIELDS = ['tone', 'pointOfView', 'pacing'] as const;
 const MAX_STYLE_VALUE_LENGTH = 100;
 const MAX_REQUEST_ID_LENGTH = 128;
@@ -36,6 +53,38 @@ export function requirePositiveInteger(body: Record<string, unknown>, key: strin
   const value = body[key];
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
     throw new AuthError('VALIDATION_FAILED', `字段 ${key} 必须是正整数`);
+  }
+  return value;
+}
+
+/** 读取人工版本正文（只校验类型；trim / 长度 / 字数在服务层统一处理）。 */
+export function requireVersionContent(body: Record<string, unknown>): string {
+  const value = body['content'];
+  if (typeof value !== 'string') {
+    throw new AuthError('VALIDATION_FAILED', '字段 content 必须是字符串');
+  }
+  return value;
+}
+
+/**
+ * 读取 `baseVersionId`：**必须显式提交**。
+ *
+ * - `null`：预期章节当前没有正式版本（首版）；
+ * - 字符串：必须等于当前最大版本 id，否则服务层 409。
+ *
+ * 用 `hasOwnProperty` 判断"是否出现"，而不是 `undefined` 判断：
+ * 漏传字段要报 400，不能默默当成 null。
+ */
+export function requireBaseVersionId(body: Record<string, unknown>): string | null {
+  if (!Object.prototype.hasOwnProperty.call(body, 'baseVersionId')) {
+    throw new AuthError('VALIDATION_FAILED', '缺少字段 baseVersionId（首版请显式传 null）');
+  }
+  const value = body['baseVersionId'];
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new AuthError('VALIDATION_FAILED', 'baseVersionId 必须是版本 id 或 null');
   }
   return value;
 }

@@ -35,6 +35,9 @@ export type AuthErrorCode =
   | 'CHAPTER_STATE_INVALID_FOR_ADOPTION'
   | 'CHAPTER_NO_TAKEN'
   | 'CHAPTER_STATE_INVALID_FOR_GENERATION'
+  // 人工版本保存（A1-4B-A）：正文不合法 / 章节状态不允许保存
+  | 'CHAPTER_CONTENT_INVALID'
+  | 'CHAPTER_STATE_INVALID_FOR_SAVE'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -83,6 +86,10 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   CHAPTER_NO_TAKEN: 409,
   // 章节已定稿 / 已废弃，不能再生成候选
   CHAPTER_STATE_INVALID_FOR_GENERATION: 409,
+  // 人工版本正文不合法（字数 / 长度 / 空白）
+  CHAPTER_CONTENT_INVALID: 400,
+  // 章节已废弃，不能再保存人工版本
+  CHAPTER_STATE_INVALID_FOR_SAVE: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -128,6 +135,8 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
   CHAPTER_NO_TAKEN: '该章号已被占用',
   CHAPTER_STATE_INVALID_FOR_GENERATION: '章节当前状态不允许生成候选',
+  CHAPTER_CONTENT_INVALID: '章节正文不合法，请检查字数和内容',
+  CHAPTER_STATE_INVALID_FOR_SAVE: '章节当前状态不允许保存人工版本',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

@@ -40,6 +40,9 @@ export type ApiErrorCode =
   | 'CHAPTER_NO_TAKEN'
   // 章节已定稿 / 已废弃，不能再生成候选（A1-3B-REV-01）
   | 'CHAPTER_STATE_INVALID_FOR_GENERATION'
+  // 人工版本保存（A1-4B-A）：正文不合法 / 章节已废弃
+  | 'CHAPTER_CONTENT_INVALID'
+  | 'CHAPTER_STATE_INVALID_FOR_SAVE'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -74,6 +77,8 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
   CHAPTER_NO_TAKEN: '该章号已被占用',
   CHAPTER_STATE_INVALID_FOR_GENERATION: '章节当前状态不允许生成候选',
+  CHAPTER_CONTENT_INVALID: '章节正文不合法，请检查字数和内容',
+  CHAPTER_STATE_INVALID_FOR_SAVE: '章节当前状态不允许保存人工版本',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -862,6 +867,45 @@ export async function fetchChapterVersions(
     `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}/versions`,
   );
   return (body as { versions: ChapterVersionListItem[] }).versions;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 人工章节版本（A1-4B-A）                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** 人工保存结果（**不含正文**；正文由 `fetchChapterVersion` 读取）。 */
+export interface HumanChapterVersionSummary {
+  readonly versionId: string;
+  readonly versionNo: number;
+  readonly wordCount: number;
+  readonly source: 'human';
+  readonly parentVersionId: string | null;
+  /** 保存后的章节状态（人工保存会把 finalized 拉回 in_review）。 */
+  readonly chapterStatus: string;
+}
+
+/**
+ * 把一段正文保存为新的**人类版本**。
+ *
+ * - `baseVersionId` 必须显式给出：`null` 表示"当前还没有正式版本"（首版）；
+ *   已有版本时传当前最大版本 id，服务端用它做乐观并发校验；
+ * - 基线不一致 → 409 `CHAPTER_VERSION_CONFLICT`（不会覆盖别人的版本）；
+ * - 正文由服务端 trim 并重新计算字数，空白 / 过短 / 超长 → 400 `CHAPTER_CONTENT_INVALID`；
+ * - 章节已废弃 → 409 `CHAPTER_STATE_INVALID_FOR_SAVE`。
+ */
+export async function saveHumanChapterVersion(
+  workId: string,
+  chapterId: string,
+  input: { readonly content: string; readonly baseVersionId: string | null },
+): Promise<HumanChapterVersionSummary> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}/versions`,
+    {
+      method: 'POST',
+      body: { content: input.content, baseVersionId: input.baseVersionId },
+    },
+  );
+  return (body as { version: HumanChapterVersionSummary }).version;
 }
 
 /** 读取正式版本正文。 */

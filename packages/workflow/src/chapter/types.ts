@@ -45,6 +45,28 @@ export function isChapterOpenForGeneration(status: string): boolean {
   return (GENERATION_CHAPTER_STATUSES as readonly string[]).includes(status);
 }
 
+/**
+ * 允许保存**人工版本**的章节状态（A1-4B-A）。
+ *
+ * 与生成 / 采纳不同：`finalized` 允许保存（保存后回到 `in_review`，
+ * 相当于"定稿后再修订"），只有 `abandoned` 是关闭态。
+ */
+export const SAVE_CHAPTER_STATUSES = [
+  'planned',
+  'outlined',
+  'drafting',
+  'in_review',
+  'finalized',
+] as const;
+
+/** 章节是否允许保存人工版本（白名单，新增状态默认拒绝）。 */
+export function isChapterOpenForSave(status: string): boolean {
+  return (SAVE_CHAPTER_STATUSES as readonly string[]).includes(status);
+}
+
+/** 保存人工版本后的章节状态。 */
+export const SAVED_CHAPTER_STATUS = 'in_review';
+
 /** 写作风格参数（由任务输入覆盖，缺省从作品方向推导）。 */
 export interface ChapterStyle {
   readonly tone: string;

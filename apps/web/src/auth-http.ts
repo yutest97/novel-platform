@@ -40,15 +40,26 @@ export function authErrorResponse(error: unknown): Response {
   return authJson({ error: { code: 'INTERNAL_ERROR', message: '服务内部错误' } }, 500);
 }
 
-/** 读取 JSON 请求体（限制大小，解析失败统一报 VALIDATION_FAILED）。 */
-export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+/** 默认请求体上限（字符数）：普通表单接口足够，正文类接口需显式放宽。 */
+export const DEFAULT_JSON_BODY_MAX_LENGTH = 8 * 1024;
+
+/**
+ * 读取 JSON 请求体（限制大小，解析失败统一报 VALIDATION_FAILED）。
+ *
+ * `options.maxLength` 用于正文类接口（章节正文可到 20 万字符）：
+ * 限制的是**字符串长度**而不是字节数，`text.length` 对中文按 UTF-16 单元计。
+ */
+export async function readJsonObject(
+  request: Request,
+  options: { readonly maxLength?: number } = {},
+): Promise<Record<string, unknown>> {
   const contentType = request.headers.get('content-type') ?? '';
   if (!contentType.toLowerCase().includes('application/json')) {
     throw new AuthError('VALIDATION_FAILED', 'Content-Type 必须为 application/json');
   }
 
   const text = await request.text();
-  if (text.length > 8 * 1024) {
+  if (text.length > (options.maxLength ?? DEFAULT_JSON_BODY_MAX_LENGTH)) {
     throw new AuthError('VALIDATION_FAILED', '请求体过大');
   }
 

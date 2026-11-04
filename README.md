@@ -1,11 +1,12 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-3B（章节 / 生成任务 / 候选 / 采纳 HTTP API）**。
+> 当前阶段：**A1-4B-A（人工章节版本保存：服务 + API）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
-A1-3B 章节与生成任务 HTTP API（**均无章节 UI**）。
+A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
+A1-4B-A 人工版本保存 API（**暂无编辑器 UI / diff / 恢复**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -872,9 +873,40 @@ Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无�
 
 **测试**：A1-4A 新增 31 个（只读 API 7、展示纯函数 10、浏览器 E2E 10、
 workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展示纯函数 6、浏览器 E2E 2）；
-**REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；全量单测 **685** 个
-（web 190 / workflow 180 / worker 63 / shared 15 / db 10 / auth 95 / works 132）；
+**REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；
+**A1-4B-A** 再补 18 个（人工版本保存 API）；全量单测 **703** 个
+（web 208 / workflow 180 / worker 63 / shared 15 / db 10 / auth 95 / works 132）；
 浏览器 E2E 合计 **80**。
+
+### 人工章节版本保存（A1-4B-A）
+
+作者可以把一段正式正文**人工保存为新版本**，旧版本永久保留（append-only）。
+本轮只有服务 + API + 前端客户端函数，**没有编辑器 UI、diff、恢复**。
+
+```
+POST /api/works/:workId/chapters/:chapterId/versions
+{ "content": "……", "baseVersionId": null | "<当前最大版本 id>" }
+→ 201 { version: { versionId, versionNo, wordCount, source: "human",
+                    parentVersionId, chapterStatus } }   // 不含正文
+```
+
+- **严格白名单**：只有 `content` / `baseVersionId`；`source` / `versionNo` /
+  `createdBy` / `chapterId` / `workId` / 时间戳提交即 400；
+- `baseVersionId` **必须显式提交**：`null` = 预期尚无正式版本（首版）；
+  已有版本时必须等于当前最大版本 id，否则
+  `409 CHAPTER_VERSION_CONFLICT`（不会覆盖别人的版本）；
+- 正文由服务端 `trim` 后校验：空白 / 少于 1200 非空白字符 / 超过 200000 字符 →
+  `400 CHAPTER_CONTENT_INVALID`（「章节正文不合法，请检查字数和内容」）；
+  `wordCount` 由服务端重新计算，不信任客户端；
+- 章节状态：`planned / outlined / drafting / in_review` 保存后进入 `in_review`；
+  `finalized` 允许保存并**回到 `in_review`**；`abandoned` →
+  `409 CHAPTER_STATE_INVALID_FOR_SAVE`；
+- 并发：作品级锁 + 章节行锁 + `baseVersionId` 比对，同 base 的两个请求恰好一个成功，
+  版本号连续不跳号；
+- 审计 `chapter.version_created` 只记 `workId / chapterId / versionId / versionNo /
+source / wordCount / parentVersionId`，**不含正文**；审计失败整体回滚；
+- 前端客户端：`saveHumanChapterVersion(workId, chapterId, { content, baseVersionId })`
+  返回 `HumanChapterVersionSummary`。
 
 ### 浏览器 E2E（Playwright Chromium）
 
