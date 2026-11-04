@@ -29,11 +29,15 @@ export type ApiErrorCode =
   | 'ITEM_EVENT_NOT_REVERSIBLE'
   | 'ITEM_EVENT_IDEMPOTENCY_CONFLICT'
   | 'ITEM_EVENTS_CLOSED'
+  // 任务创建幂等冲突：同一 requestId 被用于不同内容
+  | 'TASK_REQUEST_CONFLICT'
   // 章节候选采纳（A1-3A）：候选不存在 / 不可采纳 / 版本冲突 / 章节状态不允许
   | 'CHAPTER_CANDIDATE_NOT_FOUND'
   | 'CHAPTER_CANDIDATE_NOT_ADOPTABLE'
   | 'CHAPTER_VERSION_CONFLICT'
   | 'CHAPTER_STATE_INVALID_FOR_ADOPTION'
+  // 同一作品内章号重复（A1-3B）
+  | 'CHAPTER_NO_TAKEN'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -61,10 +65,12 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   ITEM_EVENT_NOT_REVERSIBLE: '只能冲正当前最新且未被冲正的事件',
   ITEM_EVENT_IDEMPOTENCY_CONFLICT: '该幂等键已用于不同的事件内容',
   ITEM_EVENTS_CLOSED: '物品已删除，不能再追加或冲正事件',
+  TASK_REQUEST_CONFLICT: '该 requestId 已用于不同的请求内容',
   CHAPTER_CANDIDATE_NOT_FOUND: '章节候选不存在',
   CHAPTER_CANDIDATE_NOT_ADOPTABLE: '该章节候选当前不可采纳',
   CHAPTER_VERSION_CONFLICT: '章节版本发生冲突，请刷新后重试',
   CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
+  CHAPTER_NO_TAKEN: '该章号已被占用',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -614,4 +620,194 @@ export async function getItemState(workId: string, itemId: string): Promise<Item
     `/api/works/${encodeURIComponent(workId)}/items/${encodeURIComponent(itemId)}/state`,
   );
   return (body as { state: ItemStateView }).state;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 章节 / 生成任务 / 候选（A1-3B）                                              */
+/* -------------------------------------------------------------------------- */
+
+/** 章节摘要。 */
+export interface ChapterSummary {
+  readonly id: string;
+  readonly workId: string;
+  readonly chapterNo: number;
+  readonly title: string;
+  readonly status: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/**
+ * 生成任务摘要。
+ *
+ * 服务端**不会**返回 `input_snapshot` / `input_hash` / `requestId` / 租约字段；
+ * `errorMessage` 是服务端映射后的安全文案，不含模型原始错误。
+ */
+export interface GenerationTaskSummary {
+  readonly id: string;
+  readonly chapterId: string | null;
+  readonly status: string;
+  readonly currentStep: string | null;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly cancelRequestedAt: string | null;
+  readonly errorCode: string | null;
+  readonly errorMessage: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** 章节详情里的候选摘要（不含正文）。 */
+export interface ChapterCandidateSummary {
+  readonly id: string;
+  readonly status: string;
+  readonly wordCount: number;
+  readonly createdAt: string;
+}
+
+/** 章节详情：章节 + 最新任务 + 候选摘要列表。 */
+export interface ChapterDetail {
+  readonly chapter: ChapterSummary;
+  readonly latestTask: GenerationTaskSummary | null;
+  readonly candidates: readonly ChapterCandidateSummary[];
+}
+
+/** 候选详情（含正文与结构化计划）。 */
+export interface ChapterCandidateDetail {
+  readonly id: string;
+  readonly chapterId: string;
+  readonly contractId: string;
+  readonly status: string;
+  readonly wordCount: number;
+  readonly content: string;
+  readonly structuredPlan: unknown;
+  readonly createdAt: string;
+}
+
+/** 采纳结果摘要（不含正文）。 */
+export interface ChapterVersionSummary {
+  readonly versionId: string;
+  readonly versionNo: number;
+  readonly wordCount: number;
+  readonly chapterStatus: string;
+  /** true 表示该候选此前已被采纳，本次未新增版本。 */
+  readonly deduplicated: boolean;
+}
+
+/** 写作风格参数（省略表示由服务端按作品方向推导）。 */
+export interface ChapterStyleInput {
+  readonly tone?: string;
+  readonly pointOfView?: string;
+  readonly pacing?: string;
+}
+
+/** 创建章节（章号在作品内唯一）。 */
+export async function createChapter(
+  workId: string,
+  input: { readonly chapterNo: number; readonly title: string },
+): Promise<ChapterSummary> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}/chapters`, {
+    method: 'POST',
+    body: input,
+  });
+  return (body as { chapter: ChapterSummary }).chapter;
+}
+
+/** 读取章节详情（含最新任务与候选摘要）。 */
+export async function fetchChapter(workId: string, chapterId: string): Promise<ChapterDetail> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}`,
+  );
+  return body as ChapterDetail;
+}
+
+/**
+ * 提交章节生成任务。
+ *
+ * `provider` / `model` 由服务端配置决定，**不接受前端参数**；
+ * `requestId` 是幂等键：同键同内容返回同一任务，同键异内容报
+ * `TASK_REQUEST_CONFLICT`。
+ */
+export async function startChapterGeneration(
+  workId: string,
+  chapterId: string,
+  input: {
+    readonly requestId: string;
+    readonly targetWords?: number;
+    readonly style?: ChapterStyleInput;
+  },
+): Promise<GenerationTaskSummary> {
+  const payload: Record<string, unknown> = { requestId: input.requestId };
+  if (input.targetWords !== undefined) {
+    payload['targetWords'] = input.targetWords;
+  }
+  if (input.style !== undefined) {
+    payload['style'] = input.style;
+  }
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}/generate`,
+    { method: 'POST', body: payload },
+  );
+  return (body as { task: GenerationTaskSummary }).task;
+}
+
+/** 读取任务状态（轮询用）。 */
+export async function fetchGenerationTask(
+  workId: string,
+  taskId: string,
+): Promise<GenerationTaskSummary> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/generation-tasks/${encodeURIComponent(taskId)}`,
+  );
+  return (body as { task: GenerationTaskSummary }).task;
+}
+
+/** 请求取消任务（queued 立即取消，processing 在下一步之前停止）。 */
+export async function cancelGenerationTask(
+  workId: string,
+  taskId: string,
+): Promise<GenerationTaskSummary> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/generation-tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: 'POST' },
+  );
+  return (body as { task: GenerationTaskSummary }).task;
+}
+
+/** 读取候选正文与结构化计划（已 adopted 的候选仍可读取）。 */
+export async function fetchChapterCandidate(
+  workId: string,
+  chapterId: string,
+  candidateId: string,
+): Promise<ChapterCandidateDetail> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/candidates/${encodeURIComponent(candidateId)}`,
+  );
+  return (body as { candidate: ChapterCandidateDetail }).candidate;
+}
+
+/**
+ * 采纳候选为正式章节版本。
+ *
+ * 成功返回版本摘要（不含正文）；重复采纳返回同一版本且 `deduplicated=true`。
+ */
+export async function adoptChapterCandidate(
+  workId: string,
+  chapterId: string,
+  candidateId: string,
+  input: { readonly requestId?: string } = {},
+): Promise<ChapterVersionSummary> {
+  const payload: Record<string, unknown> = {};
+  if (input.requestId !== undefined) {
+    payload['requestId'] = input.requestId;
+  }
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/candidates/${encodeURIComponent(candidateId)}/adopt`,
+    { method: 'POST', body: payload },
+  );
+  return (body as { version: ChapterVersionSummary }).version;
 }

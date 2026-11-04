@@ -15,6 +15,22 @@ export {
   type AdoptionMeta,
 } from './adoption.js';
 export {
+  MAX_CHAPTER_NO,
+  MAX_CHAPTER_TITLE_LENGTH,
+  createChapter,
+  getChapterCandidate,
+  getChapterDetail,
+  startChapterDraft,
+  toTaskSummary,
+  type ChapterCandidateDetailView,
+  type ChapterCandidateSummaryView,
+  type ChapterDetailView,
+  type ChapterSummaryView,
+  type ChapterTaskSummaryView,
+  type CreateChapterInput,
+  type StartChapterDraftInput,
+} from './service.js';
+export {
   CHAPTER_DRAFT_TASK_TYPE,
   MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,

@@ -1,11 +1,11 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-3A（候选采纳与正式章节版本，数据库 + 服务层）**。
+> 当前阶段：**A1-3B（章节 / 生成任务 / 候选 / 采纳 HTTP API）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
-A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`
-（均无 HTTP API/UI）。
+A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
+A1-3B 章节与生成任务 HTTP API（**均无章节 UI**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -677,8 +677,39 @@ runWorkWrite（作品级 advisory lock）
   `CHAPTER_CANDIDATE_NOT_ADOPTABLE`、`CHAPTER_VERSION_CONFLICT`、
   `CHAPTER_STATE_INVALID_FOR_ADOPTION`（409）。
 
-**测试**：A1-3A 新增 15 个（`test/chapter-adoption.test.ts`）；workflow 包 **168** 个；
-全量单测 **558** 个。
+**测试**：A1-3A 新增 15 个（`test/chapter-adoption.test.ts`）；workflow 包 **168** 个。
+
+### 章节与生成任务 HTTP API（A1-3B）
+
+无新增迁移。全部在 `/api/works/:workId/...`；写接口校验 Origin，身份只来自会话。
+
+| 方法 | 路径                                                 | 说明                              | 成功                    |
+| ---- | ---------------------------------------------------- | --------------------------------- | ----------------------- |
+| POST | `/chapters`                                          | 创建章节（`chapterNo` + `title`） | 201 `{ chapter }`       |
+| GET  | `/chapters/:chapterId`                               | 章节 + 最新任务摘要 + 候选摘要    | 200                     |
+| POST | `/chapters/:chapterId/generate`                      | 提交 `chapter.draft` 任务         | 201 / 200 `{ task }`    |
+| GET  | `/generation-tasks/:taskId`                          | 任务状态                          | 200 `{ task }`          |
+| POST | `/generation-tasks/:taskId/cancel`                   | 请求取消                          | 200 `{ task }`          |
+| GET  | `/chapters/:chapterId/candidates/:candidateId`       | 候选正文 + 计划                   | 200 `{ candidate }`     |
+| POST | `/chapters/:chapterId/candidates/:candidateId/adopt` | 采纳候选                          | 201 / 200 `{ version }` |
+
+- **严格白名单**：创建章节只接受 `chapterNo / title`；生成只接受
+  `requestId / targetWords / style`；采纳只接受可选 `requestId`。
+  `provider` / `model` / `authorId` / `status` / `inputSnapshot` 一律 400；
+- **provider / model 只来自服务端配置**：`MODEL_PROVIDER` 决定 Provider，
+  `provider.defaultModel`（OpenAI 兼容 = `MODEL_NAME`，Mock = `mock-model`）决定模型；
+  `input_snapshot` 只写 `targetWords / style`；
+- **requestId 幂等**：同键同内容返回同一任务（200），异内容
+  `409 TASK_REQUEST_CONFLICT`；
+- 任务 DTO 不返回 `inputSnapshot` / `inputHash` / `requestId` / 租约 / provider / model；
+- 未登录 401、管理员 403、他人作品 404、缺 Origin 403；
+- 采纳直接调用 `adoptChapterCandidate`，响应只有版本摘要（不含正文）；
+- 章号重复 `409 CHAPTER_NO_TAKEN`；章节 `finalized / abandoned` 采纳
+  `409 CHAPTER_STATE_INVALID_FOR_ADOPTION`；
+- 前端只新增 `apps/web/src/lib/api.ts` 的类型与客户端函数，**没有页面**。
+
+**测试**：A1-3B 新增 18 个（`test/chapter-api.test.ts`）；web 包 **154** 个；
+全量单测 **576** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 

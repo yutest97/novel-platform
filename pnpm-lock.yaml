@@ -54,6 +54,9 @@ importers:
       '@novel/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@novel/workflow':
+        specifier: workspace:*
+        version: link:../../packages/workflow
       '@novel/works':
         specifier: workspace:*
         version: link:../../packages/works

@@ -33,6 +33,7 @@ export type AuthErrorCode =
   | 'CHAPTER_CANDIDATE_NOT_ADOPTABLE'
   | 'CHAPTER_VERSION_CONFLICT'
   | 'CHAPTER_STATE_INVALID_FOR_ADOPTION'
+  | 'CHAPTER_NO_TAKEN'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -77,6 +78,8 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   CHAPTER_VERSION_CONFLICT: 409,
   // 章节当前状态（finalized / abandoned）不允许采纳
   CHAPTER_STATE_INVALID_FOR_ADOPTION: 409,
+  // 同一作品内章号重复
+  CHAPTER_NO_TAKEN: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -120,6 +123,7 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   CHAPTER_CANDIDATE_NOT_ADOPTABLE: '该章节候选当前不可采纳',
   CHAPTER_VERSION_CONFLICT: '章节版本发生冲突，请刷新后重试',
   CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
+  CHAPTER_NO_TAKEN: '该章号已被占用',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

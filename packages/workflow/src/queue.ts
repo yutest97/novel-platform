@@ -87,7 +87,8 @@ export type TaskReader = Pick<PrismaClient, 'work' | 'generationTask' | 'chapter
 /** 作者侧取消需要原生 UPDATE。 */
 export type TaskCancelReader = TaskReader & Pick<PrismaClient, '$queryRaw'>;
 
-interface TaskRowShape {
+/** Prisma 任务行（camelCase）：供同包内模块把已查询的行转成视图。 */
+export interface GenerationTaskRowShape {
   id: string;
   workId: string;
   chapterId: string | null;
@@ -136,7 +137,12 @@ interface RawTaskRow {
   updated_at: Date;
 }
 
-function toView(row: TaskRowShape): GenerationTaskView {
+/**
+ * Prisma 行 → 对外任务视图。
+ *
+ * **不校验归属**：调用方必须已经做过作者 / 作品校验（见 `getGenerationTaskForAuthor`）。
+ */
+export function toGenerationTaskView(row: GenerationTaskRowShape): GenerationTaskView {
   return {
     id: row.id,
     workId: row.workId,
@@ -312,7 +318,7 @@ export async function createGenerationTask(
         maxAttempts,
       },
     });
-    return { task: toView(row), created: true };
+    return { task: toGenerationTaskView(row), created: true };
   } catch (error) {
     if (!isUniqueViolation(error)) {
       throw error;
@@ -327,7 +333,7 @@ export async function createGenerationTask(
       // 不覆盖既有任务，也不回显任何一侧的输入内容。
       throw new AuthError('TASK_REQUEST_CONFLICT');
     }
-    return { task: toView(existing), created: false };
+    return { task: toGenerationTaskView(existing), created: false };
   }
 }
 
@@ -343,7 +349,7 @@ export async function getGenerationTaskForAuthor(
   if (row === null) {
     throw new AuthError('NOT_FOUND', '任务不存在');
   }
-  return toView(row);
+  return toGenerationTaskView(row);
 }
 
 /** Worker 内部读取（不做作者校验；不得直接暴露给 HTTP 层）。 */
@@ -352,7 +358,7 @@ export async function getGenerationTask(
   taskId: string,
 ): Promise<GenerationTaskView | null> {
   const row = await db.generationTask.findUnique({ where: { id: taskId } });
-  return row === null ? null : toView(row);
+  return row === null ? null : toGenerationTaskView(row);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -411,7 +417,7 @@ export async function requestTaskCancellationForAuthor(
   if (current === null) {
     throw new AuthError('NOT_FOUND', '任务不存在');
   }
-  return toView(current);
+  return toGenerationTaskView(current);
 }
 
 /* -------------------------------------------------------------------------- */

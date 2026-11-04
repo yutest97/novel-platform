@@ -41,6 +41,7 @@ export const AUDIT_ACTIONS = {
   CHAPTER_CONTRACT_FROZEN: 'chapter.contract_frozen',
   CHAPTER_CANDIDATE_CREATED: 'chapter.candidate_created',
   CHAPTER_CANDIDATE_ADOPTED: 'chapter.candidate_adopted',
+  CHAPTER_CREATED: 'chapter.created',
   CHAPTER_STATUS_CHANGED: 'chapter.status_changed',
 } as const;
 

@@ -515,3 +515,27 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-43 | 正式版本 append-only | 直接 SQL 修改 `version_no` / `content` 或删除版本全部失败 | 同上 |
 | AT-WF-44 | adopted 候选不可改 | 修改 adopted 候选正文 / 字数、回退状态、删除全部失败 | 同上 + `test/chapter-workflow.test.ts` |
 | AT-WF-45 | 既有测试不减少 | 既有 543 个测试全绿；A1-3A 新增 15 个（workflow 168） | 全量 `pnpm test` |
+
+---
+
+## 20. 章节与生成任务 API 验收（A1-3B）
+
+> 对应 `docs/07-master-roadmap.md` A1-3B、`docs/08-workflow-and-agents.md` §14。
+> A1-3B **只有后端接口与前端客户端函数**：没有章节 UI、编辑器、`human` 版本、
+> 版本恢复 / diff，也没有启动 `apps/worker` 常驻循环。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-46 | 未登录 | 任意章节接口 → 401 `UNAUTHENTICATED` | `test/chapter-api.test.ts` |
+| AT-WF-47 | 创建章节 | 201、`status=planned`、标题 trim；`chapter.created` 审计 detail 仅 `workId/chapterId/chapterNo` | 同上 |
+| AT-WF-48 | 章号与参数 | 重复章号 → 409 `CHAPTER_NO_TAKEN`；章号 0 / 负数 / 小数 / 字符串、空标题、超长标题、提交 `status` / `createdAt` → 400 | 同上 |
+| AT-WF-49 | 归属与角色 | 他人作品 → 404；管理员 → 403；缺 Origin 的写接口 → 403 | 同上 |
+| AT-WF-50 | 创建生成任务 | 201；`taskType=chapter.draft`；`provider` / `model` 等于服务端配置（`openai-compatible` / `MODEL_NAME`）；`input_snapshot` 只含 `targetWords/style` | 同上 |
+| AT-WF-51 | 客户端不可覆盖服务端字段 | 提交 `provider` / `model` / `authorId` / `status` / `workId` / `inputSnapshot` → 400，且不建任务 | 同上 |
+| AT-WF-52 | requestId 幂等 | 同键同内容 → 200 + 同一任务、库中 1 行；同键异内容 → 409 `TASK_REQUEST_CONFLICT` | 同上 |
+| AT-WF-53 | 任务读取与取消 | GET 只返回安全摘要（无 `inputSnapshot`/`requestId`/租约）；取消 queued → `cancelled` 且清空锁；取消 processing → 保留 `processing` + `cancel_requested_at` | 同上 |
+| AT-WF-54 | 候选读取隔离 | 作者可读完整正文与 `wordCount`；他人 404；管理员 403；跨章节 → 404 `CHAPTER_CANDIDATE_NOT_FOUND` | 同上 |
+| AT-WF-55 | 采纳 | 201 + `versionNo=1` / `chapterStatus=in_review` / `deduplicated=false`，响应不含正文；重复采纳 200 + `deduplicated=true`，版本仍 1 条 | 同上 |
+| AT-WF-56 | 采纳边界 | `finalized` 章节 → 409 `CHAPTER_STATE_INVALID_FOR_ADOPTION`；跨作品候选 → 404；缺 Origin → 403；未知字段 → 400 | 同上 |
+| AT-WF-57 | 响应脱敏 | 任务 / 候选 / 采纳响应不含 `inputSnapshot`、`requestId`、API Key 或正文错误细节 | 同上 |
+| AT-WF-58 | 既有测试不减少 | 既有 558 个测试全绿；A1-3B 新增 18 个（web 154） | 全量 `pnpm test` |

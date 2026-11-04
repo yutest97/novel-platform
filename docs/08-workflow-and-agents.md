@@ -1,10 +1,10 @@
-# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A）
+# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A / A1-3B）
 
-- 版本：v1.2
+- 版本：v1.3
 - 日期：2026-11-04
-- 对应代码：`packages/workflow`
+- 对应代码：`packages/workflow`、`apps/web/app/api/works/**`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
-  `20261104030000_a1_chapter_versions`
+  `20261104030000_a1_chapter_versions`（A1-3B 无新增迁移）
 
 ---
 
@@ -21,7 +21,7 @@
 
 ---
 
-## 2. A1-1 / A1-2 / A1-3A 范围
+## 2. A1-1 / A1-2 / A1-3A / A1-3B 范围
 
 **A1-1 交付**：确定性工作流内核、Provider 抽象、Agent 运行基础设施、
 PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张基础表。
@@ -33,6 +33,10 @@ PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张�
 **A1-3A 交付**：候选采纳服务 `adoptChapterCandidate` 与正式版本 `chapter_versions`。
 只有数据库与服务层：采纳事务、版本号分配、候选 `candidate → adopted` 受控迁移、
 章节状态推进、审计与幂等/并发保证。**不提供 HTTP API、章节 UI、差异对比与版本恢复**。
+
+**A1-3B 交付**：章节 / 生成任务 / 候选 / 采纳的 HTTP API 与前端客户端函数。
+作者可以创建章节、提交生成任务、轮询任务状态、取消任务、读取候选并采纳。
+**没有章节 UI / 编辑器 / `human` 版本 / 版本恢复 / diff**，也不启动 Worker 常驻循环。
 
 **不交付**：章节生成 API、章节编辑器 UI、候选采纳、`chapter_versions`、
 Reviewer/Continuity/Fact、RAG/图数据库、资源流水、多人功能。
@@ -447,10 +451,116 @@ A1-3B 直接使用，不再遗漏。
 
 ---
 
-## 14. A1-3B 预告（不在本轮）
+## 14. A1-3B：章节 / 生成任务 / 候选 / 采纳 HTTP API
 
-- 章节工作台（列表 / 正文阅读 / 候选查看与采纳按钮）；
-- 采纳与任务进度查询的 HTTP API（会话 authorId；管理员 404/403）；
-- 生成 API 与重新生成；
-- 版本列表与人工修订（`source='human'`），仍不接 Reviewer；
-- 按 `task_type` 强制章节任务必填 `chapter_id`。
+> 本轮**只有后端接口与前端客户端函数**：没有章节 UI、没有编辑器、没有 `human` 版本、
+> 没有版本恢复 / diff、没有 Reviewer / RAG，也没有启动 `apps/worker` 常驻循环。
+
+### 14.1 路由清单
+
+全部在 `/api/works/:workId/...` 下；写接口一律校验 Origin，身份只来自会话 Cookie。
+
+| 方法 | 路径 | 说明 | 成功 |
+| --- | --- | --- | --- |
+| POST | `/chapters` | 创建章节（`chapterNo` + `title`） | 201 `{ chapter }` |
+| GET | `/chapters/:chapterId` | 章节 + 最新任务摘要 + 候选摘要列表 | 200 `{ chapter, latestTask, candidates }` |
+| POST | `/chapters/:chapterId/generate` | 提交 `chapter.draft` 任务 | 201（新建）/ 200（幂等命中）`{ task }` |
+| GET | `/generation-tasks/:taskId` | 任务状态 | 200 `{ task }` |
+| POST | `/generation-tasks/:taskId/cancel` | 请求取消 | 200 `{ task }` |
+| GET | `/chapters/:chapterId/candidates/:candidateId` | 候选正文 + 计划 | 200 `{ candidate }` |
+| POST | `/chapters/:chapterId/candidates/:candidateId/adopt` | 采纳候选 | 201（首次）/ 200（重复）`{ version }` |
+
+### 14.2 请求 / 响应 DTO
+
+**创建章节**（严格白名单 `chapterNo / title`）：
+
+```jsonc
+// 请求
+{ "chapterNo": 1, "title": "初入青云" }
+// 响应（201）
+{ "chapter": { "id", "workId", "chapterNo", "title", "status": "planned", "createdAt", "updatedAt" } }
+```
+
+- `status` / `createdAt` / `authorId` 都不接受客户端提交；
+- 章号在作品内唯一，重复 → `409 CHAPTER_NO_TAKEN`；
+- 审计 `chapter.created` 的 detail 只有 `workId / chapterId / chapterNo`。
+
+**提交生成任务**（严格白名单 `requestId / targetWords / style`）：
+
+```jsonc
+// 请求
+{ "requestId": "<uuid>", "targetWords": 3000,
+  "style": { "tone": "克制", "pointOfView": "第三人称限知", "pacing": "中速" } }
+// 落库 input_snapshot（只有这两个字段）
+{ "targetWords": 3000, "style": { "tone": "克制", "pointOfView": "第三人称限知", "pacing": "中速" } }
+```
+
+- `provider` / `model` **只来自服务端配置**：`MODEL_PROVIDER` 决定 Provider，
+  实际模型名取 `provider.defaultModel`（OpenAI 兼容 = `MODEL_NAME`，Mock = `mock-model`）；
+- 客户端提交 `provider` / `model` / `authorId` / `status` / `workId` / `inputSnapshot`
+  一律 400；
+- 同 `requestId` 同内容 → 200 + 同一任务（`created=false`）；
+  异内容 → `409 TASK_REQUEST_CONFLICT`。
+
+**任务摘要**（GET / cancel）：`id / chapterId / status / currentStep / attemptCount /
+maxAttempts / cancelRequestedAt / errorCode / errorMessage / createdAt / updatedAt`。
+
+刻意**不返回** `inputSnapshot` / `inputHash` / `requestId` / `lockedBy` / `leaseUntil` /
+`heartbeatAt` / `provider` / `model`：这些是调度与幂等内部字段。
+
+**候选详情**：`id / chapterId / contractId / status / wordCount / content /
+structuredPlan / createdAt`；已 `adopted` 的候选仍可读取（确认正式版本来源）。
+
+**采纳**（严格白名单，只允许可选的 `requestId`）：
+
+```jsonc
+// 请求
+{ "requestId": "trace-only" }
+// 响应
+{ "version": { "versionId", "versionNo", "wordCount", "chapterStatus", "deduplicated" } }
+```
+
+- **不返回正文**，正文由后续章节 / 版本读取接口提供；
+- `requestId` 只用于追踪，不参与幂等（幂等由 `(workId, chapterId, candidateId)` 决定）；
+- 首次采纳 201，重复采纳 200 + `deduplicated=true`；
+- 章节 `finalized / abandoned` → `409 CHAPTER_STATE_INVALID_FOR_ADOPTION`。
+
+### 14.3 归属与权限
+
+| 场景 | 结果 |
+| --- | --- |
+| 未登录 / 会话失效 | 401 `UNAUTHENTICATED` |
+| 管理员调用任意章节接口 | 403 `FORBIDDEN`（`requireAuthorSession` 只放行 author） |
+| 他人作品（含任务、候选、采纳） | 404 `NOT_FOUND`（不区分"不存在"与"不属于你"） |
+| 跨章节候选 | 404 `CHAPTER_CANDIDATE_NOT_FOUND` |
+| 写接口缺 Origin | 403 `INVALID_ORIGIN` |
+| 未知字段 / 非法参数 | 400 `VALIDATION_FAILED` |
+| 其它异常 | 500 `INTERNAL_ERROR`，不回显原始异常 |
+
+### 14.4 与工作流的分工
+
+HTTP 层只做四件事：**会话与 Origin 校验 → 请求体白名单 → 调用服务层 → 映射错误码**。
+它不生成正文、不决定上下文、不推进章节状态：
+
+- 任务创建后停在 `queued`，由 Worker（`WorkerRunner`）领取执行；
+- 候选由 `chapter.draft` 工作流写入，HTTP 层只读；
+- 采纳调用 `adoptChapterCandidate`（作品锁 + 行锁 + 同事务审计），HTTP 层不重复实现幂等。
+
+### 14.5 前端客户端
+
+`apps/web/src/lib/api.ts` 新增：`ChapterSummary` / `ChapterDetail` /
+`GenerationTaskSummary` / `ChapterCandidateDetail` / `ChapterVersionSummary` 类型与
+`createChapter` / `fetchChapter` / `startChapterGeneration` / `fetchGenerationTask` /
+`cancelGenerationTask` / `fetchChapterCandidate` / `adoptChapterCandidate` 函数。
+本轮**没有页面**：客户端函数只被测试与后续 A1-4 的工作台使用。
+
+---
+
+## 15. A1-4 预告（不在本轮）
+
+- 章节工作台（列表 / 正文阅读 / 候选查看与采纳按钮 / 任务轮询）；
+- 正式版本读取接口与版本列表；
+- 人工修订（`source='human'`）；
+- 重新生成与差异对比；
+- `apps/worker` 常驻循环接入部署；
+- 仍不接 Reviewer / RAG。
