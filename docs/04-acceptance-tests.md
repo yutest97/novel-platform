@@ -600,9 +600,24 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-86 | 编辑入口 | 无正式版本时显示「手动创建第一版」（`baseVersionId=null`）；有版本时只在选中**最新**版本时显示「编辑最新版本（版本 N）」；选中旧版本显示「历史版本只读，请先选择最新版本再编辑」且不提供编辑器 | `e2e/chapter-workbench.spec.ts` |
 | AT-WF-87 | 编辑器 | textarea 预填最新正式正文；实时显示非空白字符数、距 1200 下限差额、是否 dirty；`Ctrl/Cmd+S` 保存并阻止默认行为；保存中禁用输入与按钮；草稿不写 URL / localStorage / sessionStorage | `test/chapter-editor.test.ts`、`e2e/chapter-workbench.spec.ts` |
 | AT-WF-88 | 保存成功 | 关闭编辑器、提示「已保存正式版本 N」、刷新版本列表与章节状态、自动选中最新版本并展示正文；旧版本原样保留；新版本来源显示「人工」，AI 版本仍显示「AI」；刷新后仍在 | 同上 |
-| AT-WF-89 | 未保存保护 | 有修改时点击取消弹二次确认（可继续编辑）；`beforeunload` 提示；放弃后草稿消失且未落存储 | 同上 |
+| AT-WF-89 | 编辑器内取消保护 | 有修改时点击取消弹二次确认（可继续编辑）；放弃后编辑器关闭、草稿消失且未落 URL / localStorage / sessionStorage（`beforeunload` 单独见 AT-WF-96） | 同上 |
 | AT-WF-90 | 失败处理 | 短正文 → `CHAPTER_CONTENT_INVALID` 且草稿保留；`CHAPTER_VERSION_CONFLICT` → 「正文已被其他操作更新，请重新载入最新版本」+「载入最新版本」按钮，草稿保留；`CONCURRENT_MODIFICATION` 可重试；`CHAPTER_STATE_INVALID_FOR_SAVE` 稳定文案；会话错误走统一处理 | 同上 |
 | AT-WF-91 | 首版手写 | 无正式版本时手动创建版本 1（`source=human`、`parentVersionId=null`），章节进入 `in_review` | 同上 |
 | AT-WF-92 | 移动端 | 390×844 可编辑、保存、刷新阅读，`scrollWidth <= viewport + 1` | 同上 |
 | AT-WF-93 | 安全 | Markdown 以纯文本编辑与 `pre-wrap` 阅读，不使用 `dangerouslySetInnerHTML`；页面、DOM 与截图不含口令 / 邮箱 / Cookie / 令牌 / 其它作者数据 | 同上 |
-| AT-WF-94 | 既有测试不减少 | 全量单测 **716**（703 + 编辑器纯逻辑 13）；浏览器 E2E 80 + 7 = **87** | 全量 `pnpm test`、`playwright test` |
+| AT-WF-94 | 既有测试不减少 | 全量单测 **716**（703 + 编辑器纯逻辑 13）；浏览器 E2E 80 + 7 = **87**（REV-01 后见 AT-WF-99） | 全量 `pnpm test`、`playwright test` |
+
+### A1-4B-B-REV-01 追加：草稿丢失保护
+
+> **修正说明**：AT-WF-89 原先写作「`beforeunload` 提示」，但此前只有代码监听、
+> 没有自动化断言（浏览器原生 `beforeunload` 弹窗无法脚本断言）。本轮拆分为：
+> 编辑器内取消（AT-WF-89）、应用内离开（AT-WF-95）、`beforeunload` 监听（AT-WF-96），
+> 三者分别有自动化覆盖。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-95 | 应用内离开保护 | 有未保存修改时，点击「返回章节列表」、浏览器后退、退出登录都会先弹「放弃未保存的修改」；取消后停留原页，正文 / 基线 / 错误提示 / dirty 状态**完全不变**；确认后才执行原离开动作；无修改时直接离开、不弹窗 | `e2e/chapter-workbench.spec.ts` 用例 21/22、`test/chapter-editor.test.ts` |
+| AT-WF-96 | `beforeunload` 监听 | 有未保存修改时派发合成 `BeforeUnloadEvent` → `defaultPrevented === true`；放弃草稿后同一事件 `defaultPrevented === false`（只断言事件被阻止，不断言浏览器原生弹窗） | `e2e/chapter-workbench.spec.ts` 用例 23 |
+| AT-WF-97 | 冲突重载确认 | `CHAPTER_VERSION_CONFLICT` 后点「载入最新版本」先弹「载入将替换当前未保存草稿」；取消则草稿、错误、dirty 全保留；确认后草稿替换为最新正文、`baseVersionId` / baseline 更新、dirty 归零；载入期间按钮禁用 | `e2e/chapter-workbench.spec.ts` 用例 24、`test/chapter-editor.test.ts` |
+| AT-WF-98 | 离开保护纯逻辑 | `leaveDecision` / `pendingLeaveFor`（只有 navigate 带地址）/ 三个入口的文案与按钮文案 / `needsReloadConfirmation` | `test/chapter-editor.test.ts` |
+| AT-WF-99 | 测试数 | 全量单测 **721**（716 + 离开保护 5）；浏览器 E2E **91**（87 + 4） | 全量 `pnpm test`、`playwright test` |

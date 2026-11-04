@@ -133,3 +133,80 @@ export function editorErrorNotice(code: string, fallback: string): EditorErrorNo
       return { text: fallback, reloadable: false };
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* 离开保护（A1-4B-B-REV-01）                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 客户端离开入口。
+ *
+ * 这三类都不会触发 `beforeunload`（Next.js Link / 浏览器后退都是同文档内导航），
+ * 因此必须单独拦截；刷新与关闭标签页仍由 `beforeunload` 负责。
+ */
+export type LeaveKind = 'navigate' | 'back' | 'logout';
+
+/** 等待确认的离开动作。 */
+export interface PendingLeave {
+  readonly kind: LeaveKind;
+  /** 仅 `navigate` 有目标地址；后退与退出登录为 null。 */
+  readonly href: string | null;
+}
+
+/** 有未保存修改时，任何客户端离开都必须先确认。 */
+export function leaveDecision(dirty: boolean): 'proceed' | 'confirm' {
+  return dirty ? 'confirm' : 'proceed';
+}
+
+/**
+ * 构造待确认的离开动作；没有未保存修改时返回 null（直接离开）。
+ *
+ * `href` 只在 `navigate` 时有意义：后退与退出登录不需要目标地址。
+ */
+export function pendingLeaveFor(
+  kind: LeaveKind,
+  dirty: boolean,
+  href: string | null = null,
+): PendingLeave | null {
+  if (leaveDecision(dirty) === 'proceed') {
+    return null;
+  }
+  return { kind, href: kind === 'navigate' ? href : null };
+}
+
+/** 离开确认弹窗的文案（按入口区分，明确"会丢失什么"）。 */
+export function leaveConfirmMessage(pending: PendingLeave): string {
+  switch (pending.kind) {
+    case 'navigate':
+      return '离开当前章节会丢失尚未保存的正文。确认放弃修改并离开？';
+    case 'back':
+      return '后退会丢失尚未保存的正文。确认放弃修改并返回？';
+    case 'logout':
+      return '退出登录会丢失尚未保存的正文。确认放弃修改并退出？';
+    default:
+      return '离开会丢失尚未保存的正文。确认放弃修改？';
+  }
+}
+
+/** 离开确认按钮文案。 */
+export function leaveConfirmLabel(pending: PendingLeave): string {
+  switch (pending.kind) {
+    case 'navigate':
+      return '放弃并离开';
+    case 'back':
+      return '放弃并返回';
+    case 'logout':
+      return '放弃并退出';
+    default:
+      return '放弃修改';
+  }
+}
+
+/**
+ * 「载入最新版本」是否要先确认。
+ *
+ * 该操作会用最新正文覆盖当前草稿，只有草稿有未保存修改时才需要拦一道。
+ */
+export function needsReloadConfirmation(dirty: boolean): boolean {
+  return dirty;
+}

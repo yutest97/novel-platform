@@ -561,7 +561,7 @@ test('13. 终态任务不显示等待提示：失败 / 已取消 / 已请求取�
   ): Promise<string> {
     const chapter = await createChapter({ db, authorId, workId, chapterNo, title });
     const requestId = `e2e-${randomUUID()}`;
-    await db.generationTask.create({
+    const created = await db.generationTask.create({
       data: {
         workId,
         chapterId: chapter.id,
@@ -577,6 +577,18 @@ test('13. 终态任务不显示等待提示：失败 / 已取消 / 已请求取�
         ...(task.extra as Record<string, never>),
       },
     });
+    if (task.status === 'processing') {
+      // 用**数据库时钟**固定租约与取消时间：应用侧写入的 timestamptz 在某些时区配置下
+      // 会与 db 的 clock_timestamp() 有偏移，导致 Worker 的 sweep 立刻把
+      // `processing + cancel_requested_at` 判成"租约过期"并取消，本用例就会不稳定。
+      await db.$executeRaw`
+        UPDATE generation_tasks
+           SET lease_until = clock_timestamp() + interval '10 minutes',
+               cancel_requested_at = clock_timestamp()
+         WHERE id = ${created.id}
+           AND status = 'processing'
+      `;
+    }
     return chapter.id;
   }
 
@@ -785,8 +797,9 @@ test('18. 基线冲突：保留草稿，并提供「载入最新版本」', asyn
     await page.unroute('**/api/works/*/chapters/*/versions');
   }
 
-  // 载入最新版本：基线换成当前最新，草稿替换为最新正文，错误消失
+  // 载入最新版本：先确认「会替换草稿」，再真正载入
   await page.getByTestId('editor-reload').click();
+  await page.getByRole('dialog').getByRole('button', { name: '载入最新版本' }).click();
   await expect(page.getByTestId('editor-error')).toHaveCount(0);
   await expect(page.getByTestId('editor-reload')).toHaveCount(0);
   await expect(page.getByTestId('editor-textarea')).toHaveValue(/人工修订/);
@@ -879,4 +892,154 @@ test('20. 390×844 移动端编辑、保存、刷新阅读，不撑破视口', a
   expect(body).not.toContain(ADMIN_EMAIL);
 
   await mobileContext.close();
+});
+
+/* -------------------------------------------------------------------------- */
+/* A1-4B-B-REV-01：应用内离开保护与冲突重载确认                                */
+/* -------------------------------------------------------------------------- */
+
+/** 等待"后退哨兵"压入历史（确保在按后退前拦截已经就绪）。 */
+async function waitForHistoryGuard(target: Page): Promise<void> {
+  await target.waitForFunction(
+    () =>
+      (window.history.state as { __novelChapterEditorGuard?: boolean } | null)
+        ?.__novelChapterEditorGuard === true,
+  );
+}
+
+test('21. dirty 时点击返回章节列表：取消留在编辑器，确认才离开', async () => {
+  await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(page.getByTestId('editor-open')).toContainText('编辑最新版本');
+  await page.getByTestId('editor-open').click();
+
+  const textarea = page.getByTestId('editor-textarea');
+  const typed = `${await textarea.inputValue()}\n返回用例的草稿。`;
+  await textarea.fill(typed);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+  // 取消：留在章节页，正文、dirty 状态都不变
+  await page.getByTestId('back-to-chapters').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('未保存的正文');
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(page).toHaveURL(new RegExp(`/works/${workId}/chapters/${chapter1Id}$`));
+  await expect(page.getByTestId('editor-textarea')).toHaveValue(typed);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+  // 确认：离开到章节列表
+  await page.getByTestId('back-to-chapters').click();
+  await page.getByRole('dialog').getByRole('button', { name: '放弃并离开' }).click();
+  await expect(page).toHaveURL(new RegExp(`/works/${workId}/chapters$`));
+  await expect(page.getByTestId('chapter-list')).toBeVisible();
+});
+
+test('22. dirty 时浏览器后退：取消后草稿仍在', async () => {
+  await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await page.getByTestId('editor-open').click();
+
+  const textarea = page.getByTestId('editor-textarea');
+  const typed = `${await textarea.inputValue()}\n后退用例的草稿。`;
+  await textarea.fill(typed);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+  // 拦截依赖一条哨兵历史记录，等它压入后再模拟后退
+  await waitForHistoryGuard(page);
+
+  await page.evaluate(() => window.history.back());
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('后退');
+  await dialog.getByRole('button', { name: '取消' }).click();
+
+  // 取消后仍停在本章，草稿完整保留
+  expect(page.url()).toContain(`/chapters/${chapter1Id}`);
+  await expect(page.getByTestId('editor-textarea')).toHaveValue(typed);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+  // 清理：放弃草稿
+  await page.getByTestId('editor-cancel').click();
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+  await expectNothingStored(page, '后退用例的草稿');
+});
+
+test('23. dirty 时 beforeunload 被阻止，放弃草稿后解除', async () => {
+  await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await page.getByTestId('editor-open').click();
+
+  const textarea = page.getByTestId('editor-textarea');
+  await textarea.fill(`${await textarea.inputValue()}\nbeforeunload 用例的草稿。`);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+  const prevented = await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(prevented).toBe(true);
+
+  // 放弃草稿后监听解除，刷新不再被拦
+  await page.getByTestId('editor-cancel').click();
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+
+  const afterDiscard = await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(afterDiscard).toBe(false);
+  await expectNothingStored(page, 'beforeunload 用例的草稿');
+});
+
+test('24. 冲突后载入最新版：取消保留草稿，确认替换并归零 dirty', async () => {
+  await page.route('**/api/works/*/chapters/*/versions', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'CHAPTER_VERSION_CONFLICT', message: '章节版本发生冲突，请刷新后重试' },
+      }),
+    });
+  });
+
+  let typed = '';
+  try {
+    await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+    await page.getByTestId('editor-open').click();
+    const textarea = page.getByTestId('editor-textarea');
+    typed = `${await textarea.inputValue()}\n冲突重载用例的草稿。`;
+    await textarea.fill(typed);
+
+    await page.getByTestId('editor-save').click();
+    await expect(page.getByTestId('editor-error')).toContainText('正文已被其他操作更新');
+    await expect(page.getByTestId('editor-reload')).toBeVisible();
+  } finally {
+    await page.unroute('**/api/works/*/chapters/*/versions');
+  }
+
+  // 取消载入：草稿、错误与 dirty 原样保留
+  await page.getByTestId('editor-reload').click();
+  let dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('载入将替换当前未保存草稿');
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(page.getByTestId('editor-textarea')).toHaveValue(typed);
+  await expect(page.getByTestId('editor-error')).toContainText('正文已被其他操作更新');
+  await expect(page.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+  // 确认载入：替换为最新正文，基线更新后 dirty 归零
+  await page.getByTestId('editor-reload').click();
+  dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: '载入最新版本' }).click();
+  await expect(page.getByTestId('editor-error')).toHaveCount(0);
+  await expect(page.getByTestId('editor-reload')).toHaveCount(0);
+  await expect(page.getByTestId('editor-textarea')).toHaveValue(/移动端修订/);
+  await expect(page.getByTestId('editor-textarea')).not.toHaveValue(typed);
+  await expect(page.getByTestId('editor-dirty')).toHaveText('无修改');
+
+  await page.getByTestId('editor-cancel').click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
 });

@@ -68,7 +68,13 @@ import {
   editorMetricsLabel,
   editorTarget,
   isDraftDirty,
+  leaveConfirmLabel,
+  leaveConfirmMessage,
+  needsReloadConfirmation,
+  pendingLeaveFor,
   type EditorErrorNotice,
+  type LeaveKind,
+  type PendingLeave,
 } from '@/lib/chapter-editor';
 import { handleSessionError } from '@/lib/session-errors';
 import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
@@ -119,6 +125,11 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [editorError, setEditorError] = useState<EditorErrorNotice | null>(null);
   const [closingEditor, setClosingEditor] = useState(false);
   const [reloadingLatest, setReloadingLatest] = useState(false);
+  // 应用内离开保护：Link / 浏览器后退 / 退出登录都不会触发 beforeunload。
+  const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
+  const [reloadConfirm, setReloadConfirm] = useState(false);
+  const guardArmedRef = useRef(false);
+  const allowPopRef = useRef(false);
 
   const targetInitialized = useRef(false);
   const selectedVersionIdRef = useRef<string | null>(null);
@@ -316,6 +327,85 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [draftDirty]);
 
+  /**
+   * 浏览器后退拦截：`beforeunload` 不会触发，必须自己压一条哨兵状态。
+   *
+   * 用户后退时立即把哨兵压回去（页面停在同一 URL），再弹确认；
+   * 确认后才真正 `history.go(-2)`（跳过哨兵与当前页）。
+   */
+  useEffect(() => {
+    if (!draftDirty) {
+      return;
+    }
+    if (!guardArmedRef.current) {
+      window.history.pushState({ ...window.history.state, __novelChapterEditorGuard: true }, '');
+      guardArmedRef.current = true;
+    }
+    const onPopState = (): void => {
+      if (allowPopRef.current) {
+        return;
+      }
+      // 后退已经发生：先把哨兵补回去，避免直接离开页面
+      window.history.pushState({ ...window.history.state, __novelChapterEditorGuard: true }, '');
+      guardArmedRef.current = true;
+      setPendingLeave({ kind: 'back', href: null });
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [draftDirty]);
+
+  /**
+   * 吃掉为拦截后退而压入的哨兵（编辑器关闭且**没有**离开页面时调用）。
+   *
+   * 不清理的话，作者下次点后退会先回到同一个 URL，需要按两次才有反应。
+   */
+  function releaseGuard(): void {
+    if (!guardArmedRef.current) {
+      return;
+    }
+    guardArmedRef.current = false;
+    allowPopRef.current = true;
+    window.history.back();
+    window.setTimeout(() => {
+      allowPopRef.current = false;
+    }, 0);
+  }
+
+  /** 执行已经确认过的离开动作。 */
+  function performLeave(pending: PendingLeave): void {
+    if (pending.kind === 'logout') {
+      void logoutAndRedirect(router);
+      return;
+    }
+    if (pending.kind === 'navigate') {
+      if (pending.href !== null) {
+        router.push(pending.href);
+      }
+      return;
+    }
+    // 后退：跳过哨兵与当前页；若历史里没有更早的页面（直接打开链接），
+    // 退回到章节列表，避免"确认了却停在原地"。
+    allowPopRef.current = true;
+    const before = window.location.href;
+    window.history.go(-2);
+    window.setTimeout(() => {
+      allowPopRef.current = false;
+      if (window.location.href === before) {
+        router.push(`/works/${workId}/chapters`);
+      }
+    }, 250);
+  }
+
+  /** 所有应用内离开入口的唯一入口：脏则确认，否则直接离开。 */
+  function requestLeave(kind: LeaveKind, href: string | null = null): void {
+    const pending = pendingLeaveFor(kind, draftDirty, href);
+    if (pending === null) {
+      performLeave({ kind, href: kind === 'navigate' ? href : null });
+      return;
+    }
+    setPendingLeave(pending);
+  }
+
   const openEditor = useCallback(async (): Promise<void> => {
     const target = editorTarget(versions);
     setEditorError(null);
@@ -361,6 +451,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     setEditor(null);
     setDraft('');
     setEditorError(null);
+    releaseGuard();
   }
 
   async function handleSaveDraft(): Promise<void> {
@@ -382,6 +473,8 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       setEditor(null);
       setDraft('');
       setClosingEditor(false);
+      // 编辑器已关闭且没有离开页面：清掉后退哨兵
+      releaseGuard();
       setAdoptionNotice(`已保存正式版本 ${saved.versionNo}`);
       await refreshDetailAndVersions({ selectLatest: true });
       void refreshSession();
@@ -600,6 +693,15 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
           <Link
             href={`/works/${workId}/chapters`}
             className="back-link"
+            onClick={(event) => {
+              // 客户端导航不触发 beforeunload：有未保存草稿时先拦下来确认。
+              // 没有修改时交给 Link 自己导航，避免多压一条历史记录。
+              if (!draftDirty) {
+                return;
+              }
+              event.preventDefault();
+              requestLeave('navigate', `/works/${workId}/chapters`);
+            }}
             data-testid="back-to-chapters"
           >
             ← 返回章节列表
@@ -616,7 +718,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
         <button
           type="button"
           className="btn-secondary"
-          onClick={() => void logoutAndRedirect(router)}
+          onClick={() => requestLeave('logout')}
           data-testid="logout"
         >
           退出登录
@@ -628,7 +730,17 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
           <p className="alert alert--error" role="alert" data-testid="chapter-load-error">
             {loadError}
           </p>
-          <Link href={`/works/${workId}/chapters`} className="btn-secondary">
+          <Link
+            href={`/works/${workId}/chapters`}
+            className="btn-secondary"
+            onClick={(event) => {
+              if (!draftDirty) {
+                return;
+              }
+              event.preventDefault();
+              requestLeave('navigate', `/works/${workId}/chapters`);
+            }}
+          >
             返回章节列表
           </Link>
         </div>
@@ -1050,7 +1162,14 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                   <button
                     type="button"
                     className="btn-secondary"
-                    onClick={() => void handleReloadLatest()}
+                    onClick={() => {
+                      // 载入会用最新正文覆盖草稿：有未保存修改时先确认。
+                      if (needsReloadConfirmation(draftDirty)) {
+                        setReloadConfirm(true);
+                        return;
+                      }
+                      void handleReloadLatest();
+                    }}
                     disabled={savingVersion || reloadingLatest}
                     data-testid="editor-reload"
                   >
@@ -1095,8 +1214,43 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
             setEditor(null);
             setDraft('');
             setEditorError(null);
+            releaseGuard();
           }}
           onCancel={() => setClosingEditor(false)}
+        />
+      ) : null}
+
+      {pendingLeave === null ? null : (
+        <ConfirmDialog
+          title="放弃未保存的修改"
+          message={leaveConfirmMessage(pendingLeave)}
+          confirmLabel={leaveConfirmLabel(pendingLeave)}
+          danger
+          onConfirm={() => {
+            const pending = pendingLeave;
+            setPendingLeave(null);
+            performLeave(pending);
+          }}
+          onCancel={() => setPendingLeave(null)}
+        />
+      )}
+
+      {reloadConfirm ? (
+        <ConfirmDialog
+          title="载入最新版本"
+          message="载入将替换当前未保存草稿，确认继续？"
+          confirmLabel={reloadingLatest ? '载入中…' : '载入最新版本'}
+          danger
+          busy={reloadingLatest}
+          onConfirm={() => {
+            setReloadConfirm(false);
+            void handleReloadLatest();
+          }}
+          onCancel={() => {
+            if (!reloadingLatest) {
+              setReloadConfirm(false);
+            }
+          }}
         />
       ) : null}
     </main>

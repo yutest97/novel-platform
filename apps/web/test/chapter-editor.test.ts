@@ -18,6 +18,11 @@ import {
   editorMetricsLabel,
   editorTarget,
   isDraftDirty,
+  leaveConfirmLabel,
+  leaveConfirmMessage,
+  leaveDecision,
+  needsReloadConfirmation,
+  pendingLeaveFor,
   type VersionOption,
 } from '../src/lib/chapter-editor';
 
@@ -145,5 +150,46 @@ describe('保存错误码映射', () => {
       text: '网络异常，请稍后重试',
       reloadable: false,
     });
+  });
+});
+
+describe('离开保护', () => {
+  it('脏草稿必须确认，干净时直接离开', () => {
+    expect(leaveDecision(false)).toBe('proceed');
+    expect(leaveDecision(true)).toBe('confirm');
+  });
+
+  it('按入口构造待确认动作：只有 navigate 带地址', () => {
+    expect(pendingLeaveFor('navigate', false, '/works/w/chapters')).toBeNull();
+    expect(pendingLeaveFor('navigate', true, '/works/w/chapters')).toEqual({
+      kind: 'navigate',
+      href: '/works/w/chapters',
+    });
+    // 后退 / 退出登录不需要目标地址，即使误传也会被丢弃
+    expect(pendingLeaveFor('back', true, '/ignored')).toEqual({ kind: 'back', href: null });
+    expect(pendingLeaveFor('logout', true, '/ignored')).toEqual({ kind: 'logout', href: null });
+  });
+
+  it('三个入口的确认文案都点明"会丢失未保存正文"', () => {
+    const navigate = leaveConfirmMessage({ kind: 'navigate', href: '/x' });
+    const back = leaveConfirmMessage({ kind: 'back', href: null });
+    const logout = leaveConfirmMessage({ kind: 'logout', href: null });
+    for (const text of [navigate, back, logout]) {
+      expect(text).toContain('未保存的正文');
+      expect(text).toContain('确认放弃');
+    }
+    expect(back).toContain('后退');
+    expect(logout).toContain('退出登录');
+  });
+
+  it('确认按钮文案与入口匹配', () => {
+    expect(leaveConfirmLabel({ kind: 'navigate', href: '/x' })).toBe('放弃并离开');
+    expect(leaveConfirmLabel({ kind: 'back', href: null })).toBe('放弃并返回');
+    expect(leaveConfirmLabel({ kind: 'logout', href: null })).toBe('放弃并退出');
+  });
+
+  it('载入最新版本只在有未保存修改时需要确认', () => {
+    expect(needsReloadConfirmation(true)).toBe(true);
+    expect(needsReloadConfirmation(false)).toBe(false);
   });
 });

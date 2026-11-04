@@ -875,8 +875,9 @@ Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无�
 workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展示纯函数 6、浏览器 E2E 2）；
 **REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；
 **A1-4B-A** 再补 18 个（人工版本保存 API）；**A1-4B-B** 再补 13 个（编辑器纯逻辑）；
-全量单测 **716** 个（web 221 / workflow 180 / worker 63 / shared 15 / db 10 /
-auth 95 / works 132）；浏览器 E2E 合计 **87**（80 + 编辑器 7）。
+**REV-01** 再补 5 个（离开保护 / 冲突重载确认），全量单测 **721** 个
+（web 226 / workflow 180 / worker 63 / shared 15 / db 10 / auth 95 / works 132）；
+浏览器 E2E 合计 **91**（80 + 编辑器 7 + 离开保护 4）。
 
 ### 人工章节版本保存（A1-4B-A）
 
@@ -921,13 +922,17 @@ source / wordCount / parentVersionId`，**不含正文**；审计失败整体回
 - textarea 预填最新正式正文；实时显示**非空白字符数**、距 1200 下限还差多少、
   是否有未保存修改；字数只做预览，**不随请求提交**（服务端重新计算）；
 - `Ctrl+S` / `Cmd+S` 保存并阻止浏览器默认行为；
-- 有未保存修改时：取消需二次确认，`beforeunload` 会提示；保存中禁用输入与按钮；
+- 有未保存修改时：取消需二次确认；保存中禁用输入与按钮；
+- **应用内离开也会拦**：点击「返回章节列表」、浏览器后退、退出登录都会先弹
+  「放弃未保存的修改」，取消后正文 / 基线 / 错误提示 / dirty 状态完全不变，确认才离开；
+  刷新与关闭标签页仍由 `beforeunload` 提示（合成事件可断言 `defaultPrevented`）；
 - 草稿**只存在组件内存**：不写 URL / localStorage / sessionStorage，刷新即丢失；
 - 保存成功 → 关闭编辑器、提示「已保存正式版本 N」、刷新版本列表与章节状态、
   自动选中最新版本并展示正文，旧版本原样保留；
 - 保存失败**保留草稿**并按稳定错误码提示：
   `CHAPTER_CONTENT_INVALID`、`CHAPTER_STATE_INVALID_FOR_SAVE`、
-  `CHAPTER_VERSION_CONFLICT`（附「载入最新版本」按钮）、`CONCURRENT_MODIFICATION`；
+  `CHAPTER_VERSION_CONFLICT`（附「载入最新版本」按钮，点击后先确认「载入将替换当前未保存草稿」，
+  取消则草稿完整保留）、`CONCURRENT_MODIFICATION`；
 - 全程纯文本渲染（`pre-wrap`），不使用 `dangerouslySetInnerHTML`；
 - 编辑期间禁止切换版本；新 human 版本来源显示「人工」，AI 版本仍显示「AI」。
 
@@ -950,7 +955,7 @@ ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖（87 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
+覆盖（91 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
 作品流程 / 账号上限）：
 未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
 刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
@@ -995,7 +1000,10 @@ processing + cancelRequestedAt（已请求取消生成）；刷新已完成任�
 **A1-4B-B**：编辑版本 1 → `Ctrl/Cmd+S` 保存为人工版本 2 → 刷新后仍在、版本 1 只读且未变
 → 未保存取消需确认、草稿不落存储 → 短正文稳定报错并保留草稿 → 替身注入
 `CHAPTER_VERSION_CONFLICT` 后可「载入最新版本」→ 无版本时手动创建版本 1 →
-390×844 移动端编辑、保存、刷新阅读。
+390×844 移动端编辑、保存、刷新阅读 →
+**A1-4B-B-REV-01**：dirty 时点返回 / 浏览器后退取消后草稿仍在、确认才离开；合成
+`beforeunload` 事件被阻止（放弃后解除）；冲突后「载入最新版本」先确认，取消保留草稿、
+确认替换并归零 dirty。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

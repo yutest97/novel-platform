@@ -110,3 +110,4 @@
 | 2026-11-04 | A1-4A-CI-FIX-02B：Playwright 步骤显式注入宿主机 `DATABASE_URL`（127.0.0.1 + 本次 run 的 E2E 库），守卫新增 4 组夹具 |
 | 2026-11-05 | A1-4B-A：人工章节版本保存（服务 + API），baseVersionId 乐观并发、finalized 回 in_review、审计 chapter.version_created |
 | 2026-11-05 | A1-4B-B：章节工作台 Markdown 人工编辑器（`Ctrl+S`、dirty 取消确认、冲突重新载入、首版手写），A1-4B-C 承接 diff / 恢复 |
+| 2026-11-05 | A1-4B-B-REV-01：应用内离开保护（返回 / 后退 / 退出登录先确认，保留 `beforeunload`）与冲突「载入最新版本」二次确认 |
