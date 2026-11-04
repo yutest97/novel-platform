@@ -218,6 +218,43 @@ rule_packages (题材规则包，系统级)
 - **并发采纳不同候选**：章节行被锁定，`next_version_no` 计算串行化，版本号不冲突。
 - 采纳 `discarded` 候选：返回 `409`。
 
+### 3.4.1 A1-2 实现口径：chapter_contracts / chapter_candidates
+
+> 本节以迁移 `20261104020000_a1_chapter_draft` 为准。§3.4 的采纳流程与
+> `chapter_versions` 仍属 A1-3；A1-2 只交付"合同冻结 + 正文候选"。
+
+**chapter_contracts（新增）**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| work_id / chapter_id / generation_task_id | uuid | 复合外键绑定同章同任务 |
+| version_no | int | 章节内递增，`UNIQUE(chapter_id, version_no)` |
+| goal | text | 1–500 字 |
+| must_include / must_not_include | jsonb | string[] |
+| scene_beats | jsonb | `{ version, characters: string[], scenes: [...] }` |
+| target_words | int | 2500–4000 |
+| status | text | 只有 `frozen` |
+| created_at | timestamptz | |
+
+**chapter_candidates（A1-2 口径）**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| work_id / chapter_id / generation_task_id | uuid | 每任务最多一条（UNIQUE） |
+| contract_id | uuid | 必须引用**同一任务、同一章节、同一作品**的合同 |
+| content | text | 正文全文（≥1200 字符，≤200000） |
+| word_count | int | 服务端按"非空白字符数"统计（替代旧的 char_count） |
+| structured_plan | jsonb | 计划快照（goal / scenes / characters / targetWords / 合同版本） |
+| status | text | 只有 `candidate`（`pending/adopted/discarded` 与 `adopted_version_id` 留给 A1-3） |
+| created_at | timestamptz | |
+
+- `source_task_id` 在本实现中命名为 `generation_task_id`；
+- `chapter_versions` **本轮不建**，候选不是正式正文；
+- 章节状态由工作流推进：合同 → `outlined`，Writer 开始 → `drafting`，候选写入 → `in_review`；
+- 合同 / 候选 / 章节状态 / 审计在同一事务提交；失败或取消不会留下候选。
+
 ### 3.5 entities + entity_attributes（题材解耦核心）
 
 **entities**：`id, work_id, entity_type, name, created_at, updated_at, deleted_at(软删)`。

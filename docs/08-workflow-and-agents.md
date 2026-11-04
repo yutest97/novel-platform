@@ -1,9 +1,9 @@
-# 08 工作流与 Agent（A1-1）
+# 08 工作流与 Agent（A1-1 / A1-2）
 
-- 版本：v1.0
+- 版本：v1.1
 - 日期：2026-11-04
 - 对应代码：`packages/workflow`
-- 对应迁移：`20261104010000_a1_workflow_kernel`
+- 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`
 
 ---
 
@@ -20,14 +20,18 @@
 
 ---
 
-## 2. A1-1 范围
+## 2. A1-1 / A1-2 范围
 
-**交付**：确定性工作流内核、Provider 抽象、Agent 运行基础设施、
+**A1-1 交付**：确定性工作流内核、Provider 抽象、Agent 运行基础设施、
 PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张基础表。
 
-**不交付**：Planner/Writer 业务 Agent、章节生成 API/UI、
-章节契约/候选/版本、Reviewer/Continuity/Fact、RAG/图数据库、资源流水、多人功能。
-A1-2 才接入 Plan → Draft 的真实流水线。
+**A1-2 交付**：`chapter.draft` 单章候选流水线（Planner → Writer）、
+确定性 ContextBuilder、`chapter_contracts` / `chapter_candidates` 两张表；
+通过 `WorkerRunner` 集成测试运行真实工作流，**不提供 HTTP API / UI**。
+
+**不交付**：章节生成 API、章节编辑器 UI、候选采纳、`chapter_versions`、
+Reviewer/Continuity/Fact、RAG/图数据库、资源流水、多人功能。
+A1-3 才做采纳、正式版本与章节工作台。
 
 ---
 
@@ -50,7 +54,7 @@ WorkerRunner (apps/worker 未来接入)
 
 ---
 
-## 4. 数据表（A1-1）
+## 4. 数据表（A1-1 / A1-2）
 
 | 表 | 作用 | 关键约束 |
 | --- | --- | --- |
@@ -58,6 +62,8 @@ WorkerRunner (apps/worker 未来接入)
 | `generation_tasks` | 任务队列 + 租约 | `UNIQUE(work_id, request_id)`、`input_hash`（64 位 SHA-256）、状态白名单、processing 必须有锁/租约、状态迁移触发器、终态不可变 |
 | `task_contexts` | 任务引用的上下文摘要 | `(task_id, context_type, ref_id)` 唯一、snippet ≤ 500、rank ≥ 0 |
 | `llm_call_logs` | 模型调用计量 | 只有 token/延迟/成功/error_code；**没有 prompt/正文列** |
+| `chapter_contracts` | 冻结的章节合同 | 每任务最多一份、`UNIQUE(chapter_id, version_no)`、`target_words` 2500–4000、复合外键绑定 work/chapter/task |
+| `chapter_candidates` | 正文候选（非正式版本） | 每任务最多一份、`word_count >= 1200`、复合外键绑定同任务合同 |
 
 设计细节：
 
@@ -218,15 +224,133 @@ interface AgentDefinition {
 | Worker | 真实 PostgreSQL + 测试工作流（含 Agent 集成、心跳、取消、重试、崩溃恢复） |
 | 迁移 | 全新空库执行全部 migration；既有表不动 |
 
-A1-1 系列（含 A1-1-REV-01）新增 118 个测试；既有 390 个测试不减少。
+A1-1 系列（含 A1-1-REV-01）新增 118 个测试；A1-2 新增 24 个；既有 390 个测试不减少。
+workflow 包当前共 **142** 个测试。
 
 ---
 
-## 12. A1-2 预告（不在本轮）
+## 12. A1-2 单章候选流水线
 
-- 注册 `planner.chapter` 与 `writer.draft` 两个 Agent（promptVersion 从 1.0.0 起）；
-- 按 `task_type` 强制章节任务必填 `chapter_id`（A1-1 有意允许为空）；
-- 新增章节生成任务类型与 API（会话 authorId）；
-- 生成 API 只创建任务并返回 taskId，不直接返回正文；
-- 章节工作台读取任务进度与候选；
-- 作者确认后才产生 `chapter_versions`。
+### 12.1 流水线（taskType = `chapter.draft`）
+
+```
+WorkerRunner
+  └─ WorkflowKernel（固定 6 步，顺序不可由模型改变）
+       1 assemble_context              工作流：确定性装配上下文 + task_contexts
+       2 plan_chapter                  Planner Agent（planner.chapter@1.0.0）
+       3 validate_and_freeze_contract  工作流：代码校验 + 事务冻结合同 → 章节 outlined
+       4 write_draft                   Writer Agent（writer.chapter@1.0.0；开始前 → drafting）
+       5 validate_draft                工作流：trim + 服务端字数（≥ 1200）
+       6 persist_candidate             工作流：事务写候选 → 章节 in_review
+```
+
+- 每一步之前由 Kernel 统一检查 `status / cancel_requested_at / locked_by`；
+- 3 / 4 / 6 是写入步骤：事务内 `SELECT ... FOR UPDATE` 锁任务行并再次确认
+  `locked_by = 当前 Worker`，租约被抢走就立即停止，不写任何业务数据；
+- 步骤成功写 `current_step`；任务终态仍是 `succeeded / failed / cancelled`，
+  **不新增任务状态**（"候选就绪"由 `chapter_candidates` 的存在表达）。
+
+### 12.2 Planner（planner.chapter@1.0.0，简称 planner-v1）
+
+输入（确定性代码组装，不含 prompt）：
+
+- 作品方向（规则包当前 schemaRef 的字段，标签 → 展示值）；
+- 人物 / 境界 / 势力摘要（秘密类字段被剔除）；
+- 章节号、标题、目标字数；写作风格参数。
+
+输出严格 JSON：
+
+```json
+{
+  "goal": "string",
+  "mustInclude": ["string"],
+  "mustNotInclude": ["string"],
+  "characters": ["string"],
+  "scenes": [
+    { "purpose": "string", "location": "string", "conflict": "string", "outcome": "string" }
+  ],
+  "targetWords": 2500
+}
+```
+
+代码校验（Schema 之后再做一遍）：
+
+- `goal` trim 后非空；`scenes` 至少 1 个，四个字段 trim 后都非空；
+- `targetWords` 必须是 2500–4000 的整数；
+- 数组项 trim 后不能为空，按原顺序去重；
+- 未知字段由 Schema 直接拒绝；任何一项不满足 → **不可重试失败**，不写合同。
+
+### 12.3 Writer（writer.chapter@1.0.0，简称 writer-v1）
+
+输入：已冻结的合同、合同点名的人物摘要、境界摘要、风格参数、目标字数。
+输出：`{ "text": "正文" }`（正文作为 JSON 字段返回，便于复用严格 Schema）。
+
+代码校验：
+
+- `text` 去首尾空白后按"非空白字符数"统计，少于 1200 → 不可重试失败，不写候选；
+- `word_count` 永远由服务端计算，**不读取模型自报的字数**（Schema 也不允许该字段）；
+- 超过 200,000 字符直接拒绝。
+
+### 12.4 上下文装配（确定性 ContextBuilder）
+
+固定优先级与 `rank`：
+
+| 顺序 | context_type | 来源 | rank |
+| --- | --- | --- | --- |
+| 1 | `chapter` | 章节号 / 标题 / 目标字数 / 视角与节奏 | 1 |
+| 2 | `character` | 当前作品未删除人物（不含 secret） | 100 + i |
+| 3 | `realm_level` | 境界体系 | 200 + i |
+| 4 | `faction` | 势力 | 300 + i |
+| 5 | `work_direction` | 作品方向（ref_id = workId） | 400 |
+
+- 只按 `work_id` 读取；章节额外校验 `chapter.work_id`，**不跨作品**；
+- 只读当前 `schemaRef` 的属性；`secret` / `secretKnownBy` 永不进入摘要与模型输入；
+- 人物引用的境界 / 势力会解析为名称后再给模型；
+- 不调用模型决定上下文、不做 RAG；
+- 每条来源写入 `task_contexts`（snippet ≤ 500，重试时按唯一键覆盖，不重复插行）。
+
+### 12.5 合同与候选的数据边界
+
+- `chapter_contracts`：`goal / must_include / must_not_include / scene_beats / target_words`；
+  `scene_beats = { version, characters, scenes }`（人物名单与场景节拍同属计划）；
+  `status` 只有 `frozen`；同一任务最多一份，同一章节按 `version_no` 递增；
+- `chapter_candidates`：`content / word_count / structured_plan`；
+  `structured_plan = { version, contractId, contractVersion, goal, ..., scenes, targetWords }`；
+  `status` 只有 `candidate`；
+- `chapter_contracts` / `chapter_candidates` 用**复合外键**绑定
+  `(work_id, chapter_id, generation_task_id)`：章节必须属于作品、合同必须属于同章同任务、
+  候选必须引用同任务合同；
+- 合同 / 候选写入、章节状态更新、审计在**同一事务**提交；审计只记 ids、版本、
+  字数与状态，**不记 goal / 场景 / 正文 / prompt**；
+- 本轮**不建 `chapter_versions`**，候选不是正式正文。
+
+### 12.6 重试幂等
+
+同一个 `generation_task` 重试时：
+
+1. 合同已存在 → `plan_chapter` **不调用 Planner**，直接复用冻结合同；
+2. 候选已存在 → `write_draft` **不调用 Writer**，复用候选正文；
+3. `persist_candidate` 看到候选已存在 → 不再插入、不再写候选审计；
+4. 章节状态按需补齐（合同 → outlined，候选 → in_review），状态已到位则不重复审计；
+5. `llm_call_logs` 只对应**实际发生**的模型调用：重试跳过 Planner 时不会多出 planner 日志。
+
+### 12.7 章节状态
+
+```
+planned ──合同冻结──▶ outlined ──Writer 开始──▶ drafting ──候选写入──▶ in_review
+```
+
+- 只允许向前推进，不降级；`finalized / abandoned` 不会被本流程覆盖；
+- 失败 / 取消时停在最后一个已提交的里程碑：
+  Planner 失败 → 仍为 `planned`；Writer 失败或取消 → `drafting`；
+- 任何失败都不会产生候选，因此不存在"正式正文"被写一半的情况。
+
+---
+
+## 13. A1-3 预告（不在本轮）
+
+- 章节工作台（列表 / 正文编辑 / 候选查看）；
+- 候选采纳接口与 `chapter_versions`（正式版本、版本链、来源候选唯一）；
+- 生成 API（会话 authorId）与任务进度查询；
+- 按 `task_type` 强制章节任务必填 `chapter_id`（A1-1/A1-2 由工作流校验）；
+- 重新生成与人工修订；仍不接 Reviewer。

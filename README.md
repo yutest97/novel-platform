@@ -1,9 +1,10 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-1（工作流内核 + Model Provider + Agent 基础 + PostgreSQL Worker）**。
+> 当前阶段：**A1-2（Planner → Writer 单章候选流水线）**。
 
-已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核。
+已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
+A1-2 单章候选流水线（合同 + 正文候选，无 HTTP API/UI）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -562,7 +563,8 @@ detail 只有 `workId / itemId / eventId / eventType / seq`（冲正额外记 `r
 ### 工作流内核、Provider 与 PostgreSQL Worker（A1-1）
 
 迁移：`packages/db/prisma/migrations/20261104010000_a1_workflow_kernel/`。
-A1-1 只搭**确定性工作流基础设施**：不接 Planner/Writer、不提供生成 API/UI、不建章节候选与版本。
+A1-1 只搭**确定性工作流基础设施**；A1-2 在其上接入 Planner/Writer，
+但仍不提供生成 API/UI，也不建 `chapter_versions`。
 
 | 表                 | 用途            | 关键约束                                                                                        |
 | ------------------ | --------------- | ----------------------------------------------------------------------------------------------- |
@@ -612,7 +614,31 @@ MODEL_TIMEOUT_MS=60000
 任务与模型日志只记录 ids / 状态 / 稳定错误码，不含 API Key、prompt、正文或模型原始错误。
 
 **测试**：A1-1 系列（含 A1-1-REV-01）新增 118 个（Provider 14 / Schema 20 / Agent 15 /
-Kernel 11 / Queue 27 / Worker 15 / Mock 5 / canonical JSON + 指纹 11），全量单测 **508** 个。
+Kernel 11 / Queue 27 / Worker 15 / Mock 5 / canonical JSON + 指纹 11）。
+
+### 单章候选流水线（A1-2）
+
+迁移：`packages/db/prisma/migrations/20261104020000_a1_chapter_draft/`（2 张表 + 复合外键）。
+taskType = `chapter.draft`，固定 6 步：
+
+```
+assemble_context → plan_chapter → validate_and_freeze_contract
+  → write_draft → validate_draft → persist_candidate
+```
+
+- `planner.chapter@1.0.0`：输出 `goal / mustInclude / mustNotInclude / characters / scenes / targetWords`；
+  Schema + 代码双重校验（空值、场景四字段、2500–4000 字），通过后冻结为 `chapter_contracts`；
+- `writer.chapter@1.0.0`：输出 `{ text }`；服务端按"非空白字符数"重新统计，
+  少于 1200 字直接失败，不写候选；`word_count` 不信任模型；
+- 确定性 ContextBuilder：章节 → 人物 → 境界 → 势力 → 作品方向，写入 `task_contexts`
+  （snippet ≤500）；**不跨作品**，`secret` 类字段不进入模型输入；
+- 合同 / 候选 / 章节状态 / 审计同事务；失败或取消不留下候选；
+- 重试幂等：同任务已有合同 → 不再调 Planner；已有候选 → 不再调 Writer、不重复插行；
+- 章节状态：合同 `outlined` → Writer 开始 `drafting` → 候选 `in_review`；任务终态仍是 `succeeded`；
+- 不建 `chapter_versions`，不提供采纳接口；这些属于 A1-3。
+
+**测试**：A1-2 新增 24 个（流水线 17 / Agent 校验 7）；workflow 包 **142** 个；
+全量单测 **532** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 
@@ -949,7 +975,7 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 │   ├── auth/                # 账号、argon2id 哈希、会话、审计、限流、Origin 校验
 │   │   └── scripts/         # seed-admin.mjs（一次性创建管理员）
 │   ├── works/               # 作品、规则包、设定实体与物品事件流水
-│   └── workflow/            # A1-1：工作流内核、Provider、Agent、PostgreSQL 任务队列
+│   └── workflow/            # 工作流内核、Provider、Agent、任务队列、单章候选流水线
 ├── infra/
 │   ├── docker-compose.yml       # postgres / web / worker / caddy（默认 production）
 │   ├── docker-compose.dev.yml   # 开发模式 override（不改变默认 production）

@@ -78,9 +78,12 @@ export async function createTestChapter(
 /**
  * 清理一个作品下的全部测试数据。
  *
- * 顺序：任务（上下文/日志级联）→ 章节 → 作品。
+ * 顺序：候选 → 合同 → 任务（上下文/日志级联）→ 章节 → 作品。
+ * 合同/候选对任务、章节、作品都是 RESTRICT，顺序不能反。
  */
 export async function cleanupWork(db: PrismaClient, workId: string): Promise<void> {
+  await db.chapterCandidate.deleteMany({ where: { workId } });
+  await db.chapterContract.deleteMany({ where: { workId } });
   await db.generationTask.deleteMany({ where: { workId } });
   await db.chapter.deleteMany({ where: { workId } });
   await db.work.deleteMany({ where: { id: workId } });

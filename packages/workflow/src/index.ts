@@ -1,13 +1,14 @@
 /**
- * @novel/workflow —— A1-1 工作流内核。
+ * @novel/workflow —— 工作流内核与单章候选流水线（A1-1 / A1-2）。
  *
  * 分层：
  * - `provider` / `providers/*`：模型接入（Mock 与 OpenAI 兼容）；
  * - `agent`：轻量 AgentDefinition + 严格 Schema 校验；
  * - `kernel`：确定性步骤执行（不碰数据库、不决定下一步）；
- * - `queue` / `worker`：PostgreSQL 任务队列、租约、心跳、重试、取消与幂等。
+ * - `queue` / `worker`：PostgreSQL 任务队列、租约、心跳、重试、取消与幂等；
+ * - `chapter/*`：`chapter.draft` 流水线（Planner / Writer / ContextBuilder / 合同与候选）。
  *
- * A1-1 **不包含** Planner / Writer 业务实现，也不提供生成 API 或章节 UI。
+ * 仍不提供生成 HTTP API、章节 UI、候选采纳与 chapter_versions（A1-3）。
  */
 
 export {
@@ -79,9 +80,11 @@ export {
   WorkflowKernel,
   WorkflowRegistry,
   WorkflowStepError,
+  createWorkflowExecutionState,
   type WorkflowDefinition,
   type WorkflowExecutionOptions,
   type WorkflowExecutionResult,
+  type WorkflowExecutionState,
   type WorkflowStep,
   type WorkflowStepContext,
   type WorkflowTaskEnvelope,
@@ -133,3 +136,29 @@ export {
   type WorkerRunnerOptions,
   type WorkerRunOutcome,
 } from './worker.js';
+
+export {
+  CHAPTER_DRAFT_TASK_TYPE,
+  MAX_CONTRACT_TARGET_WORDS,
+  MAX_DRAFT_CHARS,
+  MIN_CONTRACT_TARGET_WORDS,
+  MIN_DRAFT_WORDS,
+  PLANNER_CHAPTER_AGENT,
+  WRITER_CHAPTER_AGENT,
+  buildChapterDraftContext,
+  countWords,
+  createChapterDraftWorkflow,
+  normalizePlannerOutput,
+  prepareDraftText,
+  type AssembledContext,
+  type BuildContextInput,
+  type ChapterDraftContext,
+  type ChapterDraftWorkflowOptions,
+  type ChapterStyle,
+  type ContextEntity,
+  type ContextSource,
+  type FrozenContract,
+  type PlannerOutput,
+  type PlannerScene,
+  type ValidatedDraft,
+} from './chapter/index.js';

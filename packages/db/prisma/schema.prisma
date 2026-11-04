@@ -143,6 +143,8 @@ model Work {
   itemEvents ItemEvent[]
   chapters Chapter[]
   generationTasks GenerationTask[]
+  chapterContracts ChapterContract[]
+  chapterCandidates ChapterCandidate[]
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -302,8 +304,12 @@ model Chapter {
 
   work            Work             @relation(fields: [workId], references: [id], onDelete: Restrict)
   generationTasks GenerationTask[]
+  contracts       ChapterContract[]
+  candidates      ChapterCandidate[]
 
   @@unique([workId, chapterNo])
+  /// 供 chapter_contracts / chapter_candidates 的复合外键引用
+  @@unique([id, workId])
   @@index([workId, chapterNo])
   @@map("chapters")
 }
@@ -348,8 +354,12 @@ model GenerationTask {
   chapter    Chapter?    @relation(fields: [chapterId], references: [id], onDelete: Restrict)
   contexts   TaskContext[]
   llmLogs    LlmCallLog[]
+  chapterContract ChapterContract?
+  chapterCandidate ChapterCandidate?
 
   @@unique([workId, requestId])
+  /// 供 chapter_contracts / chapter_candidates 的复合外键引用
+  @@unique([id, chapterId, workId])
   @@index([workId, status, createdAt])
   @@index([status, createdAt])
   @@index([status, leaseUntil])
@@ -397,4 +407,66 @@ model LlmCallLog {
   @@index([taskId, createdAt])
   @@index([createdAt])
   @@map("llm_call_logs")
+}
+
+/// 章节合同（A1-2）。
+///
+/// - 由 Planner Agent 输出、工作流代码校验后**冻结**；冻结后不修改；
+/// - 每个 generation_task 最多一份合同（重试复用）；
+/// - 同一章节按 version_no 递增（UNIQUE(chapter_id, version_no)）；
+/// - scene_beats 同时承载人物名单与场景节拍：
+///   `{ version, characters: string[], scenes: [...] }`；
+/// - 计划内容不写入审计，审计只记 ids / version / targetWords。
+model ChapterContract {
+  id               String   @id @default(uuid()) @db.Uuid
+  workId           String   @map("work_id") @db.Uuid
+  chapterId        String   @map("chapter_id") @db.Uuid
+  generationTaskId String   @map("generation_task_id") @db.Uuid
+  versionNo        Int      @map("version_no")
+  goal             String
+  mustInclude      Json     @map("must_include")
+  mustNotInclude   Json     @map("must_not_include")
+  sceneBeats       Json     @map("scene_beats")
+  targetWords      Int      @map("target_words")
+  status           String   @default("frozen")
+  createdAt        DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  work       Work           @relation(fields: [workId], references: [id], onDelete: Restrict)
+  chapter    Chapter        @relation(fields: [chapterId], references: [id], onDelete: Restrict)
+  task       GenerationTask @relation(fields: [generationTaskId], references: [id], onDelete: Restrict)
+  candidates ChapterCandidate[]
+
+  @@unique([chapterId, versionNo])
+  @@unique([generationTaskId])
+  @@index([chapterId, versionNo])
+  @@map("chapter_contracts")
+}
+
+/// 章节正文候选（A1-2）。
+///
+/// - 只是候选，不是正式正文；采纳与 chapter_versions 属于 A1-3；
+/// - 每个 generation_task 最多一条（重试复用）；
+/// - word_count 由服务端按"非空白字符数"统计，不信任模型返回值；
+/// - structured_plan 只存计划（goal / scenes / characters / targetWords），
+///   不含 prompt 或模型原始响应。
+model ChapterCandidate {
+  id               String   @id @default(uuid()) @db.Uuid
+  workId           String   @map("work_id") @db.Uuid
+  chapterId        String   @map("chapter_id") @db.Uuid
+  generationTaskId String   @map("generation_task_id") @db.Uuid
+  contractId       String   @map("contract_id") @db.Uuid
+  content          String
+  wordCount        Int      @map("word_count")
+  structuredPlan   Json     @map("structured_plan")
+  status           String   @default("candidate")
+  createdAt        DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  work     Work            @relation(fields: [workId], references: [id], onDelete: Restrict)
+  chapter  Chapter         @relation(fields: [chapterId], references: [id], onDelete: Restrict)
+  task     GenerationTask  @relation(fields: [generationTaskId], references: [id], onDelete: Restrict)
+  contract ChapterContract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+
+  @@unique([generationTaskId])
+  @@index([chapterId, createdAt])
+  @@map("chapter_candidates")
 }

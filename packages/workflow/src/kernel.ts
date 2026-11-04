@@ -21,12 +21,40 @@ export interface WorkflowTaskEnvelope {
   readonly input: unknown;
 }
 
+/**
+ * 单次执行的临时状态（步骤之间传递中间结果）。
+ *
+ * 由 Kernel 在每次 `execute` 时新建，**不跨任务共享**：
+ * 上下文、合同草稿、正文等只存在于这次执行的内存里，不写日志、不落库。
+ */
+export interface WorkflowExecutionState {
+  get<T = unknown>(key: string): T | undefined;
+  set(key: string, value: unknown): void;
+}
+
+/** 新建一份执行状态。 */
+export function createWorkflowExecutionState(): WorkflowExecutionState {
+  const store = new Map<string, unknown>();
+  return {
+    get<T = unknown>(key: string): T | undefined {
+      return store.get(key) as T | undefined;
+    },
+    set(key: string, value: unknown): void {
+      store.set(key, value);
+    },
+  };
+}
+
 /** 单个步骤的上下文。 */
 export interface WorkflowStepContext {
   readonly task: WorkflowTaskEnvelope;
   readonly stepName: string;
   /** 租约丢失 / 服务停止时中止；步骤应尽快返回。 */
   readonly signal: AbortSignal;
+  /** 当前 Worker 标识；步骤内的写事务用它做 fencing。 */
+  readonly workerId: string | null;
+  /** 本次执行专属的步骤间状态。 */
+  readonly state: WorkflowExecutionState;
 }
 
 /** 一个确定性步骤。 */
@@ -48,6 +76,8 @@ export interface WorkflowExecutionOptions {
   readonly isCancelled: () => Promise<boolean>;
   /** 步骤成功后的检查点（Worker 写 current_step）。 */
   readonly onStepCompleted: (stepName: string) => Promise<void>;
+  /** 当前 Worker 标识；写入型步骤用它确认任务仍归自己所有。 */
+  readonly workerId?: string;
 }
 
 /** 执行结果。 */
@@ -139,6 +169,8 @@ export class WorkflowKernel {
   ): Promise<WorkflowExecutionResult> {
     const definition = this.registry.get(task.taskType);
     const completed: string[] = [];
+    const state = createWorkflowExecutionState();
+    const workerId = options.workerId ?? null;
 
     for (const step of definition.steps) {
       this.assertRunning(options.signal);
@@ -147,7 +179,7 @@ export class WorkflowKernel {
       }
 
       try {
-        await step.run({ task, stepName: step.name, signal: options.signal });
+        await step.run({ task, stepName: step.name, signal: options.signal, workerId, state });
       } catch (error) {
         if (error instanceof TaskLeaseLostError) {
           throw error;

@@ -234,12 +234,18 @@ export class WorkerRunner {
         },
         {
           signal: controller.signal,
+          workerId: this.workerId,
           isCancelled: async () => {
             if (leaseLost) {
               return true;
             }
             const state = await getTaskCancellationState(this.db, task.id);
-            return state === null || state.cancelRequested || state.status !== 'processing';
+            return (
+              state === null ||
+              state.cancelRequested ||
+              state.status !== 'processing' ||
+              state.lockedBy !== this.workerId
+            );
           },
           onStepCompleted: async (step) => {
             const ok = await updateTaskStep(this.db, {

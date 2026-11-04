@@ -457,6 +457,34 @@ B3-B2 交付 item 卡片入口、时间线（分页 / 冲正关系）、追加�
 | AT-WF-11 | chapters 数据隔离 | `UNIQUE(work_id, chapter_no)`；不同作品可同章号；跨作品章节不能建任务 | `test/queue.test.ts` |
 | AT-WF-12 | 既有测试不减少 | 既有 390 个测试全绿；A1-1 系列（含 REV-01）新增 118 个 | 全量 `pnpm test` |
 
-**未交付（不得标记完成）**：Planner/Writer 流水线、生成 API、章节 UI、
-`chapter_contracts / chapter_candidates / chapter_versions`、Reviewer/Continuity/Fact、
-RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。
+**未交付（不得标记完成）**：生成 API、章节 UI、候选采纳、`chapter_versions`、
+Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。
+
+---
+
+## 18. 单章候选流水线验收（A1-2）
+
+> 对应 `docs/07-master-roadmap.md` A1-2、`docs/08-workflow-and-agents.md` §12。
+> A1-2 **不交付** HTTP API、章节 UI、候选采纳与 `chapter_versions`；这些属于 A1-3。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-13 | MockProvider 跑通 assemble → planner → contract → writer → candidate | 任务 `succeeded`、`current_step = persist_candidate`、章节 `in_review`、候选 ≥1200 字 | `test/chapter-workflow.test.ts` |
+| AT-WF-14 | 合同正确落库 | `goal / must_include / must_not_include / scene_beats(characters+scenes) / target_words` 与 Planner 输出一致；`version_no = 1`、`status = frozen` | 同上 |
+| AT-WF-15 | task_contexts 真实来源与顺序 | `chapter → character → realm_level → faction → work_direction`，rank `1/100…/200…/300…/400`，snippet ≤500，秘密字段不出现 | 同上 |
+| AT-WF-16 | LLM 调用日志 | planner 与 writer 各一条成功记录（stage / provider / token / 延迟）；失败调用也落一条 `success=false` + 稳定错误码 | 同上 |
+| AT-WF-17 | Planner 非法输出 | 缺字段 / 空 scenes / targetWords 越界 / 未声明字段 → `failed`，无合同、无候选，章节仍 `planned` | `test/chapter-agents.test.ts`、`test/chapter-workflow.test.ts` |
+| AT-WF-18 | Planner 代码校验 | 空白 goal / 空白场景字段 → `failed`，不写合同 | `test/chapter-agents.test.ts`、`test/chapter-workflow.test.ts` |
+| AT-WF-19 | Writer 少于 1200 字 | `failed`，无候选，章节停在 `drafting` | `test/chapter-workflow.test.ts` |
+| AT-WF-20 | Provider 超时 | 可重试（`MODEL_TIMEOUT`），无合同/候选；重试后成功且只有一份合同/候选 | 同上 |
+| AT-WF-21 | 合同复用 | Writer 超时重试不复用 Planner：合同只有 1 份、planner 日志只有 1 条、writer 日志 2 条 | 同上 |
+| AT-WF-22 | 候选复用 | 已有候选（模拟写候选后崩溃）重试：不重复插行、不再调用模型、llm 日志为 0 | 同上 |
+| AT-WF-23 | 字数由服务端计算 | `word_count = countWords(content)`，与正文空白无关，不读取模型自报字数 | 同上 |
+| AT-WF-24 | 失败 / 取消后的章节状态 | Planner 失败 `planned`；Writer 失败/取消 `drafting`；均无候选、无正式正文 | 同上 |
+| AT-WF-25 | 审计脱敏 | 合同冻结 / 三次状态迁移 / 候选创建均有审计；detail 不含正文、goal、API Key、邮箱 | 同上 |
+| AT-WF-26 | 跨作品隔离 | 模型输入与 task_contexts 只含本作品数据，不含另一作品的名称/方向/账号 | 同上 |
+| AT-WF-27 | 数据库归属约束 | 复合外键拒绝"跨作品的合同"与"跨任务引用合同"的候选 | 同上 |
+| AT-WF-28 | 既有测试不减少 | 既有 508 个测试全绿；A1-2 新增 24 个（workflow 142） | 全量 `pnpm test` |
+
+**未交付（不得标记完成）**：生成 API、章节工作台 UI、候选采纳、`chapter_versions`、
+Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。

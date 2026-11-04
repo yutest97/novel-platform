@@ -828,18 +828,35 @@ export async function recordLlmCall(
   });
 }
 
-/** 取消标志（Worker 在步骤之间检查）。 */
+/**
+ * 取消 / 所有权标志（Worker 在步骤之间检查）。
+ *
+ * `lockedBy` 用于确认任务仍归当前 Worker：租约过期并被重新领取后，
+ * 旧 Worker 必须立即停止后续步骤。
+ */
 export async function getTaskCancellationState(
   db: Pick<PrismaClient, '$queryRaw'>,
   taskId: string,
-): Promise<{ readonly status: string; readonly cancelRequested: boolean } | null> {
+): Promise<{
+  readonly status: string;
+  readonly cancelRequested: boolean;
+  readonly lockedBy: string | null;
+} | null> {
   const normalized = normalizeUuid(taskId, '任务 id');
-  const rows = await db.$queryRaw<{ status: string; cancel_requested_at: Date | null }[]>`
-    SELECT status, cancel_requested_at FROM generation_tasks WHERE id = ${normalized}
+  const rows = await db.$queryRaw<
+    { status: string; cancel_requested_at: Date | null; locked_by: string | null }[]
+  >`
+    SELECT status, cancel_requested_at, locked_by
+      FROM generation_tasks
+     WHERE id = ${normalized}
   `;
   const row = rows[0];
   if (row === undefined) {
     return null;
   }
-  return { status: row.status, cancelRequested: row.cancel_requested_at !== null };
+  return {
+    status: row.status,
+    cancelRequested: row.cancel_requested_at !== null,
+    lockedBy: row.locked_by,
+  };
 }

@@ -2,7 +2,7 @@
   "name": "@novel/workflow",
   "version": "0.1.0",
   "private": true,
-  "description": "确定性工作流内核、模型 Provider、Agent 运行基础设施与 PostgreSQL 任务队列（A1-1）",
+  "description": "确定性工作流内核、模型 Provider、Agent 运行基础设施、PostgreSQL 任务队列与单章候选流水线（A1-1 / A1-2）",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
