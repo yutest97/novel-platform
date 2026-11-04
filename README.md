@@ -1,10 +1,11 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-2（Planner → Writer 单章候选流水线）**。
+> 当前阶段：**A1-3A（候选采纳与正式章节版本，数据库 + 服务层）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
-A1-2 单章候选流水线（合同 + 正文候选，无 HTTP API/UI）。
+A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`
+（均无 HTTP API/UI）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -637,14 +638,47 @@ assemble_context → plan_chapter → validate_and_freeze_contract
   （snippet ≤500）；**不跨作品**，`secret` 类字段不进入模型输入；
   人物/境界/势力各最多 50 条，截断时追加 `context.truncated` 安全提示；
 - Planner 输出的人物必须来自上下文（精确匹配），`targetWords` 不得改动；
-- 合同与候选有数据库级不可变触发器（UPDATE/DELETE 一律拒绝），候选状态迁移留给 A1-3；
+- 合同与候选有数据库级不可变触发器（UPDATE/DELETE 一律拒绝；候选只放行 `candidate → adopted`）；
 - 合同 / 候选 / 章节状态 / 审计同事务；失败或取消不留下候选；
 - 重试幂等：同任务已有合同 → 不再调 Planner；已有候选 → 不再调 Writer、不重复插行；
 - 章节状态：合同 `outlined` → Writer 开始 `drafting` → 候选 `in_review`；任务终态仍是 `succeeded`；
-- 不建 `chapter_versions`，不提供采纳接口；这些属于 A1-3。
+- 不建 `chapter_versions`、不提供采纳接口（A1-2 范围）；正式版本见下一节。
 
 **测试**：A1-2 系列（含 REV-01）新增 35 个（流水线 21 / Agent 校验 9 / Provider 4 /
 Agent 基础 1）；workflow 包 **153** 个；全量单测 **543** 个。
+
+### 候选采纳与正式章节版本（A1-3A）
+
+迁移：`packages/db/prisma/migrations/20261104030000_a1_chapter_versions/`。
+A1-3A **只有数据库与服务层**：没有 HTTP API、没有章节 UI、没有版本恢复与 diff。
+
+`adoptChapterCandidate({ workId, chapterId, candidateId, authorId, meta? })`：
+
+```
+runWorkWrite（作品级 advisory lock）
+  → 事务内重读归属（他人作品 / 管理员 404）
+  → 锁章节行 + 锁候选行
+  → 幂等：已 adopted 且有版本 → 返回既有版本（deduplicated=true）
+  → version_no = max+1；插入 chapter_versions（source='ai'，正文原样复制）
+  → 候选 candidate → adopted → 章节 in_review → 两条审计
+```
+
+- `chapter_versions`：`UNIQUE(chapter_id, version_no)`、`source_candidate_id` **部分唯一**
+  （一个候选最多一个正式版本）、`word_count 1200..char_length(content)`、
+  `content 1200..200000`、`source ai|human`（本轮只写 `ai`）；
+- 归属由**复合外键**保证：章节属于作品，来源候选与父版本必须同章节同作品；
+- 正式版本 **append-only**：`BEFORE UPDATE / DELETE` 一律拒绝；
+- 候选只允许 `candidate → adopted`，`adopted → 其它`、改正文 / 字数、删除全部拒绝；
+- 正文与字数从候选**原样复制**，逐字节一致；`word_count` 由服务端统计，不信任模型；
+- 幂等：重复采纳不新增版本、不重复审计；并发同候选只产生 1 个版本；
+  同章节不同候选并发得到版本号 1、2；
+- 事务边界：审计写入失败 → 候选状态、版本、章节状态全部回滚；
+- 新错误码（已同时加入 auth 与 web 文案表）：`CHAPTER_CANDIDATE_NOT_FOUND`（404）、
+  `CHAPTER_CANDIDATE_NOT_ADOPTABLE`、`CHAPTER_VERSION_CONFLICT`、
+  `CHAPTER_STATE_INVALID_FOR_ADOPTION`（409）。
+
+**测试**：A1-3A 新增 15 个（`test/chapter-adoption.test.ts`）；workflow 包 **168** 个；
+全量单测 **558** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 

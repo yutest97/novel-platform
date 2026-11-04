@@ -29,6 +29,11 @@ export type ApiErrorCode =
   | 'ITEM_EVENT_NOT_REVERSIBLE'
   | 'ITEM_EVENT_IDEMPOTENCY_CONFLICT'
   | 'ITEM_EVENTS_CLOSED'
+  // 章节候选采纳（A1-3A）：候选不存在 / 不可采纳 / 版本冲突 / 章节状态不允许
+  | 'CHAPTER_CANDIDATE_NOT_FOUND'
+  | 'CHAPTER_CANDIDATE_NOT_ADOPTABLE'
+  | 'CHAPTER_VERSION_CONFLICT'
+  | 'CHAPTER_STATE_INVALID_FOR_ADOPTION'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -56,6 +61,10 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   ITEM_EVENT_NOT_REVERSIBLE: '只能冲正当前最新且未被冲正的事件',
   ITEM_EVENT_IDEMPOTENCY_CONFLICT: '该幂等键已用于不同的事件内容',
   ITEM_EVENTS_CLOSED: '物品已删除，不能再追加或冲正事件',
+  CHAPTER_CANDIDATE_NOT_FOUND: '章节候选不存在',
+  CHAPTER_CANDIDATE_NOT_ADOPTABLE: '该章节候选当前不可采纳',
+  CHAPTER_VERSION_CONFLICT: '章节版本发生冲突，请刷新后重试',
+  CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',

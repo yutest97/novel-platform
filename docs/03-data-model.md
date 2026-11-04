@@ -247,16 +247,43 @@ rule_packages (题材规则包，系统级)
 | content | text | 正文全文（≥1200 字符，≤200000） |
 | word_count | int | 服务端按"非空白字符数"统计（替代旧的 char_count） |
 | structured_plan | jsonb | 计划快照（goal / scenes / characters / targetWords / 合同版本） |
-| status | text | 只有 `candidate`（`pending/adopted/discarded` 与 `adopted_version_id` 留给 A1-3） |
+| status | text | `candidate` / `adopted`（A1-3A 起：采纳事务把 candidate 迁到 adopted） |
 | created_at | timestamptz | |
 
 - `source_task_id` 在本实现中命名为 `generation_task_id`；
-- `chapter_versions` **本轮不建**，候选不是正式正文；
 - 章节状态由工作流推进：合同 → `outlined`，Writer 开始 → `drafting`，候选写入 → `in_review`；
+  采纳候选时若仍是 `planned / outlined / drafting` 也会推进到 `in_review`；
 - 合同 / 候选 / 章节状态 / 审计在同一事务提交；失败或取消不会留下候选；
 - 两张表都有 `BEFORE UPDATE / BEFORE DELETE` 触发器（`restrict_violation`）：
-  合同完全不可改、不可删；候选本轮不可改、不可删，A1-3 才开放
-  `status candidate → adopted` 的单一迁移。
+  合同完全不可改、不可删；候选只允许 `candidate → adopted` 这一条迁移，
+  其余修改与删除全部拒绝。
+
+### 3.4.2 A1-3A 实现口径：chapter_versions（正式章节版本）
+
+> 本节以迁移 `20261104030000_a1_chapter_versions` 为准。A1-3A 只交付
+> 数据库 + 服务层（`adoptChapterCandidate`），**没有 HTTP API / UI / 版本恢复 / diff**。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| work_id / chapter_id | uuid | 复合外键 `(chapter_id, work_id) → chapters(id, work_id)` |
+| version_no | int | 章节内递增，`UNIQUE(chapter_id, version_no)` |
+| content | text | 正式正文全文（1200..200000 字符），与来源候选逐字节一致 |
+| word_count | int | 服务端统计；`CHECK word_count BETWEEN 1200 AND char_length(content)` |
+| source | text | `ai` / `human`（本轮只写 `ai`，`human` 留给 A1-B） |
+| source_candidate_id | uuid nullable | `source='ai'` 时必填；**部分唯一**：一个候选最多生成一个正式版本 |
+| parent_version_id | uuid nullable | 同章节同作品的上一个正式版本；首版为 NULL |
+| created_by | uuid | 当前作者（只来自会话） |
+| created_at | timestamptz | `clock_timestamp()` |
+
+- **append-only**：`BEFORE UPDATE / BEFORE DELETE` 一律 `restrict_violation`，
+  修订只能追加新版本；
+- 复合外键在数据库层钉死归属：
+  `(source_candidate_id, chapter_id, work_id) → chapter_candidates(id, chapter_id, work_id)`、
+  `(parent_version_id, chapter_id, work_id) → chapter_versions(id, chapter_id, work_id)`；
+  外键列可空（MATCH SIMPLE），人工版本可以没有来源候选、首版没有父版本；
+- 采纳事务同时完成：插入版本 → 候选 `adopted` → 章节 `in_review` → 两条审计；
+  任何一步失败整体回滚，不会出现"候选 adopted 但无版本"。
 
 ### 3.5 entities + entity_attributes（题材解耦核心）
 

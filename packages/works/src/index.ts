@@ -58,6 +58,8 @@ export type {
 
 export { assertUuid, isUuid, normalizeUuid } from './ids.js';
 
+export { isConcurrencyError, uniqueConstraintMarker } from './write-errors.js';
+
 export { WORK_LOCK_NAMESPACE, lockWork, runWorkWrite } from './work-lock.js';
 
 export { requireOwnedWork } from './work-access.js';

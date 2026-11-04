@@ -1,9 +1,10 @@
-# 08 工作流与 Agent（A1-1 / A1-2）
+# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A）
 
-- 版本：v1.1
+- 版本：v1.2
 - 日期：2026-11-04
 - 对应代码：`packages/workflow`
-- 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`
+- 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
+  `20261104030000_a1_chapter_versions`
 
 ---
 
@@ -20,7 +21,7 @@
 
 ---
 
-## 2. A1-1 / A1-2 范围
+## 2. A1-1 / A1-2 / A1-3A 范围
 
 **A1-1 交付**：确定性工作流内核、Provider 抽象、Agent 运行基础设施、
 PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张基础表。
@@ -28,6 +29,10 @@ PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张�
 **A1-2 交付**：`chapter.draft` 单章候选流水线（Planner → Writer）、
 确定性 ContextBuilder、`chapter_contracts` / `chapter_candidates` 两张表；
 通过 `WorkerRunner` 集成测试运行真实工作流，**不提供 HTTP API / UI**。
+
+**A1-3A 交付**：候选采纳服务 `adoptChapterCandidate` 与正式版本 `chapter_versions`。
+只有数据库与服务层：采纳事务、版本号分配、候选 `candidate → adopted` 受控迁移、
+章节状态推进、审计与幂等/并发保证。**不提供 HTTP API、章节 UI、差异对比与版本恢复**。
 
 **不交付**：章节生成 API、章节编辑器 UI、候选采纳、`chapter_versions`、
 Reviewer/Continuity/Fact、RAG/图数据库、资源流水、多人功能。
@@ -54,7 +59,7 @@ WorkerRunner (apps/worker 未来接入)
 
 ---
 
-## 4. 数据表（A1-1 / A1-2）
+## 4. 数据表（A1-1 / A1-2 / A1-3A）
 
 | 表 | 作用 | 关键约束 |
 | --- | --- | --- |
@@ -63,7 +68,8 @@ WorkerRunner (apps/worker 未来接入)
 | `task_contexts` | 任务引用的上下文摘要 | `(task_id, context_type, ref_id)` 唯一、snippet ≤ 500、rank ≥ 0 |
 | `llm_call_logs` | 模型调用计量 | 只有 token/延迟/成功/error_code；**没有 prompt/正文列** |
 | `chapter_contracts` | 冻结的章节合同 | 每任务最多一份、`UNIQUE(chapter_id, version_no)`、`target_words` 2500–4000、复合外键绑定 work/chapter/task |
-| `chapter_candidates` | 正文候选（非正式版本） | 每任务最多一份、`word_count >= 1200`、复合外键绑定同任务合同 |
+| `chapter_candidates` | 正文候选（非正式版本） | 每任务最多一份、`word_count >= 1200`、复合外键绑定同任务合同、状态仅 `candidate / adopted` |
+| `chapter_versions` | **正式章节版本**（A1-3A） | `UNIQUE(chapter_id, version_no)`、`source_candidate_id` 部分唯一、`word_count 1200..char_length`、`content 1200..200000`、append-only 触发器 |
 
 设计细节：
 
@@ -325,7 +331,7 @@ WorkerRunner
   `status` 只有 `frozen`；同一任务最多一份，同一章节按 `version_no` 递增；
 - `chapter_candidates`：`content / word_count / structured_plan`；
   `structured_plan = { version, contractId, contractVersion, goal, ..., scenes, targetWords }`；
-  `status` 只有 `candidate`；
+  `status` 只有 `candidate / adopted`（A1-3A 起；迁移由采纳事务完成）；
 - `chapter_contracts` / `chapter_candidates` 用**复合外键**绑定
   `(work_id, chapter_id, generation_task_id)`：章节必须属于作品、合同必须属于同章同任务、
   候选必须引用同任务合同；
@@ -333,11 +339,11 @@ WorkerRunner
   字数与状态，**不记 goal / 场景 / 正文 / prompt**；
 - 两张表都有数据库级**不可变保护**：
   - `chapter_contracts`：`BEFORE UPDATE / BEFORE DELETE` 一律 `restrict_violation`；
-  - `chapter_candidates`：`BEFORE DELETE` 一律拒绝；`BEFORE UPDATE` 本轮一律拒绝，
-    触发器里保留了 A1-3 `candidate → adopted` 的扩展分支（当前不开放）；
+  - `chapter_candidates`：`BEFORE DELETE` 一律拒绝；`BEFORE UPDATE` 只放行
+    `candidate → adopted` 这一条迁移，其余（含 `adopted → candidate`、改正文 / 字数 /
+    计划 / 归属 / 创建时间）全部拒绝；
   - 因此直接 SQL 也改不了合同、删不掉候选；正常重试只做 SELECT，不受影响；
-- 本轮**不建 `chapter_versions`**，候选不是正式正文；候选状态迁移与正式版本创建
-  都留给 A1-3。
+- A1-2 **不建 `chapter_versions`**：候选不是正式正文。正式版本与采纳见 §13。
 
 ### 12.6 模型选择（AgentDefinition.model 允许为空）
 
@@ -367,19 +373,84 @@ WorkerRunner
 
 ```
 planned ──合同冻结──▶ outlined ──Writer 开始──▶ drafting ──候选写入──▶ in_review
+   └────────────────────── 采纳候选（A1-3A）──────────────────────────┘
 ```
 
 - 只允许向前推进，不降级；`finalized / abandoned` 不会被本流程覆盖；
 - 失败 / 取消时停在最后一个已提交的里程碑：
   Planner 失败 → 仍为 `planned`；Writer 失败或取消 → `drafting`；
-- 任何失败都不会产生候选，因此不存在"正式正文"被写一半的情况。
+- 任何失败都不会产生候选，因此不存在"正式正文"被写一半的情况；
+- 采纳候选时若章节仍是 `planned / outlined / drafting`，直接推进到 `in_review`；
+  `finalized / abandoned` 拒绝采纳（`CHAPTER_STATE_INVALID_FOR_ADOPTION`）。
 
 ---
 
-## 13. A1-3 预告（不在本轮）
+## 13. A1-3A：候选采纳与正式版本
 
-- 章节工作台（列表 / 正文编辑 / 候选查看）；
-- 候选采纳接口与 `chapter_versions`（正式版本、版本链、来源候选唯一）；
-- 生成 API（会话 authorId）与任务进度查询；
-- 按 `task_type` 强制章节任务必填 `chapter_id`（A1-1/A1-2 由工作流校验）；
-- 重新生成与人工修订；仍不接 Reviewer。
+### 13.1 采纳事务（`adoptChapterCandidate`）
+
+```
+adoptChapterCandidate({ workId, chapterId, candidateId, authorId, meta? })
+  └─ runWorkWrite（作品级 advisory lock，与设定 / 物品事件 / 生成任务共用）
+       1  事务内重读作品归属 —— authorId 只来自会话；他人作品 / 管理员 404
+       2  SELECT 章节 FOR UPDATE（锁内读到 status）
+       3  SELECT 候选 FOR UPDATE（WHERE id + work_id + chapter_id）
+       4  幂等：候选已 adopted 且版本存在 → 直接返回既有版本（deduplicated=true）
+       5  状态校验：候选必须 candidate；章节必须 planned/outlined/drafting/in_review
+       6  version_no = max(version_no) + 1；parent_version_id = 上一正式版本
+       7  INSERT chapter_versions（source='ai'，content / word_count 原样复制）
+       8  UPDATE 候选 status = 'adopted'（带 status='candidate' 条件）
+       9  章节 → in_review（已是 in_review 则保持），变化时写 chapter.status_changed
+      10  写 chapter.candidate_adopted 审计
+```
+
+- 全部在**同一个事务**：任何一步失败（包含审计写入失败）整体回滚，
+  不会出现"候选 adopted 但无版本"或"有版本但章节没推进"的半成品；
+- 候选正文与字数**原样复制**，服务层不改写、不 trim；正式版本正文与候选逐字节一致；
+- 审计 detail 只含 `workId / chapterId / candidateId / versionId / versionNo / wordCount`，
+  不含正文、goal 或 prompt；
+- `meta` 是为 A1-3B 的 HTTP 层预留的请求追踪字段：**不落库、不进审计、不参与幂等**，
+  采纳结果只由 `(workId, chapterId, candidateId)` 决定。
+
+### 13.2 幂等与并发
+
+| 场景 | 结果 |
+| --- | --- |
+| 同一候选重复采纳 | 返回既有版本，`deduplicated=true`；不新增版本、不重复审计（章节后来被定稿也不影响） |
+| 同一候选并发采纳 | 作品级锁串行化：后到请求看到 `adopted` 后返回既有版本；`source_candidate_id` 部分唯一兜底，最多 1 个版本 |
+| 同章节不同候选并发采纳 | 版本号在锁内按 `max+1` 分配，得到 1、2；`UNIQUE(chapter_id, version_no)` 兜底 |
+| 候选已 adopted 但版本缺失 | `CHAPTER_VERSION_CONFLICT`（409）：只能是被绕过服务层的写入破坏 |
+
+### 13.3 错误码
+
+| 错误码 | HTTP | 触发 |
+| --- | --- | --- |
+| `CHAPTER_CANDIDATE_NOT_FOUND` | 404 | 候选不存在，或不在该作品该章节（含跨作品 / 跨章节） |
+| `CHAPTER_CANDIDATE_NOT_ADOPTABLE` | 409 | 候选状态已不是 `candidate` |
+| `CHAPTER_VERSION_CONFLICT` | 409 | 版本号 / 来源候选唯一冲突，或 adopted 候选缺版本 |
+| `CHAPTER_STATE_INVALID_FOR_ADOPTION` | 409 | 章节处于 `finalized` / `abandoned` |
+| `NOT_FOUND` | 404 | 作品或章节不属于当前作者（管理员同样 404） |
+| `CONCURRENT_MODIFICATION` | 409 | 死锁 / 序列化失败（可重试） |
+
+A1-3A **没有新增 HTTP 路由**；错误码已同时加入 `packages/auth` 与 `apps/web` 的文案表，
+A1-3B 直接使用，不再遗漏。
+
+### 13.4 数据边界
+
+- `chapter_versions` 是**正式正文**，append-only（`BEFORE UPDATE / DELETE` 拒绝），
+  修订只能追加新版本；
+- `source_candidate_id` 部分唯一：一个候选最多生成一个正式版本；
+- 复合外键保证"章节属于作品、来源候选与父版本同章节同作品"；
+- `source` 目前只写 `ai`；`human`（人工撰写）留给 A1-B；
+- 候选状态只允许 `candidate → adopted`，`adopted → 其它` 与删除始终拒绝；
+- **没有**版本恢复、差异对比、采纳 UI、`apps/worker` 常驻循环。
+
+---
+
+## 14. A1-3B 预告（不在本轮）
+
+- 章节工作台（列表 / 正文阅读 / 候选查看与采纳按钮）；
+- 采纳与任务进度查询的 HTTP API（会话 authorId；管理员 404/403）；
+- 生成 API 与重新生成；
+- 版本列表与人工修订（`source='human'`），仍不接 Reviewer；
+- 按 `task_type` 强制章节任务必填 `chapter_id`。

@@ -83,6 +83,7 @@ export async function createTestChapter(
  */
 export async function cleanupWork(db: PrismaClient, workId: string): Promise<void> {
   const immutable =
+    (await db.chapterVersion.count({ where: { workId } })) +
     (await db.chapterContract.count({ where: { workId } })) +
     (await db.chapterCandidate.count({ where: { workId } }));
   if (immutable === 0) {
@@ -92,12 +93,15 @@ export async function cleanupWork(db: PrismaClient, workId: string): Promise<voi
     return;
   }
 
-  // 合同/候选有 append-only 触发器，测试清理必须临时禁用（事务内，
-  // 失败回滚后触发器仍然生效）。仅用于测试库。
+  // 正式版本 / 合同 / 候选都有 append-only 或不可变触发器，测试清理必须临时禁用
+  // （事务内执行，失败回滚后触发器仍然生效）。仅用于测试库。
+  // 顺序：版本引用候选 → 先删版本，再删候选、合同。
   await db.$transaction(
     async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_versions" DISABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_candidates" DISABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_contracts" DISABLE TRIGGER USER');
+      await tx.chapterVersion.deleteMany({ where: { workId } });
       await tx.chapterCandidate.deleteMany({ where: { workId } });
       await tx.chapterContract.deleteMany({ where: { workId } });
       await tx.generationTask.deleteMany({ where: { workId } });
@@ -105,6 +109,7 @@ export async function cleanupWork(db: PrismaClient, workId: string): Promise<voi
       await tx.work.deleteMany({ where: { id: workId } });
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_contracts" ENABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_candidates" ENABLE TRIGGER USER');
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_versions" ENABLE TRIGGER USER');
     },
     { maxWait: 15000, timeout: 30000 },
   );

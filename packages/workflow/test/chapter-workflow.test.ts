@@ -593,7 +593,7 @@ describe('重试幂等：合同与候选复用', () => {
 });
 
 describe('合同与候选不可变（数据库触发器）', () => {
-  it('合同不可更新/删除；候选不可更新/删除；正常读取不受影响', async () => {
+  it('合同不可更新/删除；候选除 candidate → adopted 外不可修改、不可删除；正常读取不受影响', async () => {
     const fixture = await newFixture();
     const { provider } = createChapterProvider(
       {},
@@ -651,8 +651,16 @@ describe('合同与候选不可变（数据库触发器）', () => {
         data: { structuredPlan: { version: 9 } },
       }),
     ).rejects.toThrow();
+    // A1-3A 起唯一允许的状态迁移是 candidate → adopted；其余修改仍然拒绝
+    await db.chapterCandidate.update({
+      where: { id: candidate.id },
+      data: { status: 'adopted' },
+    });
     await expect(
-      db.chapterCandidate.update({ where: { id: candidate.id }, data: { status: 'adopted' } }),
+      db.chapterCandidate.update({ where: { id: candidate.id }, data: { content: '被篡改' } }),
+    ).rejects.toThrow();
+    await expect(
+      db.chapterCandidate.update({ where: { id: candidate.id }, data: { status: 'candidate' } }),
     ).rejects.toThrow();
     await expect(db.chapterCandidate.delete({ where: { id: candidate.id } })).rejects.toThrow();
 

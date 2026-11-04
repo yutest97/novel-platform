@@ -29,6 +29,10 @@ export type AuthErrorCode =
   | 'ITEM_EVENT_IDEMPOTENCY_CONFLICT'
   | 'ITEM_EVENTS_CLOSED'
   | 'TASK_REQUEST_CONFLICT'
+  | 'CHAPTER_CANDIDATE_NOT_FOUND'
+  | 'CHAPTER_CANDIDATE_NOT_ADOPTABLE'
+  | 'CHAPTER_VERSION_CONFLICT'
+  | 'CHAPTER_STATE_INVALID_FOR_ADOPTION'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -65,6 +69,14 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   ITEM_EVENTS_CLOSED: 409,
   // 同一 requestId 被用于不同内容（任务创建幂等冲突）
   TASK_REQUEST_CONFLICT: 409,
+  // 候选不存在，或不属于当前作品 / 章节（不区分"不存在"与"不是你的"，避免探测）
+  CHAPTER_CANDIDATE_NOT_FOUND: 404,
+  // 候选已不是 candidate（无正式版本支撑），或重复采纳时数据不一致
+  CHAPTER_CANDIDATE_NOT_ADOPTABLE: 409,
+  // 版本号 / 来源候选唯一冲突（并发采纳同一候选或同一版本号）
+  CHAPTER_VERSION_CONFLICT: 409,
+  // 章节当前状态（finalized / abandoned）不允许采纳
+  CHAPTER_STATE_INVALID_FOR_ADOPTION: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -104,6 +116,10 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   ITEM_EVENTS_CLOSED: '物品已删除，不能再追加或冲正事件',
   // 不要求客户端换 requestId，也不回显任何输入内容
   TASK_REQUEST_CONFLICT: '该 requestId 已用于不同的请求内容',
+  CHAPTER_CANDIDATE_NOT_FOUND: '章节候选不存在',
+  CHAPTER_CANDIDATE_NOT_ADOPTABLE: '该章节候选当前不可采纳',
+  CHAPTER_VERSION_CONFLICT: '章节版本发生冲突，请刷新后重试',
+  CHAPTER_STATE_INVALID_FOR_ADOPTION: '章节当前状态不允许采纳候选',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

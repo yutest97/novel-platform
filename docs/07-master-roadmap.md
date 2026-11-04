@@ -2,7 +2,7 @@
 
 - 版本：v1.0
 - 日期：2026-11-04
-- 当前基线：`1866880`（A1-1-REV-01 已复审）+ A1-2（本地提交）
+- 当前基线：`e5b9ffb`（A1-2-REV-01 已复审）+ A1-3A（本地提交）
 - 状态：执行中
 
 ---
@@ -39,8 +39,9 @@
 | 阶段 | 目标 | 交付物 | 状态 |
 | --- | --- | --- | --- |
 | **A1-1** | 工作流内核 + Provider + Agent 基础 + PostgreSQL Worker | `packages/workflow`、四张表、Mock/OpenAI 兼容 Provider、租约队列、测试与文档 | 已完成（本地提交） |
-| **A1-2** | 单章候选流水线（Planner → Writer） | `planner.chapter` / `writer.chapter` 两个 Agent、`chapter.draft` 任务类型、`chapter_contracts` / `chapter_candidates`、确定性上下文、检查点与 LLM 日志；**无 HTTP API / UI** | **本轮完成** |
-| **A1-3** | 章节工作台 + 生成 API（单作者） | 章节列表/正文编辑/候选查看与采纳/`chapter_versions`/重新生成/任务进度；仍不接 Reviewer | 待开始 |
+| **A1-2** | 单章候选流水线（Planner → Writer） | `planner.chapter` / `writer.chapter` 两个 Agent、`chapter.draft` 任务类型、`chapter_contracts` / `chapter_candidates`、确定性上下文、检查点与 LLM 日志；**无 HTTP API / UI** | 已完成（本地提交） + REV-01 |
+| **A1-3A** | 候选采纳 + 正式版本（数据库与服务层） | `chapter_versions`、候选 `candidate → adopted` 受控迁移、`adoptChapterCandidate`（作品锁 + 行锁 + 同事务审计）、幂等与并发；**无 HTTP API / UI** | **本轮完成** |
+| **A1-3B** | 章节工作台 + 生成/采纳 API（单作者） | 章节列表/正文阅读/候选查看与采纳按钮、生成 API、任务进度、版本列表与重新生成；仍不接 Reviewer | 待开始 |
 | **A2** | 连续性与事实（个人版） | 章节事实提取、人物/资源状态回写、跨章一致性提示 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
@@ -68,7 +69,7 @@
 - RAG、向量库、Neo4j；
 - 资源流水（M2-B4，暂停）；
 - 任何多人账号功能；
-- `apps/worker` 常驻循环（A1-3/部署阶段启用；A1-2 仍通过 `WorkerRunner` 集成测试运行真实工作流）。
+- `apps/worker` 常驻循环（A1-3B/部署阶段启用；A1-3A 仍通过服务层与集成测试验证）。
 
 ---
 
@@ -91,3 +92,4 @@
 | --- | --- |
 | 2026-11-04 | 建立本路线；个人可用版优先；M2-B4 暂停；A1-1 启动 |
 | 2026-11-04 | A1-1-REV-01 复审通过；A1-2 单章候选流水线完成（无 HTTP API/UI，采纳与版本留给 A1-3） |
+| 2026-11-04 | A1-2-REV-01 复审通过；A1-3A 候选采纳与正式版本完成（数据库 + 服务层，无 API/UI） |

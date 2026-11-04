@@ -9,6 +9,12 @@ export {
 } from './agents.js';
 export { buildChapterDraftContext, type BuildContextInput } from './context.js';
 export {
+  adoptChapterCandidate,
+  type AdoptChapterCandidateInput,
+  type AdoptedChapterVersion,
+  type AdoptionMeta,
+} from './adoption.js';
+export {
   CHAPTER_DRAFT_TASK_TYPE,
   MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,

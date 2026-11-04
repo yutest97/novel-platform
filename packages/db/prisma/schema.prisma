@@ -53,6 +53,7 @@ model User {
   auditLogs AuditLog[] @relation("AuditActor")
   works     Work[]    @relation("WorkAuthor")
   itemEvents ItemEvent[] @relation("ItemEventCreatedBy")
+  chapterVersions ChapterVersion[] @relation("ChapterVersionCreatedBy")
 
   @@map("users")
 }
@@ -145,6 +146,7 @@ model Work {
   generationTasks GenerationTask[]
   chapterContracts ChapterContract[]
   chapterCandidates ChapterCandidate[]
+  chapterVersions ChapterVersion[]
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -306,6 +308,7 @@ model Chapter {
   generationTasks GenerationTask[]
   contracts       ChapterContract[]
   candidates      ChapterCandidate[]
+  versions        ChapterVersion[]
 
   @@unique([workId, chapterNo])
   /// 供 chapter_contracts / chapter_candidates 的复合外键引用
@@ -465,8 +468,50 @@ model ChapterCandidate {
   chapter  Chapter         @relation(fields: [chapterId], references: [id], onDelete: Restrict)
   task     GenerationTask  @relation(fields: [generationTaskId], references: [id], onDelete: Restrict)
   contract ChapterContract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  /// 该候选生成的正式版本（数据库部分唯一索引保证最多一条）
+  sourceVersion ChapterVersion? @relation("ChapterVersionSource")
 
   @@unique([generationTaskId])
+  /// 供 chapter_versions 的复合外键引用（来源候选必须同章节同作品）
+  @@unique([id, chapterId, workId])
   @@index([chapterId, createdAt])
   @@map("chapter_candidates")
+}
+
+/// 正式章节版本（A1-3A）。
+///
+/// - 这是**正式正文**，append-only：数据库触发器拒绝 UPDATE / DELETE，
+///   修订只能追加新版本；
+/// - `UNIQUE(chapter_id, version_no)`；`source_candidate_id` 部分唯一
+///   （一个候选最多生成一个正式版本）；
+/// - `source = ai` 时 `source_candidate_id` 必填；`human` 留给 A1-B；
+/// - `parent_version_id` 指向同章节同作品的上一个正式版本（首版为 NULL）；
+/// - 归属由复合外键保证：章节属于作品，来源候选与父版本必须同章节同作品。
+model ChapterVersion {
+  id                String   @id @default(uuid()) @db.Uuid
+  workId            String   @map("work_id") @db.Uuid
+  chapterId         String   @map("chapter_id") @db.Uuid
+  versionNo         Int      @map("version_no")
+  content           String
+  wordCount         Int      @map("word_count")
+  /// ai | human
+  source            String
+  sourceCandidateId String?  @map("source_candidate_id") @db.Uuid
+  parentVersionId   String?  @map("parent_version_id") @db.Uuid
+  createdBy         String   @map("created_by") @db.Uuid
+  createdAt         DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  work            Work             @relation(fields: [workId], references: [id], onDelete: Restrict)
+  chapter         Chapter          @relation(fields: [chapterId], references: [id], onDelete: Restrict)
+  creator         User             @relation("ChapterVersionCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  sourceCandidate ChapterCandidate? @relation("ChapterVersionSource", fields: [sourceCandidateId], references: [id], onDelete: Restrict)
+  parent          ChapterVersion?   @relation("ChapterVersionParent", fields: [parentVersionId], references: [id], onDelete: Restrict)
+  children        ChapterVersion[]  @relation("ChapterVersionParent")
+
+  @@unique([chapterId, versionNo])
+  @@unique([sourceCandidateId])
+  /// 供子版本 / 兄弟版本的复合外键引用
+  @@unique([id, chapterId, workId])
+  @@index([chapterId, versionNo])
+  @@map("chapter_versions")
 }

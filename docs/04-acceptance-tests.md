@@ -486,9 +486,32 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-27 | 数据库归属约束 | 复合外键拒绝"跨作品的合同"与"跨任务引用合同"的候选 | 同上 |
 | AT-WF-28 | 既有测试不减少 | 既有 508 个测试全绿；A1-2 + REV-01 共新增 35 个（workflow 153） | 全量 `pnpm test` |
 | AT-WF-29 | 模型解析 | 章节 Agent 空模型 → OpenAI 请求体使用 `MODEL_NAME`；显式模型覆盖生效；失败日志记录解析后的模型且不含 Key/prompt | `test/openai-provider.test.ts`、`test/agent.test.ts`、`test/mock-provider.test.ts`、`test/chapter-workflow.test.ts` |
-| AT-WF-30 | 合同/候选不可变 | 直接 SQL / Prisma 更新合同 goal/scene_beats、删除合同、更新候选 content/word_count/structured_plan/status、删除候选全部失败；正常读取不受影响 | `test/chapter-workflow.test.ts` |
+| AT-WF-30 | 合同/候选不可变 | 直接 SQL / Prisma 更新合同 goal/scene_beats、删除合同、更新候选 content/word_count/structured_plan、删除候选全部失败；唯一放行 `candidate → adopted`；正常读取不受影响 | `test/chapter-workflow.test.ts` |
 | AT-WF-31 | Planner 语义校验 | 虚构人物、改动 targetWords → `failed`，合同/候选 0；合法人物通过 | `test/chapter-agents.test.ts`、`test/chapter-workflow.test.ts` |
 | AT-WF-32 | 上下文 50 条上限 | 60 个人物时 Planner 输入恰好 50 条、Schema 不失败；task_contexts 只含选中实体；`context.truncated`（ref_id=null、rank=500）留痕 | `test/chapter-workflow.test.ts` |
 
-**未交付（不得标记完成）**：生成 API、章节工作台 UI、候选采纳、`chapter_versions`、
-Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。
+**未交付（不得标记完成）**：生成 API、章节工作台 UI、`source='human'` 的人工修订、
+版本恢复与 diff、Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。
+
+---
+
+## 19. 候选采纳与正式版本验收（A1-3A）
+
+> 对应 `docs/07-master-roadmap.md` A1-3A、`docs/08-workflow-and-agents.md` §13。
+> A1-3A **只交付数据库与服务层**：没有 HTTP API、没有章节 UI、没有版本恢复 / diff。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-33 | 正常采纳 | 候选 `adopted`、正式版本 `version_no=1`、`source='ai'`、`parent_version_id=NULL`、`created_by=作者`、章节 `in_review` | `test/chapter-adoption.test.ts` |
+| AT-WF-34 | 正文与字数 | 正式版本 `content` 与候选逐字节一致（含空白/换行）；`word_count = countWords(content)` 且等于候选字数 | 同上 |
+| AT-WF-35 | 版本链 | 第二个候选得到 `version_no=2`，`parent_version_id` 指向版本 1 | 同上 |
+| AT-WF-36 | 重复采纳幂等 | `deduplicated=true`、返回同一 `versionId`；版本数不变、采纳审计不增加；章节后来被 `finalized` 也不影响 | 同上 |
+| AT-WF-37 | 并发同候选 | 只生成 1 个正式版本；后到请求返回既有版本或 `CHAPTER_VERSION_CONFLICT` | 同上 |
+| AT-WF-38 | 并发不同候选 | 同章节两个候选并发采纳得到版本号 1 / 2，`parent_version_id` 正确 | 同上 |
+| AT-WF-39 | 状态拒绝 | `finalized` / `abandoned` 章节 → `CHAPTER_STATE_INVALID_FOR_ADOPTION`；候选仍 `candidate`、版本 0、章节状态不变 | 同上 |
+| AT-WF-40 | 归属与存在性 | 跨作品 / 跨章节候选 → `CHAPTER_CANDIDATE_NOT_FOUND`（404）；他人作品 → `NOT_FOUND`（404） | 同上 |
+| AT-WF-41 | 非 candidate 状态 | 候选被绕过服务层写成 `adopted` 但无版本 → `CHAPTER_VERSION_CONFLICT`，不产生版本 | 同上 |
+| AT-WF-42 | 审计与回滚 | 采纳审计 detail 仅 `workId/chapterId/candidateId/versionId/versionNo/wordCount`，不含正文；审计写入失败 → 候选、版本、章节状态全部回滚 | 同上 |
+| AT-WF-43 | 正式版本 append-only | 直接 SQL 修改 `version_no` / `content` 或删除版本全部失败 | 同上 |
+| AT-WF-44 | adopted 候选不可改 | 修改 adopted 候选正文 / 字数、回退状态、删除全部失败 | 同上 + `test/chapter-workflow.test.ts` |
+| AT-WF-45 | 既有测试不减少 | 既有 543 个测试全绿；A1-3A 新增 15 个（workflow 168） | 全量 `pnpm test` |
