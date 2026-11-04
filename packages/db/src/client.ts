@@ -31,6 +31,9 @@ const globalForPrisma = globalThis as unknown as {
  */
 let prismaCreations = 0;
 
+/** Prisma 客户端日志级别（与 Prisma 构造函数一致）。 */
+export type PrismaLogLevel = 'query' | 'info' | 'warn' | 'error';
+
 /**
  * 创建一个**不受单例缓存管理**的 Prisma 客户端。
  *
@@ -40,29 +43,38 @@ let prismaCreations = 0;
  *
  * @param options.connectionString 连接串（不含 schema 参数）
  * @param options.schema 目标 schema（通过 `search_path` 生效）
+ * @param options.log 日志级别；缺省沿用 NODE_ENV 策略。Worker 传 `[]`
+ *   以关闭 Prisma 自身的原始错误输出（由 supervisor 记录安全 code）。
  */
 export function createPrismaClient(options: {
   connectionString: string;
   schema?: string;
+  log?: readonly PrismaLogLevel[];
 }): PrismaClient {
   const adapter = new PrismaPg({
     connectionString: options.connectionString,
     ...(options.schema === undefined ? {} : { options: `-c search_path=${options.schema}` }),
   });
 
+  const log =
+    options.log ?? (process.env['NODE_ENV'] === 'development' ? ['warn', 'error'] : ['error']);
+
   return new PrismaClient({
     adapter,
-    log: process.env['NODE_ENV'] === 'development' ? ['warn', 'error'] : ['error'],
+    log: [...log],
   });
 }
 
-function createClient(): PrismaClient {
+function createClient(log?: readonly PrismaLogLevel[]): PrismaClient {
   const connectionString = process.env['DATABASE_URL'];
   if (connectionString === undefined || connectionString.trim() === '') {
     throw new Error('缺少必需的环境变量：DATABASE_URL');
   }
 
-  const client = createPrismaClient({ connectionString });
+  const client = createPrismaClient({
+    connectionString,
+    ...(log === undefined ? {} : { log }),
+  });
 
   prismaCreations += 1;
   return client;
@@ -72,10 +84,13 @@ function createClient(): PrismaClient {
  * 获取 Prisma 客户端实例。
  *
  * 全环境（含 production）返回**同一个**实例，绝不重复创建连接池。
+ * 日志配置只在首次创建时生效（后续调用共享同一实例）。
  */
-export function getPrismaClient(): PrismaClient {
+export function getPrismaClient(
+  options: { readonly log?: readonly PrismaLogLevel[] } = {},
+): PrismaClient {
   if (globalForPrisma.prisma === undefined) {
-    globalForPrisma.prisma = createClient();
+    globalForPrisma.prisma = createClient(options.log);
   }
   return globalForPrisma.prisma;
 }

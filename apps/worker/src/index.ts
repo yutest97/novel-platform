@@ -1,47 +1,48 @@
 /**
- * Worker 进程入口（A1-3C）。
+ * Worker 进程入口（A1-3C / A1-3C-REV-01）。
  *
  * 启动顺序：
  *   1. 读取运行配置（非法直接退出，退出码 1）；
  *   2. 构造 Provider（只构造一次）与 `chapter.draft` 注册表；
- *   3. 启动健康检查 HTTP 服务；
- *   4. 并发启动 WorkerRunner 轮询循环。
+ *   3. 构造 supervisor（初始 starting）与健康检查服务（读取 supervisor 快照）；
+ *   4. 启动 supervisor：直接调用 `runOnce()`，首次正常返回后进入 ready。
  *
  * 关闭顺序（SIGTERM / SIGINT）：
- *   WorkerRunner.stop() → 关闭健康检查端口 → 等待当前轮询退出 → Prisma disconnect
- *   → 退出码 0；超过总时限则强制退出（未完成的任务由租约回收）。
+ *   supervisor.stop()（先置 stopping）→ 关闭健康检查端口 → 等待当前 runOnce 退出
+ *   → Prisma disconnect → 退出码 0；超过总时限则强制退出（任务由租约回收）。
  *
- * 轮询循环异常（例如数据库尚未迁移、临时不可用）：记录稳定错误码，退避后重启循环；
- * 进程与 /healthz 保持存活，等数据库就绪后自动继续消费。只有**未捕获异常**才退出码 1。
+ * 瞬态错误（Prisma 初始化/连接、P2021 缺表、57P01/57P03 等）：进入 retrying，
+ * 1s→5s 退避后重试；/healthz 返回 503（不伪装健康），迁移/连接恢复后自动 ready + 200。
+ * 永久错误（业务 WorkflowError、P2022 缺列、TypeError/ReferenceError/未知异常）：
+ * loop=failed，进程退出码 1，由容器重启策略决定是否恢复。
  *
  * 日志约束：只打印 taskId / taskType / 状态 / 稳定错误码 / provider 名称，
  * 绝不打印 prompt、正文、API Key、任务快照或原始异常消息（可能含连接串）。
  */
 
 import { disconnectPrisma, getPrismaClient } from '@novel/db';
-import { ModelProviderError, WorkflowError } from '@novel/workflow';
+import { ModelProviderError, type WorkerLogger } from '@novel/workflow';
 
 import { WorkerConfigError } from './config.js';
+import { safeWorkerLoopErrorCode } from './loop-errors.js';
 import { createWorkerRuntime } from './runtime.js';
 import { startHealthServer } from './server.js';
+import { WorkerLoopSupervisor } from './supervisor.js';
 
 /** 关闭总时限：超时强制退出，未完成的任务交给租约回收。 */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
-/** 轮询循环失败后的退避区间（空库未迁移 / 数据库短暂不可用时保持进程存活）。 */
-const MIN_LOOP_RETRY_MS = 1_000;
-const MAX_LOOP_RETRY_MS = 5_000;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-/** 把任意异常收敛成可安全打印的错误码（不打印 message）。 */
-function safeErrorCode(error: unknown): string {
-  return error instanceof WorkflowError ? error.code : 'WORKFLOW_INTERNAL_ERROR';
-}
+const logger: WorkerLogger = {
+  info: (message, meta) => {
+    console.log(`[worker] ${message}`, meta ?? '');
+  },
+  warn: (message, meta) => {
+    console.warn(`[worker] ${message}`, meta ?? '');
+  },
+  error: (message, meta) => {
+    console.error(`[worker] ${message}`, meta ?? '');
+  },
+};
 
 /** 启动阶段的错误摘要：只对白名单错误类型打印消息。 */
 function describeStartupError(error: unknown): string {
@@ -51,42 +52,23 @@ function describeStartupError(error: unknown): string {
   if (error instanceof ModelProviderError) {
     return `模型配置错误：${error.message}`;
   }
-  return `启动失败，code=${safeErrorCode(error)}`;
+  return `启动失败，code=${safeWorkerLoopErrorCode(error)}`;
 }
 
 function main(): void {
-  const db = getPrismaClient();
+  // 关闭 Prisma 自身的原始错误输出：循环错误统一由 supervisor 记录安全 code，
+  // 避免缺表 / 连接串等信息直接进入 stdout/stderr。
+  const db = getPrismaClient({ log: [] });
   const runtime = createWorkerRuntime(db);
   const { config, provider, runner } = runtime;
 
-  const server = startHealthServer(config.port);
-
-  console.log(
-    `[worker] 运行参数：id=${runner.id} provider=${provider.name} model=${provider.defaultModel} ` +
-      `lease=${config.leaseMs}ms poll=${config.pollIntervalMs}ms sweep=${config.sweepIntervalMs}ms`,
-  );
-
-  // 健康检查与任务轮询并发：轮询循环失败时进程与健康检查继续存活。
-  let retiring = false;
-
-  const superviseLoop = async (): Promise<void> => {
-    let retryMs = MIN_LOOP_RETRY_MS;
-    while (!retiring) {
-      try {
-        await runner.start();
-        return;
-      } catch (error) {
-        if (retiring) {
-          return;
-        }
-        console.error(`[worker] 轮询循环失败，code=${safeErrorCode(error)}；${retryMs}ms 后重试`);
-        await sleep(retryMs);
-        retryMs = Math.min(retryMs * 2, MAX_LOOP_RETRY_MS);
-      }
-    }
-  };
-
-  const workerLoop = superviseLoop();
+  // supervisor 先创建（starting），健康检查读取它的实时快照。
+  const supervisor = new WorkerLoopSupervisor({
+    runner,
+    pollIntervalMs: config.pollIntervalMs,
+    logger,
+  });
+  const server = startHealthServer(config.port, { loopState: () => supervisor.snapshot() });
 
   let shuttingDown = false;
 
@@ -107,7 +89,9 @@ function main(): void {
       return;
     }
     shuttingDown = true;
-    retiring = true;
+    // stopping 必须先于关闭健康端口，避免关闭窗口里仍显示 ready。
+    supervisor.stop();
+    runner.stop();
     console.log(`[worker] 收到 ${signal}，停止领取新任务……`);
 
     // 总时限兜底：包括"正在执行的任务"在内，超过时限一律强制退出。
@@ -117,13 +101,12 @@ function main(): void {
     }, SHUTDOWN_TIMEOUT_MS);
     forceTimer.unref();
 
-    runner.stop();
     await closeHealthServer();
 
     try {
       await workerLoop;
     } catch (error) {
-      console.warn(`[worker] 轮询循环异常结束，code=${safeErrorCode(error)}`);
+      console.warn(`[worker] 轮询循环异常结束，code=${safeWorkerLoopErrorCode(error)}`);
     }
 
     try {
@@ -137,6 +120,24 @@ function main(): void {
     process.exit(exitCode);
   };
 
+  const workerLoop = supervisor
+    .run()
+    .then((result) => {
+      if (result.status === 'failed') {
+        console.error(`[worker] 轮询循环永久失败，code=${result.errorCode}`);
+        void shutdown('WORKER_LOOP_FAILED', 1);
+      }
+    })
+    .catch((error: unknown) => {
+      console.error(`[worker] 轮询 supervisor 异常，code=${safeWorkerLoopErrorCode(error)}`);
+      void shutdown('WORKER_SUPERVISOR_ERROR', 1);
+    });
+
+  console.log(
+    `[worker] 运行参数：id=${runner.id} provider=${provider.name} model=${provider.defaultModel} ` +
+      `lease=${config.leaseMs}ms poll=${config.pollIntervalMs}ms sweep=${config.sweepIntervalMs}ms`,
+  );
+
   process.on('SIGTERM', () => {
     void shutdown('SIGTERM', 0);
   });
@@ -147,12 +148,12 @@ function main(): void {
 
 process.on('uncaughtException', (error: unknown) => {
   // 不打印 error.message：可能包含连接串、prompt 或正文。
-  console.error(`[worker] 未捕获异常，code=${safeErrorCode(error)}`);
+  console.error(`[worker] 未捕获异常，code=${safeWorkerLoopErrorCode(error)}`);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason: unknown) => {
-  console.error(`[worker] 未处理的 Promise 拒绝，code=${safeErrorCode(reason)}`);
+  console.error(`[worker] 未处理的 Promise 拒绝，code=${safeWorkerLoopErrorCode(reason)}`);
   process.exit(1);
 });
 

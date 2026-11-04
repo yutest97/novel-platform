@@ -2,7 +2,7 @@
 
 - 版本：v1.1
 - 日期：2026-11-04
-- 当前基线：`2b94af1`（A1-3B-REV-02 已复审）+ A1-3C（本地提交）
+- 当前基线：`7e735a9`（A1-3C 已提交）+ A1-3C-REV-01（本地提交）
 - 状态：执行中
 
 ---
@@ -42,7 +42,7 @@
 | **A1-2** | 单章候选流水线（Planner → Writer） | `planner.chapter` / `writer.chapter` 两个 Agent、`chapter.draft` 任务类型、`chapter_contracts` / `chapter_candidates`、确定性上下文、检查点与 LLM 日志；**无 HTTP API / UI** | 已完成（本地提交） + REV-01 |
 | **A1-3A** | 候选采纳 + 正式版本（数据库与服务层） | `chapter_versions`、候选 `candidate → adopted` 受控迁移、`adoptChapterCandidate`（作品锁 + 行锁 + 同事务审计）、幂等与并发；**无 HTTP API / UI** | 已完成（本地提交） |
 | **A1-3B** | 章节 / 生成任务 / 候选 / 采纳 HTTP API（单作者） | 7 个路由、严格白名单、会话与 Origin 校验、requestId 幂等、任务取消、候选读取与采纳；前端只加客户端函数，**无 UI** | 已完成（本地提交）+ REV-01/02 |
-| **A1-3C** | Worker 常驻运行与后端端到端闭环 | `apps/worker` 常驻轮询、`chapter.draft` 注册、Provider 单次构造、provider/model 预检（`TASK_MODEL_CONFIG_MISMATCH`）、优雅关闭、后端 e2e；**无章节 UI** | **本轮完成** |
+| **A1-3C** | Worker 常驻运行与后端端到端闭环 | `apps/worker` 常驻轮询、`chapter.draft` 注册、Provider 单次构造、provider/model 预检（`TASK_MODEL_CONFIG_MISMATCH`）、循环状态机与健康检查、优雅关闭、后端 e2e；**无章节 UI** | 已完成（本地提交）+ REV-01 |
 | **A1-4** | 章节工作台（单作者） | 章节列表/正文阅读/候选查看与采纳/任务轮询/版本列表；仍不接 Reviewer | 待开始 |
 | **A2** | 连续性与事实（个人版） | 章节事实提取、人物/资源状态回写、跨章一致性提示 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
@@ -99,3 +99,4 @@
 | 2026-11-04 | A1-2-REV-01 复审通过；A1-3A 候选采纳与正式版本完成（数据库 + 服务层，无 API/UI） |
 | 2026-11-04 | A1-3A 复审通过；A1-3B 章节 / 生成任务 / 候选 / 采纳 HTTP API 完成（无 UI） |
 | 2026-11-04 | A1-3B-REV-02 复审通过；A1-3C Worker 常驻循环、provider/model 预检与后端端到端闭环完成（无 UI） |
+| 2026-11-04 | A1-3C-REV-01：循环状态机与健康检查（starting/ready/retrying/stopping/failed）、瞬态/永久错误分类、空库仅 P2021 重试、P2022/未知错误退出 1 |

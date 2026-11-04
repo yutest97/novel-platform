@@ -1,6 +1,6 @@
-# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A / A1-3B / A1-3C）
+# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A / A1-3B / A1-3C / REV-01）
 
-- 版本：v1.4
+- 版本：v1.5
 - 日期：2026-11-04
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -45,6 +45,11 @@ Worker 启动时只构造一次 Provider、注册 `chapter.draft`、并发启动
 后端端到端测试覆盖「API 创建任务 → Worker 生成候选 → API 读取候选 → API 采纳版本」。
 仍然**没有章节 UI**。
 
+**A1-3C-REV-01 交付**：循环本身有显式状态与健康语义。
+`starting / ready / retrying / stopping / failed` 五态；只有瞬态基础设施错误
+（Prisma 初始化/连接、P2021 缺表、57P01/57P03 等）退避重试；P2022、未知错误、
+编程错误与业务错误一律 `failed` + 退出 1。`/healthz` 在循环未 ready 时返回 503。
+
 **不交付**：章节编辑器 UI、`human` 版本、版本恢复 / diff、
 Reviewer/Continuity/Fact、RAG/图数据库、资源流水、多人功能。
 A1-4 才做章节工作台。
@@ -55,16 +60,20 @@ A1-4 才做章节工作台。
 
 ```
 apps/worker（A1-3C 常驻进程）
-  ├─ /healthz                与轮询并发，停止时释放端口
-  └─ WorkerRunner
-        ├─ sweepExpiredTasks      回收过期租约
-        ├─ claimNextTask          FOR UPDATE SKIP LOCKED
-        ├─ provider/model 预检     与当前 Provider 身份比对
-        ├─ heartbeatTask          定时续租（失败 → abort）
-        └─ WorkflowKernel
-              └─ WorkflowDefinition（固定步骤）
-                    └─ AgentRunner（可选）
-                          └─ ModelProvider（Mock / OpenAI 兼容）
+  ├─ /healthz                读取 supervisor 快照；未 ready → 503
+  └─ WorkerLoopSupervisor（A1-3C-REV-01）
+        ├─ runOnce()             直接调用，不走 start()
+        ├─ 状态机               starting / ready / retrying / stopping / failed
+        ├─ 错误分类             isRetryableWorkerLoopError（瞬态）/ 永久
+        └─ WorkerRunner.runOnce
+              ├─ sweepExpiredTasks      回收过期租约
+              ├─ claimNextTask          FOR UPDATE SKIP LOCKED
+              ├─ provider/model 预检     与当前 Provider 身份比对
+              ├─ heartbeatTask          定时续租（失败 → abort）
+              └─ WorkflowKernel
+                    └─ WorkflowDefinition（固定步骤）
+                          └─ AgentRunner（可选）
+                                └─ ModelProvider（Mock / OpenAI 兼容）
 
 Provider 只在进程启动时构造一次：同一个实例
   ├─ 交给 createChapterDraftWorkflow（实际生成）
@@ -622,13 +631,16 @@ HTTP 层只做四件事：**会话与 Origin 校验 → 请求体白名单 → �
 读取 Worker 运行配置（非法 → 安全错误 + 退出码 1）
   → 构造 Provider（唯一一次）+ WorkflowRegistry
   → 注册 chapter.draft（createChapterDraftWorkflow({ db, provider })）
-  → 启动 /healthz HTTP 服务
-  → 并发启动 WorkerRunner.start()
+  → 构造 supervisor（初始 starting）
+  → 启动 /healthz HTTP 服务（读取 supervisor 快照，fail-closed）
+  → supervisor.run()：直接调用 runOnce()
 ```
 
 - `apps/worker/src/config.ts`：只读环境变量，纯函数、可单测；
 - `apps/worker/src/runtime.ts`：`createWorkerRuntime(db, env)` 负责装配，不监听端口、
   不连数据库；测试可注入 Provider 工厂验证"只构造一次"；
+- `apps/worker/src/supervisor.ts`：状态机、退避、可中断 sleep；
+- `apps/worker/src/loop-errors.ts`：瞬态/永久错误分类与安全 code；
 - `apps/worker/src/index.ts`：进程生命周期（启动 / 信号 / 异常）。
 
 ### 15.2 运行配置
@@ -668,27 +680,64 @@ task.provider === provider.name
 - 任务信封 `WorkflowTaskEnvelope` 新增 `provider` / `model` 两个字段，
   由 Worker 从任务行填充，Kernel 只透传。
 
-### 15.4 关闭与异常
+### 15.4 循环状态、错误分类与关闭
+
+**状态机**
+
+```
+starting ──runOnce 正常返回──▶ ready
+   │                              │
+   │ 瞬态错误                      │ 瞬态错误
+   ▼                              ▼
+retrying ──runOnce 正常返回──▶ ready
+   │
+   │ 永久错误
+   ▼
+failed ──▶ 进程退出 1
+任意状态 ──stop()──▶ stopping ──▶ 健康端口关闭 ──▶ 退出 0
+```
+
+| 状态       | 进入条件                                 | `/healthz`           |
+| ---------- | ---------------------------------------- | -------------------- |
+| `starting` | 进程已启动，尚未完成第一次 `runOnce`     | **503**（error）     |
+| `ready`    | 至少一次 `runOnce` **正常返回**          | 200（ok）            |
+| `retrying` | 瞬态基础设施错误，退避等待中             | **503**（error）     |
+| `stopping` | 收到 SIGTERM / SIGINT，正在关闭          | 200（degraded/warn） |
+| `failed`   | 永久错误，进程即将以退出码 1 退出        | **503**（error）     |
+
+`runOnce` 正常返回的 `idle / succeeded / retried / failed / cancelled / lease-lost`
+全部算**循环健康**：`consecutiveFailures` 归零、`errorCode` 清空、`nextRetryMs` 清空、
+`lastSuccessAt` 更新。任务级失败不是循环失败。
+
+快照字段（`WorkerLoopSnapshot`）只有：`state / consecutiveFailures / errorCode /
+nextRetryMs / lastSuccessAt`；不含 message、prompt、正文、Key、连接串。
+
+**瞬态 vs 永久**（`isRetryableWorkerLoopError`）
+
+| 分类 | 条件 | 行为 |
+| --- | --- | --- |
+| 瞬态 | `PrismaClientInitializationError`；P1001 / P1002 / P1008 / P1017 / P2021 / P2024；原始查询缺表 `42P01`（统一映射 `P2021`）；SQLSTATE 57P01 / 57P03；`ECONNREFUSED` / `ECONNRESET` / `ETIMEDOUT` / `EPIPE` / `ENOTFOUND` / `EHOSTUNREACH` / `ENETUNREACH` / `EAI_AGAIN`；显式 `RetryableWorkerLoopError` | `retrying`，1s → 2s → 4s → 5s（上限） |
+| 永久 | P2022 缺列；其它 Prisma 已知请求错误；`PrismaClientUnknownRequestError`；所有 `WorkflowError`（业务错误，循环级不重试）；`TypeError` / `ReferenceError` / 断言错误 / 未知异常 | `failed`，记录稳定 code，进程退出 1 |
+
+**空库启动**：`generation_tasks` 不存在时：
+进程不退出 → `retrying` → `/healthz` **503** → 日志只记 `P2021`（映射后）；
+迁移完成后下一轮 `runOnce` 正常返回 → `ready` → 200。
+若运行期发现 P2022 缺列或未知代码错误 → `failed` + 退出 1，不无限重试。
 
 **SIGTERM / SIGINT**：
 
 ```
-WorkerRunner.stop()（不再领取；当前任务执行完）
+supervisor.stop()（先置 stopping，唤醒退避 sleep，不再启动新一轮 runOnce）
   → server.close()（健康检查端口释放）
-  → 等待 start() 循环退出
+  → 等待 in-flight runOnce 退出
   → disconnectPrisma()
   → process.exit(0)
 ```
 
 总时限 15 秒；超时强制退出（未完成任务的租约由其它 Worker 回收，语义与进程崩溃一致）。
 
-**轮询循环异常**（空库尚未迁移、数据库短暂不可用）：不退出进程，记录稳定错误码后
-按 1s → 5s 退避重启循环；`/healthz` 继续可用（数据库组件此时为 error / 503），
-数据库恢复后自动继续消费。这保证 `docker compose up --wait` 在迁移前不会因 Worker
-崩溃重启而永远等不到健康状态。
-
-**未捕获异常 / 未处理的 Promise 拒绝**：只打印稳定错误码（`WorkflowError.code` 或
-`WORKFLOW_INTERNAL_ERROR`）并退出码 1；启动配置错误只打印字段与固定文案。
+**未捕获异常 / 未处理的 Promise 拒绝**：只打印稳定错误码
+（`safeWorkerLoopErrorCode`）并退出码 1；启动配置错误只打印字段与固定文案。
 任何路径都不打印原始异常消息（可能含连接串）、prompt、正文或任务快照。
 
 ### 15.5 后端端到端测试
@@ -714,6 +763,8 @@ POST .../adopt                                 201，versionNo=1，chapter in_re
 ### 15.6 安全边界
 
 - Worker 不监听业务 HTTP 请求、不接收请求正文，只提供 `/healthz`；
+- Worker 的 Prisma 客户端关闭自身日志（`log: []`）：数据库原始错误（含表名、
+  连接串片段）不进入 stdout/stderr，只由 supervisor 记录稳定 code；
 - 任务快照 / prompt / 正文 / Key 不写日志；
 - Agent 调用日志仍只写 token / 延迟 / 成功标志 / 稳定错误码；
 - 管理员不是作者，仍无任务执行入口；没有新增公开执行接口；
@@ -722,17 +773,25 @@ POST .../adopt                                 201，versionNo=1，chapter in_re
 ### 15.7 健康检查
 
 - `/healthz` 结构不变：`service / version / stage / status / components / uptimeSeconds`；
-- 组件固定为 `worker`（恒 `ok`）与 `database`（探测结果）；
+- 组件固定为 `worker`（恒 `ok`）、`queueLoop`（循环快照）、`database`（探测结果）；
+- `queueLoop` 映射：`ready → ok`；`starting / retrying / failed → error`；
+  `stopping → degraded`；
+- **未 ready（starting / retrying / failed）一律 HTTP 503**，包括"数据库 ping 正常但
+  循环 retrying"的情况，避免假健康；
+- 迁移完成 / 连接恢复 → 循环 ready → `/healthz` 自动回到 200；
+- `queueLoop.detail` 只含 `state / failures / code / nextRetryMs`，不含原始错误；
+- 未接入 supervisor 时 fail-closed（`WORKER_LOOP_STATE_UNAVAILABLE` → 503）；
 - 数据库不可用 → 整体 `error` + HTTP 503，`detail` 只保留 Prisma 错误首行，不含连接串；
 - 停止信号后端口释放，旧连接不会挂住进程；
 - compose 的 worker healthcheck 与 Caddy `/worker/healthz` 行为不变。
 
 ### 15.8 测试
 
-A1-3C 新增 32 个：worker 27（配置 19 / 运行时 5 / 健康检查 5，其中 2 个为既有状态映射）、
-workflow 4（预检 3 + 章节流水线 1）、web 后端 e2e 1。
-全量单测 **617**（web 160 / workflow 176 / worker 29 / shared 15 / db 10 / auth 95 / works 132）；
-浏览器 E2E 仍为 **67**，本阶段未改 UI。
+- A1-3C：worker 27 / workflow 4 / web 后端 e2e 1；
+- A1-3C-REV-01：worker 新增 34（错误分类 14 / supervisor 14 / 健康检查 5 /
+  空库恢复 1），workflow 与 web 不变；
+- 全量单测 **651**（web 160 / workflow 176 / worker 63 / shared 15 / db 10 /
+  auth 95 / works 132）；浏览器 E2E 仍为 **67**，本阶段未改 UI。
 
 ---
 

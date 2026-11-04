@@ -8,6 +8,16 @@
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { buildWorkerHealthReport, healthStatusCode } from '../src/health.js';
+import type { WorkerLoopSnapshot } from '../src/supervisor.js';
+
+/** 循环本身健康，确保失败只来自数据库探测。 */
+const READY_LOOP: WorkerLoopSnapshot = {
+  state: 'ready',
+  consecutiveFailures: 0,
+  errorCode: null,
+  nextRetryMs: null,
+  lastSuccessAt: null,
+};
 
 const ORIGINAL_DATABASE_URL = process.env['DATABASE_URL'];
 const PASSWORD_MARKER = 'health-probe-password-must-not-leak';
@@ -25,7 +35,7 @@ afterAll(() => {
 
 describe('数据库不可用', () => {
   it('健康报告为 error / HTTP 503，且不泄露连接串', async () => {
-    const report = await buildWorkerHealthReport();
+    const report = await buildWorkerHealthReport(READY_LOOP);
 
     expect(report.service).toBe('worker');
     expect(report.status).toBe('error');

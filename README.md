@@ -738,12 +738,13 @@ node apps/worker/dist/index.js
 # 容器：pnpm compose:up
 ```
 
-启动装配（`src/runtime.ts`）：
+启动装配（`src/runtime.ts` / `src/supervisor.ts`）：
 
 - Provider 只在启动时构造**一次**，同一个实例既交给 `chapter.draft` 工作流，
   也交给 `WorkerRunner` 的预检；Provider 选择只来自 `MODEL_PROVIDER`；
 - `WorkflowRegistry` 注册 `chapter.draft`（`createChapterDraftWorkflow({ db, provider })`）；
-- 健康检查 HTTP 服务与轮询循环并发启动，互不阻塞。
+- supervisor 初始为 `starting`，健康检查读取它的实时快照并与轮询并发启动；
+- **只有第一次 `runOnce()` 正常返回后才进入 `ready`**，在此之前 `/healthz` 一律 503。
 
 | 变量                  | 默认   | 说明                                                       |
 | --------------------- | ------ | ---------------------------------------------------------- |
@@ -767,21 +768,47 @@ node apps/worker/dist/index.js
 被静默换模型重跑。web 与 worker 的 `MODEL_PROVIDER` / `MODEL_NAME` 必须一致，
 compose 已把这两项同时注入两个服务。
 
-**关闭流程**：`SIGTERM` / `SIGINT` → `WorkerRunner.stop()`（不再领取新任务，
-当前任务完成）→ 关闭健康检查端口 → 等待轮询退出 → `prisma.$disconnect()` → 退出码 0；
-总时限 15 秒，超时强制退出（未完成任务的租约由其它 Worker 回收）。
+循环状态与健康检查：
 
-轮询循环抛错（例如空库尚未迁移）不会让进程退出：记录稳定错误码后按 1s → 5s 退避
-重启循环，`/healthz` 保持可用，数据库就绪后自动继续消费；这也是 compose 在迁移前
-`up --wait` 仍能通过健康检查的原因。
+| 状态       | 含义                              | `/healthz`           |
+| ---------- | --------------------------------- | -------------------- |
+| `starting` | 进程已起，尚未完成第一次轮询      | **503**（error）     |
+| `ready`    | 至少一次轮询正常返回              | 200（ok）            |
+| `retrying` | 瞬态基础设施错误，退避重试中      | **503**（error）     |
+| `stopping` | 收到停止信号，正在关闭            | 200（degraded/warn） |
+| `failed`   | 永久错误，进程即将以退出码 1 退出 | **503**（error）     |
+
+**瞬态 vs 永久**（`src/loop-errors.ts`）：
+
+- 退避重试（1s → 5s）：Prisma 初始化/连接错误、P1001/P1002/P1008/P1017/P2021/P2024、
+  空库缺表（P2021 或原始查询 `42P01`，统一映射为 `P2021`）、PostgreSQL 57P01/57P03、
+  `ECONNREFUSED` / `ECONNRESET` / `ETIMEDOUT` 等连接类错误、显式
+  `RetryableWorkerLoopError`；
+- 永久失败（退出 1，不伪装健康）：P2022 缺列、其它 Prisma 已知/未知请求错误、
+  业务 `WorkflowError`、`TypeError` / `ReferenceError` / 断言错误 / 未知异常。
+
+`runOnce` 正常返回的 `idle / succeeded / retried / failed / cancelled / lease-lost`
+都算循环健康：连续失败数归零、状态回到 `ready`。任务级失败不是循环失败。
+
+**空库启动**：`generation_tasks` 不存在时进程不退出，进入 `retrying`，
+`/healthz` 返回 **503**（只记录映射后的 `P2021`，不打印原始异常/连接串）；
+迁移完成后下一轮自动 `ready` + 200。若遇到 P2022 缺列或未知代码错误，
+则 `failed` 并退出 1，由容器重启策略决定，不再无限重试。
+
+**关闭流程**：`SIGTERM` / `SIGINT` → supervisor 先置 `stopping` →
+关闭健康检查端口 → 等待当前 `runOnce` 退出（**退避 sleep 会被立即唤醒**，
+期间不再启动新一轮）→ `prisma.$disconnect()` → 退出码 0；
+总时限 15 秒，超时强制退出（未完成任务的租约由其它 Worker 回收）。
 
 **异常**：未捕获异常 / 未处理的 Promise 拒绝只打印稳定错误码并退出码 1；
 启动配置错误（`WorkerConfigError` / `ModelProviderError`）只打印字段与固定文案。
-任何日志都不含 prompt、正文、API Key、任务快照或原始异常消息。
+Worker 的 Prisma 客户端关闭自身日志，数据库原始错误（表名 / 连接串片段）不进入
+stdout/stderr；任何日志与健康报告都不含 prompt、正文、API Key、任务快照、
+原始异常 message 或连接串。
 
-**测试**：A1-3C 新增 32 个（worker 配置/运行时/健康检查 27、workflow 预检 4、
-web 后端 e2e 1）；全量单测 **617** 个（web 160 / workflow 176 / worker 29 /
-shared 15 / db 10 / auth 95 / works 132）。真实模型仍需人工 smoke；
+**测试**：A1-3C + REV-01 新增 66 个（worker 61 = A1-3C 27 + REV-01 34、
+workflow 预检 4、web 后端 e2e 1）；全量单测 **651** 个（web 160 / workflow 176 /
+worker 63 / shared 15 / db 10 / auth 95 / works 132）。真实模型仍需人工 smoke；
 CI 只使用 MockProvider / fake fetch，不联网。
 
 ### 浏览器 E2E（Playwright Chromium）
@@ -852,12 +879,12 @@ CI 的 `docker` job 会另建一个独立数据库（库名含 `run_id` 与 `run
 
 ## 5. 健康检查地址
 
-| 端点                                   | 返回内容                             | 失败语义                    |
-| -------------------------------------- | ------------------------------------ | --------------------------- |
-| `http://127.0.0.1:3000/api/healthz`    | web 应用状态 + 数据库连接状态        | 数据库不可用 → **HTTP 503** |
-| `http://127.0.0.1:3001/healthz`        | worker 状态 + 数据库连接状态         | 数据库不可用 → **HTTP 503** |
-| `http://127.0.0.1:8080/api/healthz`    | 经 Caddy 代理到 web                  | 同上                        |
-| `http://127.0.0.1:8080/worker/healthz` | 经 Caddy 代理到 worker（前缀被剥离） | 同上                        |
+| 端点                                   | 返回内容                             | 失败语义                                           |
+| -------------------------------------- | ------------------------------------ | -------------------------------------------------- |
+| `http://127.0.0.1:3000/api/healthz`    | web 应用状态 + 数据库连接状态        | 数据库不可用 → **HTTP 503**                        |
+| `http://127.0.0.1:3001/healthz`        | worker 进程 + 任务循环 + 数据库状态  | 任一 error → **HTTP 503**（循环未 ready 也是 503） |
+| `http://127.0.0.1:8080/api/healthz`    | 经 Caddy 代理到 web                  | 同上                                               |
+| `http://127.0.0.1:8080/worker/healthz` | 经 Caddy 代理到 worker（前缀被剥离） | 同上                                               |
 
 响应示例：
 
