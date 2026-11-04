@@ -86,6 +86,13 @@ jobs:
       - name: 符号链接分类校验器的行为测试
         run: pnpm test:deploy-symlinks
 
+      # 纯文本断言，不需要 Docker：防止把「先迁移再起四服务」的顺序改回去。
+      - name: CI 启动顺序守卫（无需 Docker）
+        run: |
+          set -euo pipefail
+          pnpm check:ci-order
+          pnpm test:ci-order
+
       - name: 构建应用
         run: pnpm build:apps
 
@@ -177,6 +184,23 @@ jobs:
       - name: 构建容器镜像
         run: docker compose -f infra/docker-compose.yml build
 
+      # 全新数据卷上不能直接 `up --wait` 四个服务：
+      # 表还没建出来，Worker 的 queueLoop 会停在 retrying（/healthz 503），
+      # `--wait` 永远等不到 healthy。因此先把数据库起来、迁移完，再拉起全部服务。
+      - name: 启动 PostgreSQL（迁移前只起数据库）
+        run: |
+          set -euo pipefail
+          docker compose -f infra/docker-compose.yml up -d --wait \
+            --wait-timeout 120 postgres
+
+      - name: 对容器数据库执行迁移（宿主机连接串）
+        env:
+          # 宿主机经映射端口访问容器内 PostgreSQL（compose 绑定 127.0.0.1:5432）
+          DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel?schema=public
+        run: |
+          set -euo pipefail
+          pnpm db:deploy
+
       - name: 启动四个服务并等待健康
         run: |
           set -euo pipefail
@@ -204,13 +228,13 @@ jobs:
               .catch((error) => { console.error(error.message); process.exit(1); });
           "
 
-      - name: 对容器数据库执行迁移并创建初始管理员
+      - name: 创建初始管理员
         env:
           # 宿主机经映射端口访问容器内 PostgreSQL（compose 绑定 127.0.0.1:5432）
           DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel?schema=public
         run: |
           set -euo pipefail
-          pnpm db:deploy
+          # 迁移已在「对容器数据库执行迁移」步骤完成，这里只建号，避免重复执行。
           pnpm admin:create
 
       - name: TLS 前置检查（Caddy internal 证书 + HTTPS 健康检查）
@@ -252,14 +276,12 @@ jobs:
 
       # E2E 必须用**两个**连接串：
       # - 宿主机上的 Prisma（db:deploy / admin:create）经端口映射连 127.0.0.1；
-      # - 容器内的 web 必须连服务名 `postgres`（容器里 127.0.0.1 指向自己）。
-      # 之前两者共用一个连接串，导致容器内 web 去连 127.0.0.1:5432 而失败。
-      - name: 为 E2E 准备独立数据库并让 web 指向它
+      # - 容器内的 web / worker 必须连服务名 `postgres`（容器里 127.0.0.1 指向自己）。
+      - name: 为 E2E 创建独立数据库并迁移建号
         env:
           # 库名带 run id 与 attempt：重试/重跑不会撞上已存在的库
           E2E_DB_NAME: novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}
           E2E_HOST_DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public
-          E2E_WEB_DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public
           ADMIN_EMAIL: ${{ steps.e2ecreds.outputs.email }}
           ADMIN_INITIAL_PASSWORD: ${{ steps.e2ecreds.outputs.password }}
         run: |
@@ -284,31 +306,65 @@ jobs:
           DATABASE_URL="$E2E_HOST_DATABASE_URL" pnpm db:deploy
           DATABASE_URL="$E2E_HOST_DATABASE_URL" pnpm admin:create
 
-          # 重建 web 时只传**容器内**连接串（postgres:5432）
-          DATABASE_URL="$E2E_WEB_DATABASE_URL" \
-            "${COMPOSE[@]}" up -d --force-recreate --no-deps web
+      - name: 重建 web 与 worker 指向 E2E 数据库并等待双端健康
+        env:
+          E2E_DB_NAME: novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}
+          E2E_CONTAINER_DATABASE_URL: postgresql://novel:ci-placeholder@postgres:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public
+        run: |
+          set -euo pipefail
+          COMPOSE=(docker compose -f infra/docker-compose.yml)
 
-          # 诊断：确认容器内 web 真正拿到的 DATABASE_URL（脱敏）
-          echo "[e2e] 容器内 web 实际使用的 DATABASE_URL："
-          "${COMPOSE[@]}" exec -T web sh -lc \
-            'node -e "console.log(process.env.DATABASE_URL.replace(/:[^:@/]+@/, \":***@\"))"' \
-            || echo "::error::无法读取容器内 DATABASE_URL"
+          # web 与 worker 必须**同时**重建：只重建 web 会让 worker 继续消费默认库，
+          # E2E 提交的章节任务永远不会被领取。
+          # DATABASE_URL 只传**容器内**连接串（postgres:5432）；Caddy 无需重建。
+          DATABASE_URL="$E2E_CONTAINER_DATABASE_URL" \
+            "${COMPOSE[@]}" up -d --force-recreate --no-deps \
+              --wait --wait-timeout 180 web worker
 
-          # TLS 健康检查必须返回 200
+          # 确认两个容器拿到的连接串一致且指向 E2E 库（输出前脱敏，绝不打印密码）
+          mask() { sed -E 's#(://[^:/@]+:)[^@]*@#\1***@#'; }
+          web_db="$("${COMPOSE[@]}" exec -T web printenv DATABASE_URL | tr -d '\r')" \
+            || { echo "::error::无法读取容器内 web 的 DATABASE_URL"; exit 1; }
+          worker_db="$("${COMPOSE[@]}" exec -T worker printenv DATABASE_URL | tr -d '\r')" \
+            || { echo "::error::无法读取容器内 worker 的 DATABASE_URL"; exit 1; }
+          web_masked="$(printf '%s' "$web_db" | mask)"
+          worker_masked="$(printf '%s' "$worker_db" | mask)"
+          echo "[e2e] 容器内 web    DATABASE_URL：$web_masked"
+          echo "[e2e] 容器内 worker DATABASE_URL：$worker_masked"
+          if [ "$web_masked" != "$worker_masked" ]; then
+            echo "::error::web 与 worker 的 DATABASE_URL 不一致，E2E 任务不会被同一数据库消费"
+            exit 1
+          fi
+          case "$web_masked" in
+            *"$E2E_DB_NAME"*) ;;
+            *)
+              echo "::error::容器内 DATABASE_URL 未指向 E2E 库 $E2E_DB_NAME"
+              exit 1
+              ;;
+          esac
+
+          # 双端点健康：web 的 /api/healthz 与 worker 的 /worker/healthz 都为 200 才算就绪。
+          # 不能只等 web —— worker 的 queueLoop 未 ready 时 /worker/healthz 是 503。
+          web_code=""
+          worker_code=""
           for _ in $(seq 1 60); do
-            code="$(curl -sS -k --ipv4 --resolve localhost:8443:127.0.0.1 \
+            web_code="$(curl -sS -k --ipv4 --resolve localhost:8443:127.0.0.1 \
                       -o /dev/null -w '%{http_code}' --max-time 10 \
                       https://localhost:8443/api/healthz || true)"
-            if [ "$code" = "200" ]; then
-              echo "[e2e] web 已指向 E2E 数据库"
+            worker_code="$(curl -sS -k --ipv4 --resolve localhost:8443:127.0.0.1 \
+                      -o /dev/null -w '%{http_code}' --max-time 10 \
+                      https://localhost:8443/worker/healthz || true)"
+            if [ "$web_code" = "200" ] && [ "$worker_code" = "200" ]; then
+              echo "[e2e] web 与 worker 均已指向 E2E 数据库并健康"
               exit 0
             fi
             sleep 2
           done
 
-          echo "::error::重建后的 web 未在预期时间内健康（最后状态码 ${code:-none}）"
+          echo "::error::重建后的服务未在预期时间内双端健康（web=${web_code:-none} worker=${worker_code:-none}）"
           "${COMPOSE[@]}" ps || true
           "${COMPOSE[@]}" logs web --tail 100 || true
+          "${COMPOSE[@]}" logs worker --tail 100 || true
           "${COMPOSE[@]}" logs postgres --tail 100 || true
           exit 1
 

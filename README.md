@@ -89,7 +89,24 @@ docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
 `next build`（Webpack）产物 + `next start` 运行。
 原因见 §7「容器镜像的可移植性设计」。
 
-### 首次启动后执行数据库迁移
+### 首次启动：先迁移，再等四服务健康
+
+**全新数据卷**上不能直接 `pnpm compose:up`：表还没建出来，Worker 的 queueLoop 会停在
+`retrying`，`/healthz` 按设计返回 **503**，`up --wait` 会一直等到超时。
+正确顺序是先只起数据库、迁移完再拉起全部服务：
+
+```bash
+# 1) 只启动 PostgreSQL（迁移前不拉起 web/worker）
+docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 120 postgres
+
+# 2) 在宿主机上执行迁移：容器内用服务名 postgres，宿主机必须用 127.0.0.1
+DATABASE_URL='postgresql://novel:密码@127.0.0.1:5432/novel?schema=public' pnpm db:deploy
+
+# 3) 再启动四个服务并等待健康
+pnpm compose:up   # = docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 300
+```
+
+已经迁移过的数据卷可以继续直接 `pnpm compose:up`。
 
 ```bash
 pnpm db:deploy           # 执行迁移（= pnpm --filter @novel/db migrate:deploy）
@@ -100,6 +117,10 @@ pnpm db:status           # 查看迁移状态
 > **不是** `pnpm deploy` 包部署命令。
 > 迁移要求显式设置 `DATABASE_URL`；缺失时会以非零码退出并给出明确错误，
 > 不会退回到占位连接串执行迁移（保护见 `packages/db/scripts/require-database-url.mjs`）。
+>
+> **迁移前 Worker 不健康是预期行为**：`/healthz` 的 readiness 语义（queue loop 未就绪
+> 或数据库缺表 → 503）不会因为部署顺序而放宽。发布流程按上面的顺序执行，
+> 而不是把探针改成"先绿"（不允许用 `/livez` 之类的方式绕过 readiness）。
 
 ### 创建初始管理员（一次性）
 
@@ -1131,18 +1152,27 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 **job `verify`**（质量门禁，附带 `postgres:16-alpine` service）：
 `pnpm install --frozen-lockfile` → `pnpm build:packages` → `pnpm db:deploy`（应用迁移）→
 `format:check`（构建前）→ `lint` → `typecheck` → `test`（含数据库集成测试）→
-`test:deploy-symlinks` → `pnpm build:apps` → `format:check`（构建后）→
+`test:deploy-symlinks` → `check:ci-order` + `test:ci-order`（Docker 启动顺序守卫）→
+`pnpm build:apps` → `format:check`（构建后）→
 构建后 Git 工作区洁净检查 → `docker compose config` → `license:check` + `license:check:dev` →
 `license:report` + `license:report:dev` → 上传两份许可证清单。
 
 **job `docker`**（容器验收）：
-`docker compose build` → `docker compose up -d --wait`（等待四个服务健康）→
+`docker compose build` → **只启动 postgres**（`up -d --wait --wait-timeout 120 postgres`）→
+宿主机连接串（`127.0.0.1:5432`）执行 `pnpm db:deploy` →
+`docker compose up -d --wait`（等待四个服务健康；此时表已存在，Worker 才能 ready）→
 `scripts/verify-healthchecks.sh`（校验 web / worker / Caddy→web / Caddy→worker 四个端点）→
-容器内加载 `@node-rs/argon2` 做一次 hash/verify → 对容器数据库 `pnpm db:deploy` +
-`pnpm admin:create` → `scripts/verify-auth-smoke.sh`
+容器内加载 `@node-rs/argon2` 做一次 hash/verify → `pnpm admin:create`（迁移已在前一步完成）→
+`scripts/verify-auth-smoke.sh`
 （经 Caddy HTTPS 完成：登录 → 强制改密 → 创建作者 → 列表校验 → 作者首登改密 →
 重置密码 → 停用/启用 → 账号上限）→
-输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
+浏览器 E2E 准备：建独立 E2E 库 + 宿主机串迁移建号 → **同时重建 web 与 worker**
+（容器串 `postgres:5432`），`/api/healthz` 与 `/worker/healthz` 都返回 200 才继续 →
+Playwright → 输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
+
+> 只重建 web 会让 worker 继续消费默认库，E2E 提交的章节任务永远不会被领取，
+> 因此重建命令固定为 `up -d --force-recreate --no-deps --wait web worker`。
+> 顺序约束由 `scripts/check-ci-compose-order.mjs` 在 `verify` job 里守住。
 
 > CI 的 docker job 使用 `COMPOSE_PROJECT_NAME=novel-ci-<run_id>` 独立项目名，
 > 与开发环境隔离，`down -v` 只清理该次 CI 创建的资源。

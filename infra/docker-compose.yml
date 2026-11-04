@@ -8,6 +8,16 @@
 #   pnpm compose:down      # 停止容器，**保留数据卷**
 #   pnpm compose:reset     # 停止容器并**删除数据卷**（会丢数据，慎用）
 #
+# 全新数据卷的首次启动（重要，A1-4A-CI-FIX-01）：
+#   worker 的 /healthz 是 readiness —— 数据库里没有表时 queueLoop 停在 retrying，
+#   返回 503，`up --wait` 会一直等到超时。因此首次启动不能直接拉起四个服务，必须：
+#     1) docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 120 postgres
+#     2) DATABASE_URL='postgresql://…@127.0.0.1:5432/novel?schema=public' pnpm db:deploy
+#     3) pnpm compose:up
+#   注意第 2 步走宿主机回环地址；容器内才用服务名 postgres。
+#   这是启动顺序问题，**不要**通过放宽 /healthz（或用 livez 探针）来"解决"。
+#   已迁移过的数据卷可以继续直接 `pnpm compose:up`。
+#
 # 项目名与资源命名（v1.1 修正）：
 # - 顶层 name 使用 COMPOSE_PROJECT_NAME（默认 novel-platform）。
 # - **卷名、网络名不再硬编码**，而是带项目名前缀：
@@ -116,6 +126,9 @@ services:
     ports:
       - '127.0.0.1:${WORKER_PORT:-3001}:3001'
     healthcheck:
+      # readiness 语义：queue loop 未 ready（例如数据库还没迁移 → P2021 → retrying）
+      # 时返回 503。请不要为了"启动更快"改成 livez / 放宽状态码，
+      # 正确做法是先把迁移跑完再等健康（见文件头部的启动顺序）。
       test:
         - CMD
         - node

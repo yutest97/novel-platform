@@ -28,6 +28,8 @@
     "license:report": "node scripts/license-check.mjs --write",
     "license:report:dev": "node scripts/license-check.mjs --write --dev",
     "test:deploy-symlinks": "node scripts/test-deploy-symlinks.mjs",
+    "check:ci-order": "node scripts/check-ci-compose-order.mjs",
+    "test:ci-order": "node scripts/test-check-ci-compose-order.mjs",
     "compose:config": "docker compose -f infra/docker-compose.yml config",
     "compose:build": "docker compose -f infra/docker-compose.yml build",
     "compose:up": "docker compose -f infra/docker-compose.yml up -d --wait --wait-timeout 300",
