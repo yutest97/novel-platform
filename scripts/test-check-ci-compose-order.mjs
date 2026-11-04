@@ -2,7 +2,7 @@
 /**
  * scripts/check-ci-compose-order.mjs 的行为测试（**不需要 Docker**）。
  *
- * 用临时 YAML 夹具断言守卫真的会拦住回退：
+ * A. CI 工作流夹具：
  *   1. 正确顺序                                → 通过
  *   2. 缺少「只启动 postgres」                 → 失败
  *   3. 迁移排在启动 postgres 之前              → 失败
@@ -11,7 +11,17 @@
  *   6. E2E 只检查 /api/healthz                 → 失败
  *   7. 出现 /livez                             → 失败
  *   8. 失败诊断缺少 logs worker                → 失败
- *   9. 仓库里真实的 ci.yml                     → 通过（守卫确实在守当前文件）
+ *   9. 仓库里真实的 ci.yml                     → 通过
+ *
+ * B. 本地验证脚本夹具（scripts/verify-local.sh）：
+ *  10. 正确顺序                                → 通过
+ *  11. 四服务 up 排在迁移之前                  → 失败
+ *  12. 迁移用容器连接串                        → 失败
+ *  13. 漏掉迁移                                → 失败
+ *  14. 漏掉健康检查                            → 失败
+ *  15. 出现 /livez                             → 失败
+ *  16. export 宿主机连接串                     → 失败
+ *  17. 仓库里真实的 verify-local.sh            → 通过
  *
  * 运行：node scripts/test-check-ci-compose-order.mjs
  * 退出码：0 = 全部通过；1 = 有用例失败。
@@ -26,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const checker = resolve(here, 'check-ci-compose-order.mjs');
 const realWorkflow = resolve(here, '../.github/workflows/ci.yml');
+const realLocalScript = resolve(here, 'verify-local.sh');
 const root = mkdtempSync(join(tmpdir(), 'ci-order-test-'));
 
 let failed = 0;
@@ -49,20 +60,31 @@ function check(name, condition, detail) {
   }
 }
 
-/** 运行守卫，返回 { status, output }。 */
-function run(file) {
-  const result = spawnSync(process.execPath, [checker, file], {
+/** 运行守卫，返回 { status, output }。第二个参数可指定本地脚本。 */
+function run(file, script) {
+  const args = [checker, file];
+  if (script !== undefined) {
+    args.push(script);
+  }
+  const result = spawnSync(process.execPath, args, {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
   });
   return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
 }
 
-/** 把 YAML 写进临时文件并运行守卫。 */
+/** 把工作流夹具写进临时文件并运行守卫（本地脚本用默认的真实文件）。 */
 function runFixture(name, content) {
   const file = join(root, `${name}.yml`);
   writeFileSync(file, content, 'utf8');
   return run(file);
+}
+
+/** 把脚本夹具写进临时文件并运行守卫（工作流用真实的 ci.yml）。 */
+function runScriptFixture(name, content) {
+  const file = join(root, `${name}.sh`);
+  writeFileSync(file, content, 'utf8');
+  return run(realWorkflow, file);
 }
 
 /** 正确的启动顺序（结构与真实 ci.yml 相同，去掉无关步骤）。 */
@@ -122,7 +144,47 @@ function mutate(name, from, to) {
   return GOOD.replace(from, to);
 }
 
-console.log('CI 启动顺序守卫 —— 行为测试');
+/**
+ * 正确的本地验证脚本顺序。
+ *
+ * 用数组 join 而不是模板字面量：脚本里满是 `${…}`，
+ * 模板字面量会把它们当 JS 插值。
+ */
+const GOOD_LOCAL = [
+  '#!/usr/bin/env bash',
+  'set -euo pipefail',
+  'COMPOSE_PROJECT_NAME="novel-verify-$$"',
+  'verify_project_name() {',
+  '  case "${COMPOSE_PROJECT_NAME}" in',
+  '    novel-verify-*) return 0 ;;',
+  '    *) return 1 ;;',
+  '  esac',
+  '}',
+  'COMPOSE=(docker compose -p "${COMPOSE_PROJECT_NAME}" -f infra/docker-compose.yml)',
+  'export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"',
+  'HOST_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/${POSTGRES_DB}?schema=public"',
+  'cleanup() {',
+  '  "${COMPOSE[@]}" down -v --remove-orphans || true',
+  '}',
+  'trap cleanup EXIT',
+  '"${COMPOSE[@]}" config --quiet',
+  '"${COMPOSE[@]}" build',
+  '"${COMPOSE[@]}" up -d --wait --wait-timeout 120 postgres',
+  'DATABASE_URL="${HOST_DATABASE_URL}" pnpm db:deploy',
+  '"${COMPOSE[@]}" up -d --wait --wait-timeout 300',
+  'bash scripts/verify-healthchecks.sh',
+  '',
+].join('\n');
+
+/** 本地脚本夹具替换（同样断言替换源存在）。 */
+function mutateLocal(name, from, to) {
+  if (!GOOD_LOCAL.includes(from)) {
+    throw new Error(`本地夹具 ${name} 的替换源不存在：${from}`);
+  }
+  return GOOD_LOCAL.replace(from, to);
+}
+
+console.log('启动顺序守卫 —— 行为测试');
 console.log(`夹具目录：${root}`);
 
 try {
@@ -131,7 +193,7 @@ try {
     const { status, output } = runFixture('good', GOOD);
     console.log('\n[1] 正确顺序（应通过）');
     check('退出码为 0', status === 0, `实际 status=${status}\n${output}`);
-    check('输出包含"守卫通过"', output.includes('CI 启动顺序守卫通过'), output);
+    check('输出包含"守卫通过"', output.includes('启动顺序守卫通过'), output);
   }
 
   // ---------- 用例 2：缺少「只启动 postgres」 ----------
@@ -247,7 +309,108 @@ try {
     const { status, output } = run(realWorkflow);
     console.log('\n[9] 仓库真实 .github/workflows/ci.yml（应通过）');
     check('退出码为 0', status === 0, `实际 status=${status}\n${output}`);
-    check('真实工作流通过守卫', output.includes('CI 启动顺序守卫通过'), output);
+    check('真实工作流通过守卫', output.includes('启动顺序守卫通过'), output);
+  }
+
+  // ---------- 用例 10：本地脚本正确顺序 ----------
+  {
+    const { status, output } = runScriptFixture('good-local', GOOD_LOCAL);
+    console.log('\n[10] verify-local.sh 正确顺序（应通过）');
+    check('退出码为 0', status === 0, `实际 status=${status}\n${output}`);
+    check('本地段全部通过', output.includes('启动顺序守卫通过'), output);
+  }
+
+  // ---------- 用例 11：四服务 up 排在迁移之前 ----------
+  {
+    const postgresUp = '"${COMPOSE[@]}" up -d --wait --wait-timeout 120 postgres';
+    const migrate = 'DATABASE_URL="${HOST_DATABASE_URL}" pnpm db:deploy';
+    const fullUp = '"${COMPOSE[@]}" up -d --wait --wait-timeout 300';
+    const fixture = mutateLocal(
+      'local-up-first',
+      [postgresUp, migrate, fullUp].join('\n'),
+      [fullUp, postgresUp, migrate].join('\n'),
+    );
+    const { status, output } = runScriptFixture('local-up-first', fixture);
+    console.log('\n[11] 本地脚本：四服务 up 排在迁移之前（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check('指出完整 up 应在迁移之后', output.includes('完整四服务 up 发生在迁移之后'), output);
+  }
+
+  // ---------- 用例 12：迁移用容器连接串 ----------
+  {
+    const fixture = mutateLocal(
+      'local-container-migrate',
+      'DATABASE_URL="${HOST_DATABASE_URL}" pnpm db:deploy',
+      'DATABASE_URL="postgresql://novel:ci-placeholder@postgres:5432/novel?schema=public" pnpm db:deploy',
+    );
+    const { status, output } = runScriptFixture('local-container-migrate', fixture);
+    console.log('\n[12] 本地脚本：迁移用容器连接串（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check(
+      '指出迁移命令需用宿主机连接串',
+      output.includes('迁移命令用宿主机连接串覆盖 DATABASE_URL'),
+      output,
+    );
+  }
+
+  // ---------- 用例 13：漏掉迁移 ----------
+  {
+    const fixture = mutateLocal(
+      'local-no-migrate',
+      'DATABASE_URL="${HOST_DATABASE_URL}" pnpm db:deploy\n',
+      '',
+    );
+    const { status, output } = runScriptFixture('local-no-migrate', fixture);
+    console.log('\n[13] 本地脚本：漏掉迁移（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check('指出没有 db:deploy', output.includes('完整 up 之前执行过 db:deploy'), output);
+  }
+
+  // ---------- 用例 14：漏掉健康检查 ----------
+  {
+    const fixture = mutateLocal('local-no-health', 'bash scripts/verify-healthchecks.sh\n', '');
+    const { status, output } = runScriptFixture('local-no-health', fixture);
+    console.log('\n[14] 本地脚本：漏掉健康检查（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check(
+      '指出没有调用 verify-healthchecks.sh',
+      output.includes('调用 verify-healthchecks.sh'),
+      output,
+    );
+  }
+
+  // ---------- 用例 15：本地脚本出现 /livez ----------
+  {
+    const fixture = mutateLocal(
+      'local-livez',
+      'bash scripts/verify-healthchecks.sh\n',
+      'curl -fsS http://127.0.0.1:3001/livez\nbash scripts/verify-healthchecks.sh\n',
+    );
+    const { status, output } = runScriptFixture('local-livez', fixture);
+    console.log('\n[15] 本地脚本：出现 /livez（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check('指出不允许 livez', output.includes('livez'), output);
+  }
+
+  // ---------- 用例 16：export 宿主机连接串 ----------
+  {
+    const fixture = mutateLocal(
+      'local-export-host',
+      'trap cleanup EXIT',
+      'trap cleanup EXIT\nexport HOST_DATABASE_URL',
+    );
+    const { status, output } = runScriptFixture('local-export-host', fixture);
+    console.log('\n[16] 本地脚本：export 宿主机连接串（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check('指出宿主机连接串不应被 export', output.includes('没有被 export'), output);
+  }
+
+  // ---------- 用例 17：仓库真实 verify-local.sh ----------
+  {
+    const { status, output } = run(realWorkflow, realLocalScript);
+    console.log('\n[17] 仓库真实 scripts/verify-local.sh（应通过）');
+    check('退出码为 0', status === 0, `实际 status=${status}\n${output}`);
+    check('真实本地脚本通过守卫', output.includes('启动顺序守卫通过'), output);
   }
 } finally {
   rmSync(root, { recursive: true, force: true });
@@ -255,7 +418,7 @@ try {
 
 console.log(`\n结果：通过 ${passed} 项，失败 ${failed} 项。`);
 if (failed > 0) {
-  console.error('CI 启动顺序守卫测试失败。');
+  console.error('启动顺序守卫测试失败。');
   process.exit(1);
 }
-console.log('CI 启动顺序守卫测试全部通过。');
+console.log('启动顺序守卫测试全部通过。');

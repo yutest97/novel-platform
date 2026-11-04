@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * CI 启动顺序守卫（**不需要 Docker**）。
+ * 启动顺序守卫（**不需要 Docker**）。
  *
- * 读取 `.github/workflows/ci.yml`，断言 docker job 的启动顺序不会被改回去：
+ * 同时检查两处：CI 的 docker job 与本地容器验证脚本。
  *
+ * A. `.github/workflows/ci.yml`
  *   1. 在「完整四服务 up --wait」之前，已有一步**只启动 postgres**；
  *   2. 该步之后、完整 up 之前，用**宿主机连接串（127.0.0.1）**执行过 `pnpm db:deploy`；
  *   3. 「验证四个健康检查端点」排在完整 up 之后；
@@ -12,11 +13,20 @@
  *   6. 失败诊断包含 ps 与三个服务的 logs；
  *   7. 全文不出现 `/livez`（不允许用 live 探针绕过 readiness）。
  *
+ * B. `scripts/verify-local.sh`
+ *   1. 完整四服务 up 之前，先**只启动 postgres**；
+ *   2. 用宿主机连接串（127.0.0.1）执行 `pnpm db:deploy`，且该连接串只作用于这条命令
+ *      （容器内的 `DATABASE_URL` 仍走服务名 `postgres:5432`，且不被 export 覆盖）；
+ *   3. 完整 up 发生在迁移之后，健康检查发生在完整 up 之后；
+ *   4. compose 命令使用 bash 数组，避免 `$COMPOSE` 分词；
+ *   5. 不打印口令 / 连接串，清理仍限定 `novel-verify-*`；
+ *   6. 全文不出现 `/livez`。
+ *
  * 为什么需要它：全新数据卷上先 `up --wait` 四个服务时，表还没迁移，
- * Worker 的 queueLoop 会停在 retrying（/healthz 503），CI 会挂到超时。
+ * Worker 的 queueLoop 会停在 retrying（/healthz 503），等待会挂到超时。
  * 顺序一旦被改回去，这个守卫会立刻失败。
  *
- * 用法：node scripts/check-ci-compose-order.mjs [workflow.yml]
+ * 用法：node scripts/check-ci-compose-order.mjs [workflow.yml] [verify-local.sh]
  * 退出码：0 = 全部通过；1 = 有断言失败。
  */
 
@@ -26,7 +36,9 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const defaultWorkflow = resolve(here, '../.github/workflows/ci.yml');
+const defaultLocalScript = resolve(here, 'verify-local.sh');
 const workflowPath = resolve(process.argv[2] ?? defaultWorkflow);
+const localScriptPath = resolve(process.argv[3] ?? defaultLocalScript);
 
 let failed = 0;
 let passed = 0;
@@ -138,8 +150,8 @@ try {
 }
 
 const steps = parseSteps(text);
-console.log(`CI 启动顺序守卫：${workflowPath}`);
-console.log(`解析到 ${String(steps.length)} 个步骤。`);
+console.log(`[1/2] CI 工作流：${workflowPath}`);
+console.log(`      解析到 ${String(steps.length)} 个步骤。`);
 
 if (steps.length === 0) {
   console.error('✗ 没有解析到任何步骤，工作流结构可能已变化。');
@@ -244,14 +256,122 @@ if (recreateStep !== undefined) {
 
 // ---------- 6. 不允许用 live 探针绕过 readiness ----------
 check(
-  '工作流不出现 /livez',
-  !/livez/i.test(text),
+  '工作流不出现 /livez（注释除外）',
+  !/livez/i.test(withoutComments(text)),
   '不允许用 /livez 绕过 readiness：worker 未就绪时必须保持 503',
+);
+
+/* -------------------------------------------------------------------------- */
+/* B. 本地验证脚本 scripts/verify-local.sh                                    */
+/* -------------------------------------------------------------------------- */
+
+let localText;
+try {
+  localText = readFileSync(localScriptPath, 'utf8');
+} catch (error) {
+  console.error(`无法读取本地验证脚本：${localScriptPath}`);
+  console.error(error.message);
+  process.exit(1);
+}
+
+console.log(`\n[2/2] 本地验证脚本：${localScriptPath}`);
+const localLines = commandLines(localText);
+const lineAt = (index) => (index === -1 ? '' : localLines[index]);
+
+const localPostgres = localLines.findIndex((line) => isPostgresOnlyUp(line));
+const localMigrate = localLines.findIndex((line) => line.includes('db:deploy'));
+const localFullUp = localLines.findIndex((line) => isFullStackUp(line));
+const localHealth = localLines.findIndex((line) => line.includes('verify-healthchecks.sh'));
+
+check(
+  'verify-local.sh：完整 up 之前有「只启动 postgres」',
+  localPostgres !== -1,
+  '全新数据卷上先起 web/worker 会因缺表一直 503，必须先只起 postgres',
+);
+check(
+  'verify-local.sh：完整 up 之前执行过 db:deploy',
+  localMigrate !== -1,
+  '未找到 pnpm db:deploy',
+);
+check(
+  'verify-local.sh：先启动 postgres，再执行迁移',
+  localPostgres !== -1 && localMigrate !== -1 && localPostgres < localMigrate,
+  `postgres 在第 ${String(localPostgres + 1)} 条命令，db:deploy 在第 ${String(localMigrate + 1)} 条`,
+);
+check(
+  'verify-local.sh：完整四服务 up 发生在迁移之后',
+  localMigrate !== -1 && localFullUp !== -1 && localMigrate < localFullUp,
+  `db:deploy 在第 ${String(localMigrate + 1)} 条命令，完整 up 在第 ${String(localFullUp + 1)} 条`,
+);
+check(
+  'verify-local.sh：调用 verify-healthchecks.sh',
+  localHealth !== -1,
+  '未找到 scripts/verify-healthchecks.sh',
+);
+check(
+  'verify-local.sh：健康检查排在完整 up 之后',
+  localFullUp !== -1 && localHealth > localFullUp,
+  `完整 up 在第 ${String(localFullUp + 1)} 条命令，健康检查在第 ${String(localHealth + 1)} 条`,
+);
+
+// ---- 连接串分离：容器内用服务名，宿主机只用 127.0.0.1 跑迁移 ----
+const hostUrlLine = localLines.find((line) => line.startsWith('HOST_DATABASE_URL='));
+check(
+  'verify-local.sh：宿主机连接串走 127.0.0.1',
+  hostUrlLine !== undefined && hostUrlLine.includes('127.0.0.1'),
+  hostUrlLine ?? '未找到 HOST_DATABASE_URL=... 定义',
+);
+check(
+  'verify-local.sh：迁移命令用宿主机连接串覆盖 DATABASE_URL',
+  /DATABASE_URL="\$\{HOST_DATABASE_URL\}"|DATABASE_URL="\$HOST_DATABASE_URL"|DATABASE_URL=\$HOST_DATABASE_URL/.test(
+    lineAt(localMigrate),
+  ),
+  `迁移命令应写成 DATABASE_URL="$HOST_DATABASE_URL" pnpm db:deploy，实际：${lineAt(localMigrate)}`,
+);
+const exportedDb = localLines.find((line) => line.startsWith('export DATABASE_URL='));
+check(
+  'verify-local.sh：容器内 DATABASE_URL 仍走服务名 postgres:5432',
+  exportedDb !== undefined && exportedDb.includes('@postgres:5432'),
+  exportedDb ?? '未找到 export DATABASE_URL=...',
+);
+check(
+  'verify-local.sh：宿主机连接串没有被 export（只作用于迁移命令）',
+  !/export\s+HOST_DATABASE_URL/.test(localText),
+  'export 会让后续步骤与 compose 插值也用宿主机串，容器内会连不上',
+);
+
+// ---- 其它安全项 ----
+check(
+  'verify-local.sh：compose 命令用 bash 数组（COMPOSE=(…）',
+  /COMPOSE=\(/.test(localText),
+  '未找到 COMPOSE=( 定义',
+);
+const bareCompose = localLines.filter(
+  (line) => /\$\{COMPOSE\}(?!\[)/.test(line) || /(^|[^\\])\$COMPOSE(?!\[)/.test(line),
+);
+check(
+  'verify-local.sh：没有把 compose 命令当字符串展开',
+  bareCompose.length === 0,
+  bareCompose.join('\n'),
+);
+const leakyEcho = localLines.filter(
+  (line) => /^echo\b/.test(line) && /(POSTGRES_PASSWORD|DATABASE_URL)/.test(line),
+);
+check('verify-local.sh：不打印口令 / 连接串', leakyEcho.length === 0, leakyEcho.join('\n'));
+check(
+  'verify-local.sh：清理仍限定 novel-verify-*',
+  localText.includes('novel-verify-*'),
+  '清理保护被移除：down -v 可能误删其它项目的数据卷',
+);
+check(
+  'verify-local.sh：不出现 /livez（注释除外）',
+  !/livez/i.test(withoutComments(localText)),
+  '不允许用 /livez 绕过 readiness',
 );
 
 console.log(`\n结果：通过 ${passed} 项，失败 ${failed} 项。`);
 if (failed > 0) {
-  console.error('CI 启动顺序守卫失败：docker 启动顺序被改回不安全的形式。');
+  console.error('启动顺序守卫失败：docker 启动顺序或连接串用法被改回不安全的形式。');
   process.exit(1);
 }
-console.log('CI 启动顺序守卫通过。');
+console.log('启动顺序守卫通过。');

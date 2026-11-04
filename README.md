@@ -1062,11 +1062,15 @@ pnpm license:report:dev  # 生成 THIRD_PARTY_LICENSES.dev.md（开发依赖）
 ### 容器与健康检查验证（需要 Docker）
 
 ```bash
-pnpm verify:stack        # 完整流程：compose 校验 → 构建镜像 → 启动 → 健康检查 → 清理
+pnpm verify:stack        # 校验 → 构建 → 只起 postgres → 宿主串迁移 → 起四服务 → 健康检查 → 清理
 pnpm verify:health       # 仅验证四个健康检查端点（服务已在运行时）
 ```
 
-`verify:stack` 与 CI 的 `docker` job 执行**同一套命令**，任一端点失败即以非零状态码退出。
+`verify:stack` 与 CI 的 `docker` job 执行**同一套顺序**（先只起 postgres、用宿主机连接串
+`127.0.0.1` 迁移、再拉起四个服务），任一端点失败即以非零状态码退出。
+它会用**独立的 Compose 项目名与空数据卷**，所以每次都是"全新数据卷首次启动"：
+迁移必须先于 web/worker 启动，否则 Worker 的 queueLoop 停在 retrying、`/healthz` 503，
+`up --wait` 会等到超时。顺序由 `pnpm check:ci-order` 守卫。
 
 ### 登录烟测（容器内真实链路）
 
