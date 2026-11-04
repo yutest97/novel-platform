@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import type { PrismaClient } from '@novel/db';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 import {
@@ -17,8 +18,10 @@ import {
  * 前置：
  * - admin-flow.spec.ts 已创建并改密 `e2e-author`，并写入共享凭据；
  * - 有一个**真实 Worker 进程/容器**连接同一数据库（MODEL_PROVIDER=mock）；
- * - 运行 Playwright 的环境需要 DATABASE_URL（把第 2 章置为 finalized；
- *   REV-02 的终态提示用例会种 failed / cancelled / 已请求取消的任务行）。
+ * - 运行 Playwright 的环境需要 DATABASE_URL，且必须是**宿主机**连接串
+ *   （`127.0.0.1:5432/novel_e2e_<run_id>_<attempt>`）：直连用于把第 2 章置为
+ *   finalized，以及种入 failed / cancelled / 已请求取消的任务行。
+ *   不能用容器内主机名 `postgres`，也不能指向默认 `novel` 库。
  *
  * 覆盖：作品详情入口 → 创建章节 → Mock 生成 → 页面轮询到 succeeded →
  * 候选预览 → 采纳 → 正式版本 1 → 刷新后仍在 → finalized 无生成按钮 →
@@ -56,6 +59,38 @@ async function expectNoCredentials(target: Page): Promise<void> {
   const text = await target.locator('body').innerText();
   expect(text).not.toContain(authorEmail);
   expect(text).not.toContain(authorPassword);
+}
+
+/**
+ * 打开 Playwright 进程直连的数据库。
+ *
+ * 连接串由 CI 以**宿主机**形式注入（`127.0.0.1:5432/novel_e2e_<run_id>_<attempt>`）。
+ * spec 内不猜测 host、不写死密码、不读容器内环境变量，只读 `DATABASE_URL`；
+ * 这里只做两个低成本自检，避免把种子数据写进错误的库：
+ * - 拒绝容器内主机名 `postgres`（Playwright 不在容器网络里）；
+ * - 拒绝默认 `novel` 库（会污染烟测数据与账号上限）。
+ */
+async function openE2EDatabase(): Promise<PrismaClient> {
+  const raw = process.env['DATABASE_URL'];
+  if (raw === undefined || raw.trim() === '') {
+    throw new Error(
+      'E2E 直连数据库需要 DATABASE_URL（宿主机连接串：postgresql://…@127.0.0.1:5432/novel_e2e_<run_id>_<attempt>）',
+    );
+  }
+  const url = new URL(raw);
+  if (url.hostname === 'postgres') {
+    throw new Error(
+      'DATABASE_URL 不能使用容器内主机名 postgres：Playwright 运行在宿主机上，请改为 127.0.0.1',
+    );
+  }
+  const database = url.pathname.replace(/^\//, '');
+  if (database === '' || database === 'novel') {
+    throw new Error(
+      `DATABASE_URL 不能指向默认库 ${database === '' ? '(空)' : database}：E2E 必须使用独立的 novel_e2e_ 库`,
+    );
+  }
+  const { createPrismaClient } = await import('@novel/db');
+  return createPrismaClient({ connectionString: raw });
 }
 
 test.beforeAll(async ({ browser }) => {
@@ -193,12 +228,8 @@ test('7. finalized 章节不显示生成控件', async () => {
   chapter2Id = href?.split('/').pop() ?? '';
   expect(chapter2Id).not.toBe('');
 
-  const databaseUrl = process.env['DATABASE_URL'];
-  if (databaseUrl === undefined || databaseUrl.trim() === '') {
-    throw new Error('finalized 用例需要 DATABASE_URL（用于把第 2 章置为 finalized）');
-  }
-  const { createPrismaClient } = await import('@novel/db');
-  const db = createPrismaClient({ connectionString: databaseUrl });
+  // 宿主机连接串由 CI 注入（见 ci.yml 的 Playwright 步骤 env）；spec 不自造连接串。
+  const db = await openE2EDatabase();
   try {
     await db.chapter.update({ where: { id: chapter2Id }, data: { status: 'finalized' } });
   } finally {
@@ -509,14 +540,10 @@ test('12. 作品目标字数越界时，生成表单默认值收敛到合法区�
  * 触发器），因此能在 Worker 正在运行的前提下把任务钉在指定终态，不依赖执行时序。
  */
 test('13. 终态任务不显示等待提示：失败 / 已取消 / 已请求取消', async () => {
-  const databaseUrl = process.env['DATABASE_URL'];
-  if (databaseUrl === undefined || databaseUrl.trim() === '') {
-    throw new Error('本用例需要 DATABASE_URL（用于种终态任务）');
-  }
+  // 与 finalized 种子共用同一个 helper：只读 DATABASE_URL，不自造连接串。
+  const db = await openE2EDatabase();
   const { createHash } = await import('node:crypto');
-  const { createPrismaClient } = await import('@novel/db');
   const { createChapter } = await import('@novel/workflow');
-  const db = createPrismaClient({ connectionString: databaseUrl });
 
   async function seedChapter(
     authorId: string,

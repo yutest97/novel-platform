@@ -11,7 +11,9 @@
  *   4. E2E 的重建命令**同时包含 web 与 worker**，且只注入容器连接串；
  *   5. E2E 就绪检查**同时**请求 `/api/healthz` 与 `/worker/healthz`；
  *   6. 失败诊断包含 ps 与三个服务的 logs；
- *   7. 全文不出现 `/livez`（不允许用 live 探针绕过 readiness）。
+ *   7. 浏览器 E2E 步骤显式提供**宿主机** `DATABASE_URL`（127.0.0.1 + 本次 run 的
+ *      `novel_e2e_<run_id>_<attempt>`），不得用容器内 `postgres:5432` 或默认 `novel` 库；
+ *   8. 全文不出现 `/livez`（不允许用 live 探针绕过 readiness）。
  *
  * B. `scripts/verify-local.sh`
  *   1. 完整四服务 up 之前，先**只启动 postgres**；
@@ -254,7 +256,48 @@ if (recreateStep !== undefined) {
   }
 }
 
-// ---------- 6. 不允许用 live 探针绕过 readiness ----------
+// ---------- 6. 浏览器 E2E 的宿主机连接串 ----------
+const playwrightStep = steps.find((step) =>
+  commandLines(step.body).some((line) => line.includes('playwright test')),
+);
+check('存在浏览器 E2E 步骤', playwrightStep !== undefined, '未找到 `playwright test` 步骤');
+
+if (playwrightStep !== undefined) {
+  // 只认 step 内 env 的 `DATABASE_URL:`（配置在 test 进程上），不是容器环境变量。
+  const playwrightDbLine = commandLines(playwrightStep.body).find((line) =>
+    line.startsWith('DATABASE_URL:'),
+  );
+  check(
+    '浏览器 E2E 步骤显式设置 DATABASE_URL',
+    playwrightDbLine !== undefined,
+    'Playwright 直连种子库需要宿主机连接串（finalized 章节 / 终态任务种子）',
+  );
+
+  const playwrightDbUrl =
+    playwrightDbLine === undefined ? '' : playwrightDbLine.slice('DATABASE_URL:'.length).trim();
+  check(
+    'Playwright 连接串使用宿主机 127.0.0.1',
+    playwrightDbUrl.includes('127.0.0.1'),
+    playwrightDbUrl === '' ? 'DATABASE_URL 为空' : playwrightDbUrl,
+  );
+  check(
+    'Playwright 连接串指向本次 run 的 novel_e2e_<run_id>_<attempt> 库',
+    playwrightDbUrl.includes('novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}'),
+    '库名必须与 E2E_DB_NAME 完全一致，避免与其它 run/默认库串库',
+  );
+  check(
+    'Playwright 连接串不使用容器内 postgres:5432',
+    !playwrightDbUrl.includes('@postgres:'),
+    `Playwright 运行在宿主机，解析不了容器主机名：${playwrightDbUrl}`,
+  );
+  check(
+    'Playwright 连接串不指向默认 novel 库',
+    !/@127\.0\.0\.1:5432\/novel(\?|$)/.test(playwrightDbUrl),
+    `不允许把种子数据写进默认库：${playwrightDbUrl}`,
+  );
+}
+
+// ---------- 7. 不允许用 live 探针绕过 readiness ----------
 check(
   '工作流不出现 /livez（注释除外）',
   !/livez/i.test(withoutComments(text)),

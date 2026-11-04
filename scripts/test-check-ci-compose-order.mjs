@@ -12,6 +12,10 @@
  *   7. 出现 /livez                             → 失败
  *   8. 失败诊断缺少 logs worker                → 失败
  *   9. 仓库里真实的 ci.yml                     → 通过
+ *  18. Playwright 步骤缺 DATABASE_URL          → 失败
+ *  19. Playwright 用容器内 postgres:5432       → 失败
+ *  20. Playwright 指向默认 novel 库            → 失败
+ *  21. Playwright 使用正确的宿主机串           → 通过
  *
  * B. 本地验证脚本夹具（scripts/verify-local.sh）：
  *  10. 正确顺序                                → 通过
@@ -87,6 +91,10 @@ function runScriptFixture(name, content) {
   return run(realWorkflow, file);
 }
 
+/** Playwright 步骤应使用的宿主机连接串（库名必须与 E2E_DB_NAME 一致）。 */
+const PLAYWRIGHT_DB_URL =
+  'postgresql://novel:ci-placeholder@127.0.0.1:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public';
+
 /** 正确的启动顺序（结构与真实 ci.yml 相同，去掉无关步骤）。 */
 const GOOD = `name: CI
 jobs:
@@ -134,6 +142,13 @@ jobs:
           "\${COMPOSE[@]}" logs web --tail 100 || true
           "\${COMPOSE[@]}" logs worker --tail 100 || true
           "\${COMPOSE[@]}" logs postgres --tail 100 || true
+
+      - name: 浏览器 E2E（真实 Chromium，经 Caddy HTTPS）
+        env:
+          BASE_URL: https://localhost:8443
+          DATABASE_URL: ${PLAYWRIGHT_DB_URL}
+          ADMIN_EMAIL: ci-e2e@example.test
+        run: pnpm --filter @novel/web exec playwright test
 `;
 
 /** 断言替换确实生效，避免夹具静默变成「没改动的正确版本」。 */
@@ -411,6 +426,73 @@ try {
     console.log('\n[17] 仓库真实 scripts/verify-local.sh（应通过）');
     check('退出码为 0', status === 0, `实际 status=${status}\n${output}`);
     check('真实本地脚本通过守卫', output.includes('启动顺序守卫通过'), output);
+  }
+
+  // ---------- 用例 18：Playwright 步骤缺 DATABASE_URL ----------
+  {
+    const fixture = mutate(
+      'playwright-no-db',
+      `          DATABASE_URL: ${PLAYWRIGHT_DB_URL}\n`,
+      '',
+    );
+    const { status, output } = runFixture('playwright-no-db', fixture);
+    console.log('\n[18] Playwright 步骤缺 DATABASE_URL（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check('指出缺少 DATABASE_URL', output.includes('浏览器 E2E 步骤显式设置 DATABASE_URL'), output);
+  }
+
+  // ---------- 用例 19：Playwright 用容器内 postgres:5432 ----------
+  {
+    const fixture = mutate(
+      'playwright-container-url',
+      PLAYWRIGHT_DB_URL,
+      'postgresql://novel:ci-placeholder@postgres:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public',
+    );
+    const { status, output } = runFixture('playwright-container-url', fixture);
+    console.log('\n[19] Playwright 用容器内 postgres:5432（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check(
+      '指出不能用容器主机名 postgres',
+      output.includes('Playwright 连接串不使用容器内 postgres:5432'),
+      output,
+    );
+    check('指出必须用 127.0.0.1', output.includes('Playwright 连接串使用宿主机 127.0.0.1'), output);
+  }
+
+  // ---------- 用例 20：Playwright 指向默认 novel 库 ----------
+  {
+    const fixture = mutate(
+      'playwright-default-db',
+      PLAYWRIGHT_DB_URL,
+      'postgresql://novel:ci-placeholder@127.0.0.1:5432/novel?schema=public',
+    );
+    const { status, output } = runFixture('playwright-default-db', fixture);
+    console.log('\n[20] Playwright 指向默认 novel 库（应失败）');
+    check('退出码为 1', status === 1, `实际 status=${status}\n${output}`);
+    check(
+      '指出库名必须是本次 run 的 E2E 库',
+      output.includes('Playwright 连接串指向本次 run 的 novel_e2e_'),
+      output,
+    );
+    check('指出不允许默认库', output.includes('Playwright 连接串不指向默认 novel 库'), output);
+  }
+
+  // ---------- 用例 21：Playwright 使用正确的宿主机串 ----------
+  {
+    const { status, output } = runFixture('playwright-good', GOOD);
+    console.log('\n[21] Playwright 使用正确的宿主机串（应通过）');
+    check('退出码为 0', status === 0, `实际 status=${status}\n${output}`);
+    check(
+      '宿主机 127.0.0.1 断言通过',
+      output.includes('Playwright 连接串使用宿主机 127.0.0.1'),
+      output,
+    );
+    check('run 级 E2E 库断言通过', output.includes('指向本次 run 的 novel_e2e_'), output);
+    check(
+      '未使用 postgres:5432',
+      output.includes('Playwright 连接串不使用容器内 postgres:5432'),
+      output,
+    );
   }
 } finally {
   rmSync(root, { recursive: true, force: true });

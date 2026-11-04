@@ -374,6 +374,12 @@ jobs:
       - name: 浏览器 E2E（真实 Chromium，经 Caddy HTTPS）
         env:
           BASE_URL: https://localhost:8443
+          # Playwright 进程跑在**宿主机**上，需要直连 E2E 库做数据种子
+          # （finalized 章节、failed / cancelled / 已请求取消的任务行）。
+          # 因此这里必须用宿主机连接串（127.0.0.1），不能用容器内的 postgres:5432，
+          # 也不能指向默认 novel 库。该变量只作用于测试进程，
+          # web / worker 容器的 DATABASE_URL 由 compose 注入，不受此影响。
+          DATABASE_URL: postgresql://novel:ci-placeholder@127.0.0.1:5432/novel_e2e_${{ github.run_id }}_${{ github.run_attempt }}?schema=public
           ADMIN_EMAIL: ${{ steps.e2ecreds.outputs.email }}
           ADMIN_INITIAL_PASSWORD: ${{ steps.e2ecreds.outputs.password }}
         run: pnpm --filter @novel/web exec playwright test

@@ -881,9 +881,14 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 ```bash
 # 需要先有一个干净数据库 + 一次性管理员，并让 web 与 **真实 Worker** 指向同一数据库
 # Worker：DATABASE_URL=… MODEL_PROVIDER=mock node apps/worker/dist/index.js
-# DATABASE_URL 还用于 A1-4A 把第 2 章置为 finalized（仅测试种子）
+#
+# 这里的 DATABASE_URL 是给 **Playwright 进程**用的（宿主机直连，仅测试种子）：
+# 把第 2 章置为 finalized、种入 failed / cancelled / 已请求取消的任务行。
+# - 必须是宿主机地址 127.0.0.1:5432（容器内才用服务名 postgres）；
+# - 必须指向独立的 E2E 库（如 novel_e2e_<run>），不能用默认 novel 库；
+# - 只作用于测试进程，不会改变 web / worker 容器的连接串。
 BASE_URL=https://localhost:8443 \
-DATABASE_URL='postgresql://…' \
+DATABASE_URL='postgresql://novel:密码@127.0.0.1:5432/novel_e2e_local?schema=public' \
 ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
@@ -1172,7 +1177,9 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 重置密码 → 停用/启用 → 账号上限）→
 浏览器 E2E 准备：建独立 E2E 库 + 宿主机串迁移建号 → **同时重建 web 与 worker**
 （容器串 `postgres:5432`），`/api/healthz` 与 `/worker/healthz` 都返回 200 才继续 →
-Playwright → 输出容器状态与日志 → `docker compose down -v --remove-orphans` 清理。
+Playwright（步骤 env 注入**宿主机** `DATABASE_URL`：`127.0.0.1:5432/novel_e2e_<run_id>_<attempt>`，
+只给测试进程做种子，不影响容器）→ 输出容器状态与日志 →
+`docker compose down -v --remove-orphans` 清理。
 
 > 只重建 web 会让 worker 继续消费默认库，E2E 提交的章节任务永远不会被领取，
 > 因此重建命令固定为 `up -d --force-recreate --no-deps --wait web worker`。
