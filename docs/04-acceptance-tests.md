@@ -616,8 +616,24 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 
 | 编号 | 用例 | 预期 | 自动化位置 |
 | --- | --- | --- | --- |
-| AT-WF-95 | 应用内离开保护 | 有未保存修改时，点击「返回章节列表」、浏览器后退、退出登录都会先弹「放弃未保存的修改」；取消后停留原页，正文 / 基线 / 错误提示 / dirty 状态**完全不变**；确认后才执行原离开动作；无修改时直接离开、不弹窗 | `e2e/chapter-workbench.spec.ts` 用例 21/22、`test/chapter-editor.test.ts` |
+| AT-WF-95 | 应用内离开保护 | 有未保存修改时，点击「返回章节列表」、浏览器后退、退出登录都会先弹「放弃未保存的修改」；取消后停留原页，正文 / 基线 / 错误提示 / dirty 状态**完全不变**；确认后才执行原离开动作；无修改时直接离开、不弹窗。三个入口分别由用例 **21**（返回链接）、**22**（后退取消）、**28**（退出登录取消 + 确认）覆盖；确认后的落地页与历史由 **27**（返回链接）、**29**（后退）覆盖 | `e2e/chapter-workbench.spec.ts` 用例 21/22/27/28/29、`test/chapter-editor.test.ts` |
 | AT-WF-96 | `beforeunload` 监听 | 有未保存修改时派发合成 `BeforeUnloadEvent` → `defaultPrevented === true`；放弃草稿后同一事件 `defaultPrevented === false`（只断言事件被阻止，不断言浏览器原生弹窗） | `e2e/chapter-workbench.spec.ts` 用例 23 |
 | AT-WF-97 | 冲突重载确认 | `CHAPTER_VERSION_CONFLICT` 后点「载入最新版本」先弹「载入将替换当前未保存草稿」；取消则草稿、错误、dirty 全保留；确认后草稿替换为最新正文、`baseVersionId` / baseline 更新、dirty 归零；载入期间按钮禁用 | `e2e/chapter-workbench.spec.ts` 用例 24、`test/chapter-editor.test.ts` |
 | AT-WF-98 | 离开保护纯逻辑 | `leaveDecision` / `pendingLeaveFor`（只有 navigate 带地址）/ 三个入口的文案与按钮文案 / `needsReloadConfirmation` | `test/chapter-editor.test.ts` |
 | AT-WF-99 | 测试数 | 全量单测 **721**（716 + 离开保护 5）；浏览器 E2E **91**（87 + 4） | 全量 `pnpm test`、`playwright test` |
+
+### A1-4B-B-REV-02 追加：后退哨兵生命周期
+
+> **根因**：REV-01 只在「编辑器关闭 / 保存成功 / 放弃草稿」时释放哨兵；
+> `draftDirty` 从 true 变 false 但编辑器仍打开（撤销回原文、冲突后载入最新版）时
+> 只移除了 popstate 监听，哨兵留在历史里 —— 第一次后退停在同 URL，
+> 确认离开后还会在历史中留下重复的章节 URL。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-100 | 哨兵生命周期纯逻辑 | `sentinelTransition`：脏→`arm`、脏且已压→`keep`、**干净且已压→`release`**；`backStepsToLeave(armed)` 为 2/1；`hasEarlierEntry(压哨兵前条目数)`；`isSentinelState` 识别自己的 state | `test/chapter-editor.test.ts` |
+| AT-WF-101 | 撤销回干净 | 修改后改回原文 → dirty 显示「无修改」→ 哨兵被释放（`history.state` 不再带标记）→ 后退一次回到章节列表，不停在同 URL | `e2e/chapter-workbench.spec.ts` 用例 25 |
+| AT-WF-102 | 冲突重载后 | `CHAPTER_VERSION_CONFLICT` → 确认「载入最新版本」→ dirty 归零（编辑器仍打开）→ 哨兵释放 → 后退一次即离开 | 用例 26 |
+| AT-WF-103 | 确认离开后历史干净 | dirty → 确认「返回章节列表」→ 后退 #1 回到章节页、后退 #2 回到更早的列表页；若残留哨兵，后退 #2 会停在同 URL 的章节页 | 用例 27 |
+| AT-WF-104 | 退出登录 / 后退确认 | 退出登录：取消后仍登录、停在编辑器、草稿完整；确认后到 `/login`。后退确认：到达真实上一页，且 500ms 观察窗内不出现第二次弹窗 | 用例 28/29 |
+| AT-WF-105 | 测试数 | 全量单测 **725**（721 + 哨兵 4）；浏览器 E2E **96**（91 + 5） | 全量 `pnpm test`、`playwright test` |

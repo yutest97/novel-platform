@@ -11,6 +11,8 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_HUMAN_CONTENT_CHARS,
   MIN_HUMAN_CONTENT_CHARS,
+  SENTINEL_STATE_KEY,
+  backStepsToLeave,
   canEditSelectedVersion,
   countDraftChars,
   draftMetrics,
@@ -18,11 +20,14 @@ import {
   editorMetricsLabel,
   editorTarget,
   isDraftDirty,
+  hasEarlierEntry,
+  isSentinelState,
   leaveConfirmLabel,
   leaveConfirmMessage,
   leaveDecision,
   needsReloadConfirmation,
   pendingLeaveFor,
+  sentinelTransition,
   type VersionOption,
 } from '../src/lib/chapter-editor';
 
@@ -191,5 +196,35 @@ describe('离开保护', () => {
   it('载入最新版本只在有未保存修改时需要确认', () => {
     expect(needsReloadConfirmation(true)).toBe(true);
     expect(needsReloadConfirmation(false)).toBe(false);
+  });
+});
+
+describe('后退哨兵生命周期', () => {
+  it('脏 → 压哨兵；干净 → 释放；其余保持', () => {
+    expect(sentinelTransition(false, true)).toBe('arm');
+    expect(sentinelTransition(true, true)).toBe('keep');
+    // 关键回归点：dirty 从 true 变 false（撤销回原文 / 载入最新版本）必须释放
+    expect(sentinelTransition(true, false)).toBe('release');
+    expect(sentinelTransition(false, false)).toBe('keep');
+  });
+
+  it('已压哨兵时后退要多跨一条', () => {
+    expect(backStepsToLeave(true)).toBe(2);
+    expect(backStepsToLeave(false)).toBe(1);
+  });
+
+  it('只有压栈前存在更早条目时才真的后退', () => {
+    expect(hasEarlierEntry(0)).toBe(false);
+    expect(hasEarlierEntry(1)).toBe(false);
+    expect(hasEarlierEntry(2)).toBe(true);
+    expect(hasEarlierEntry(5)).toBe(true);
+  });
+
+  it('从 history.state 识别自己的哨兵', () => {
+    expect(isSentinelState({ [SENTINEL_STATE_KEY]: true })).toBe(true);
+    expect(isSentinelState({ [SENTINEL_STATE_KEY]: false })).toBe(false);
+    expect(isSentinelState({})).toBe(false);
+    expect(isSentinelState(null)).toBe(false);
+    expect(isSentinelState('x')).toBe(false);
   });
 });

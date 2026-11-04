@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import type { PrismaClient } from '@novel/db';
-import { expect, test, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
 
 import {
   ADMIN_EMAIL,
@@ -1042,4 +1042,192 @@ test('24. 冲突后载入最新版：取消保留草稿，确认替换并归零 
 
   await page.getByTestId('editor-cancel').click();
   await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+});
+
+/* -------------------------------------------------------------------------- */
+/* A1-4B-B-REV-02：后退哨兵生命周期                                           */
+/* -------------------------------------------------------------------------- */
+
+/** 与 `apps/web/src/lib/chapter-editor.ts` 的 `SENTINEL_STATE_KEY` 保持一致。 */
+const SENTINEL_KEY = '__novelChapterEditorGuard';
+
+/** 用独立的 context 打开一个已登录页面，避免上一个用例的历史栈 / 会话污染。 */
+async function newAuthorPage(
+  browser: Browser,
+): Promise<{ readonly context: BrowserContext; readonly page: Page }> {
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const freshPage = await context.newPage();
+  await login(freshPage, authorEmail, authorPassword);
+  return { context, page: freshPage };
+}
+
+/** 从章节列表点进第 1 章（保证历史里有真实的上一页）。 */
+async function openChapterFromList(target: Page): Promise<void> {
+  await target.goto(`/works/${workId}/chapters`);
+  await expect(target.getByTestId('chapter-open').first()).toBeVisible();
+  await target.getByTestId('chapter-open').first().click();
+  await expect(target).toHaveURL(new RegExp(`/works/${workId}/chapters/${chapter1Id}$`));
+  await expect(target.getByTestId('editor-open')).toBeVisible();
+}
+
+/** 等哨兵被真正释放（history.state 不再带标记），避免用 sleep 赌时序。 */
+async function waitSentinelReleased(target: Page): Promise<void> {
+  await target.waitForFunction(
+    (key) => (window.history.state as Record<string, unknown> | null)?.[key] !== true,
+    SENTINEL_KEY,
+  );
+}
+
+test('25. 撤销回原文后 dirty 归零：后退一次即离开，不停在同 URL', async ({ browser }) => {
+  const { context, page: fresh } = await newAuthorPage(browser);
+  try {
+    await openChapterFromList(fresh);
+    await fresh.getByTestId('editor-open').click();
+    const textarea = fresh.getByTestId('editor-textarea');
+    const original = await textarea.inputValue();
+
+    await textarea.fill(`${original}\n临时修改。`);
+    await expect(fresh.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+    await waitForHistoryGuard(fresh);
+
+    // 撤销回原始正文：编辑器仍打开，但 dirty 归零 → 哨兵必须被释放
+    await textarea.fill(original);
+    await expect(fresh.getByTestId('editor-dirty')).toHaveText('无修改');
+    await waitSentinelReleased(fresh);
+
+    // 后退一次就应回到章节列表（哨兵未释放时会停在同 URL 的章节页）
+    await fresh.evaluate(() => window.history.back());
+    await expect(fresh).toHaveURL(new RegExp(`/works/${workId}/chapters$`));
+    await expect(fresh.getByTestId('chapter-list')).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test('26. 冲突后载入最新版 dirty 归零：后退一次即离开', async ({ browser }) => {
+  const { context, page: fresh } = await newAuthorPage(browser);
+  await fresh.route('**/api/works/*/chapters/*/versions', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'CHAPTER_VERSION_CONFLICT', message: '章节版本发生冲突，请刷新后重试' },
+      }),
+    });
+  });
+
+  try {
+    await openChapterFromList(fresh);
+    await fresh.getByTestId('editor-open').click();
+    const textarea = fresh.getByTestId('editor-textarea');
+    await textarea.fill(`${await textarea.inputValue()}\n冲突后重载的草稿。`);
+    await fresh.getByTestId('editor-save').click();
+    await expect(fresh.getByTestId('editor-error')).toContainText('正文已被其他操作更新');
+  } finally {
+    await fresh.unroute('**/api/works/*/chapters/*/versions');
+  }
+
+  try {
+    await fresh.getByTestId('editor-reload').click();
+    await fresh.getByRole('dialog').getByRole('button', { name: '载入最新版本' }).click();
+    await expect(fresh.getByTestId('editor-dirty')).toHaveText('无修改');
+    // 编辑器仍打开：dirty 归零同样要释放哨兵
+    await waitSentinelReleased(fresh);
+
+    await fresh.evaluate(() => window.history.back());
+    await expect(fresh).toHaveURL(new RegExp(`/works/${workId}/chapters$`));
+    await expect(fresh.getByTestId('chapter-list')).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test('27. 确认返回后历史干净：再后退依次回到章节页与更早的列表页', async ({ browser }) => {
+  const { context, page: fresh } = await newAuthorPage(browser);
+  try {
+    await openChapterFromList(fresh);
+    await fresh.getByTestId('editor-open').click();
+    const textarea = fresh.getByTestId('editor-textarea');
+    await textarea.fill(`${await textarea.inputValue()}\n返回后历史检查。`);
+    await expect(fresh.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+    await waitForHistoryGuard(fresh);
+
+    // 确认离开：哨兵必须先被消费，再 push 章节列表
+    await fresh.getByTestId('back-to-chapters').click();
+    await fresh.getByRole('dialog').getByRole('button', { name: '放弃并离开' }).click();
+    await expect(fresh).toHaveURL(new RegExp(`/works/${workId}/chapters$`));
+    await expect(fresh.getByTestId('chapter-list')).toBeVisible();
+    await waitSentinelReleased(fresh);
+
+    // 后退 #1：回到刚才那一章
+    await fresh.evaluate(() => window.history.back());
+    await expect(fresh).toHaveURL(new RegExp(`/works/${workId}/chapters/${chapter1Id}$`));
+    await expect(fresh.getByTestId('chapter-heading')).toContainText('第 1 章');
+
+    // 后退 #2：必须回到更早的列表页；若残留哨兵，这里会停在同 URL 的章节页
+    await fresh.evaluate(() => window.history.back());
+    await expect(fresh).toHaveURL(new RegExp(`/works/${workId}/chapters$`));
+    await expect(fresh.getByTestId('chapter-list')).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test('28. dirty 时退出登录：取消保持登录与草稿，确认才退出', async ({ browser }) => {
+  const { context, page: fresh } = await newAuthorPage(browser);
+  try {
+    await openChapterFromList(fresh);
+    await fresh.getByTestId('editor-open').click();
+    const textarea = fresh.getByTestId('editor-textarea');
+    const typed = `${await textarea.inputValue()}\n退出登录用例的草稿。`;
+    await textarea.fill(typed);
+    await expect(fresh.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+    // 取消：仍登录、停在编辑器、草稿完整
+    await fresh.getByTestId('logout').click();
+    const dialog = fresh.getByRole('dialog');
+    await expect(dialog).toContainText('退出登录');
+    await dialog.getByRole('button', { name: '取消' }).click();
+    expect(fresh.url()).toContain(`/chapters/${chapter1Id}`);
+    await expect(fresh.getByTestId('logout')).toBeVisible();
+    await expect(fresh.getByTestId('editor-textarea')).toHaveValue(typed);
+    await expect(fresh.getByTestId('editor-dirty')).toHaveText('有未保存修改');
+
+    // 确认：退出到登录页
+    await fresh.getByTestId('logout').click();
+    await fresh.getByRole('dialog').getByRole('button', { name: '放弃并退出' }).click();
+    await expect(fresh).toHaveURL(/\/login(\?|$)/);
+  } finally {
+    await context.close();
+  }
+});
+
+test('29. dirty 后退并确认：到达上一页且不会迟到的第二次弹窗', async ({ browser }) => {
+  const { context, page: fresh } = await newAuthorPage(browser);
+  try {
+    await openChapterFromList(fresh);
+    await fresh.getByTestId('editor-open').click();
+    const textarea = fresh.getByTestId('editor-textarea');
+    await textarea.fill(`${await textarea.inputValue()}\n后退确认用例的草稿。`);
+    await waitForHistoryGuard(fresh);
+
+    await fresh.evaluate(() => window.history.back());
+    const dialog = fresh.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: '放弃并返回' }).click();
+
+    // 应回到章节列表（真实上一页），而不是停在章节页
+    await expect(fresh).toHaveURL(new RegExp(`/works/${workId}/chapters$`));
+    await expect(fresh.getByTestId('chapter-list')).toBeVisible();
+
+    // 给"迟到的第二次弹窗"留出观察窗口
+    await fresh.waitForTimeout(500);
+    await expect(fresh.getByRole('dialog')).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
 });

@@ -210,3 +210,56 @@ export function leaveConfirmLabel(pending: PendingLeave): string {
 export function needsReloadConfirmation(dirty: boolean): boolean {
   return dirty;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 后退哨兵生命周期（A1-4B-B-REV-02）                                          */
+/* -------------------------------------------------------------------------- */
+
+/** 压入 `history.state` 的哨兵标记键（E2E 也用它判断哨兵是否已释放）。 */
+export const SENTINEL_STATE_KEY = '__novelChapterEditorGuard';
+
+/** 哨兵是否仍属于我们（未被外部 replace / 清空）。 */
+export function isSentinelState(state: unknown): boolean {
+  if (typeof state !== 'object' || state === null) {
+    return false;
+  }
+  return (state as Record<string, unknown>)[SENTINEL_STATE_KEY] === true;
+}
+
+/** 哨兵动作：压入 / 释放 / 保持现状。 */
+export type SentinelAction = 'arm' | 'release' | 'keep';
+
+/**
+ * 由"当前是否已压哨兵"与"草稿是否脏"推导下一步动作。
+ *
+ * 关键点是 **true → false 必须 release**：仅移除 popstate 监听而不消费哨兵，
+ * 会让第一次后退停在同一 URL（看起来没反应），确认离开后还会把哨兵留在历史里。
+ */
+export function sentinelTransition(armed: boolean, dirty: boolean): SentinelAction {
+  if (dirty) {
+    return armed ? 'keep' : 'arm';
+  }
+  return armed ? 'release' : 'keep';
+}
+
+/**
+ * 后退一次需要跨越的历史条目数。
+ *
+ * 已压哨兵时当前条目是哨兵，真实页面在它下面，因此要退两步；
+ * 未压哨兵时退一步即可。
+ */
+export function backStepsToLeave(armed: boolean): 1 | 2 {
+  return armed ? 2 : 1;
+}
+
+/**
+ * 历史里是否还有更早的真实页面可供后退。
+ *
+ * 传的是**压哨兵之前**记录的 `history.length`（不要用当前值：
+ * 压栈后会多出一条，释放前后也各不相同）。
+ * 为 0（还没来得及记录）或 1（本章是标签页首条）时都没有前页，
+ * 应改为直接导航到章节列表。
+ */
+export function hasEarlierEntry(baseHistoryLength: number): boolean {
+  return baseHistoryLength > 1;
+}

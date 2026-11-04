@@ -67,11 +67,15 @@ import {
   editorErrorNotice,
   editorMetricsLabel,
   editorTarget,
+  SENTINEL_STATE_KEY,
+  backStepsToLeave,
+  hasEarlierEntry,
   isDraftDirty,
   leaveConfirmLabel,
   leaveConfirmMessage,
   needsReloadConfirmation,
   pendingLeaveFor,
+  sentinelTransition,
   type EditorErrorNotice,
   type LeaveKind,
   type PendingLeave,
@@ -128,8 +132,14 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   // 应用内离开保护：Link / 浏览器后退 / 退出登录都不会触发 beforeunload。
   const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
   const [reloadConfirm, setReloadConfirm] = useState(false);
-  const guardArmedRef = useRef(false);
-  const allowPopRef = useRef(false);
+  /** 当前是否压着后退哨兵（0 / 1）。释放必须抵消这次 pushState。 */
+  const sentinelRef = useRef(0);
+  /** 压哨兵**之前**的历史条目数：用来判断前面还有没有真实页面可退。 */
+  const baseHistoryLengthRef = useRef(0);
+  /** 当前的 popstate 监听（释放哨兵时先摘掉，避免自己拦自己）。 */
+  const guardListenerRef = useRef<(() => void) | null>(null);
+  /** 已确认的离开正在执行：期间任何 popstate 都不再弹窗。 */
+  const leavingRef = useRef(false);
 
   const targetInitialized = useRef(false);
   const selectedVersionIdRef = useRef<string | null>(null);
@@ -327,73 +337,120 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [draftDirty]);
 
+  /** 摘掉后退监听（释放哨兵前必须先摘，否则自己压的 back 会被自己拦住）。 */
+  function detachGuard(): void {
+    if (guardListenerRef.current !== null) {
+      window.removeEventListener('popstate', guardListenerRef.current);
+      guardListenerRef.current = null;
+    }
+  }
+
   /**
-   * 浏览器后退拦截：`beforeunload` 不会触发，必须自己压一条哨兵状态。
+   * 后退哨兵：`beforeunload` 对同文档导航不生效，只能压一条历史记录来拦后退。
    *
-   * 用户后退时立即把哨兵压回去（页面停在同一 URL），再弹确认；
-   * 确认后才真正 `history.go(-2)`（跳过哨兵与当前页）。
+   * 生命周期由 `sentinelTransition` 统一定义：
+   * - dirty 且未压 → `arm`（pushState）；
+   * - dirty 且已压 → `keep`；
+   * - **不 dirty 且已压 → `release`**：撤销回原文、载入最新版本后 dirty 归零都在这里兜住。
+   *
+   * 只移除监听而不释放哨兵，第一次后退会停在同 URL（看起来没反应），
+   * 确认离开后还会把哨兵留在历史里，形成重复的章节 URL。
    */
   useEffect(() => {
+    const action = sentinelTransition(sentinelRef.current > 0, draftDirty);
+    if (action === 'release') {
+      releaseSentinel();
+    } else if (action === 'arm') {
+      // 记录压栈前的条目数：1 表示这是标签页里的第一条，前面没有真实页面。
+      baseHistoryLengthRef.current = window.history.length;
+      window.history.pushState({ ...window.history.state, [SENTINEL_STATE_KEY]: true }, '');
+      sentinelRef.current = 1;
+    }
     if (!draftDirty) {
       return;
     }
-    if (!guardArmedRef.current) {
-      window.history.pushState({ ...window.history.state, __novelChapterEditorGuard: true }, '');
-      guardArmedRef.current = true;
-    }
     const onPopState = (): void => {
-      if (allowPopRef.current) {
+      if (leavingRef.current) {
         return;
       }
       // 后退已经发生：先把哨兵补回去，避免直接离开页面
-      window.history.pushState({ ...window.history.state, __novelChapterEditorGuard: true }, '');
-      guardArmedRef.current = true;
+      window.history.pushState({ ...window.history.state, [SENTINEL_STATE_KEY]: true }, '');
+      sentinelRef.current = 1;
       setPendingLeave({ kind: 'back', href: null });
     };
+    guardListenerRef.current = onPopState;
     window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    return () => {
+      detachGuard();
+    };
   }, [draftDirty]);
 
   /**
-   * 吃掉为拦截后退而压入的哨兵（编辑器关闭且**没有**离开页面时调用）。
+   * 消费哨兵：摘掉监听后 back 一次，抵消 arm 时的 pushState。
    *
-   * 不清理的话，作者下次点后退会先回到同一个 URL，需要按两次才有反应。
+   * 不猜测"多久之后应该正常"——这里只负责把历史恢复到只有真实页面的状态；
+   * 需要"先释放再导航"的场景（确认离开）由 `performLeave` 等 popstate 回调再继续。
    */
-  function releaseGuard(): void {
-    if (!guardArmedRef.current) {
+  function releaseSentinel(): void {
+    if (sentinelRef.current === 0) {
       return;
     }
-    guardArmedRef.current = false;
-    allowPopRef.current = true;
+    sentinelRef.current = 0;
+    detachGuard();
     window.history.back();
-    window.setTimeout(() => {
-      allowPopRef.current = false;
-    }, 0);
   }
 
-  /** 执行已经确认过的离开动作。 */
+  /** 执行已经确认过的离开动作（必要时先消费哨兵，再离开）。 */
   function performLeave(pending: PendingLeave): void {
-    if (pending.kind === 'logout') {
-      void logoutAndRedirect(router);
+    if (leavingRef.current) {
       return;
     }
-    if (pending.kind === 'navigate') {
-      if (pending.href !== null) {
-        router.push(pending.href);
+    leavingRef.current = true;
+
+    const baseLength = baseHistoryLengthRef.current;
+    const go = (armed: boolean): void => {
+      if (pending.kind === 'logout') {
+        void logoutAndRedirect(router);
+        return;
       }
-      return;
-    }
-    // 后退：跳过哨兵与当前页；若历史里没有更早的页面（直接打开链接），
-    // 退回到章节列表，避免"确认了却停在原地"。
-    allowPopRef.current = true;
-    const before = window.location.href;
-    window.history.go(-2);
-    window.setTimeout(() => {
-      allowPopRef.current = false;
-      if (window.location.href === before) {
+      if (pending.kind === 'navigate') {
+        if (pending.href !== null) {
+          router.push(pending.href);
+        }
+        return;
+      }
+      // 后退：没有更早的真实页面（直接打开链接）就回落章节列表，
+      // 否则跨过哨兵（若有）+ 当前页，回到真正的上一页。
+      if (!hasEarlierEntry(baseLength)) {
         router.push(`/works/${workId}/chapters`);
+        return;
       }
-    }, 250);
+      window.history.go(-backStepsToLeave(armed));
+    };
+
+    if (sentinelRef.current === 0) {
+      go(false);
+      return;
+    }
+
+    // 已压哨兵：先 back 一次把它消费掉，等 popstate 确认后再执行真正的离开。
+    // 这样 router.push 之后历史里不会再躺着一条同 URL 的哨兵。
+    sentinelRef.current = 0;
+    baseHistoryLengthRef.current = 0;
+    detachGuard();
+    let settled = false;
+    const afterRelease = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      window.removeEventListener('popstate', afterRelease);
+      go(false);
+    };
+    window.addEventListener('popstate', afterRelease);
+    window.history.back();
+    // 兜底：历史被外部替换时不产生 popstate，直接离开而不是卡住。
+    window.setTimeout(afterRelease, 300);
   }
 
   /** 所有应用内离开入口的唯一入口：脏则确认，否则直接离开。 */
@@ -451,7 +508,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     setEditor(null);
     setDraft('');
     setEditorError(null);
-    releaseGuard();
+    releaseSentinel();
   }
 
   async function handleSaveDraft(): Promise<void> {
@@ -474,7 +531,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       setDraft('');
       setClosingEditor(false);
       // 编辑器已关闭且没有离开页面：清掉后退哨兵
-      releaseGuard();
+      releaseSentinel();
       setAdoptionNotice(`已保存正式版本 ${saved.versionNo}`);
       await refreshDetailAndVersions({ selectLatest: true });
       void refreshSession();
@@ -1214,7 +1271,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
             setEditor(null);
             setDraft('');
             setEditorError(null);
-            releaseGuard();
+            releaseSentinel();
           }}
           onCancel={() => setClosingEditor(false)}
         />
