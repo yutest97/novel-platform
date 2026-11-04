@@ -15,6 +15,13 @@ const OPEN_CHAPTER_STATUSES: ReadonlySet<string> = new Set([
   'in_review',
 ]);
 
+/** 生成表单允许的单章目标字数下限（与服务端合同一致）。 */
+export const MIN_CHAPTER_TARGET_WORDS = 2_500;
+/** 生成表单允许的单章目标字数上限。 */
+export const MAX_CHAPTER_TARGET_WORDS = 4_000;
+/** 非法输入时的回落值。 */
+export const DEFAULT_CHAPTER_TARGET_WORDS = 3_000;
+
 export type BadgeTone = 'ok' | 'warn' | 'danger' | 'muted';
 
 export interface StatusBadge {
@@ -89,27 +96,65 @@ export function taskStatusLabel(status: string): string {
   }
 }
 
-/** `current_step` → 中文（未知步骤原样显示，便于发现新增步骤）。 */
+/** `current_step` → 步骤名词（不含「正在」前缀）。 */
+const STEP_NOUNS: Readonly<Record<string, string>> = {
+  assemble_context: '装配设定',
+  plan_chapter: '规划章节',
+  validate_and_freeze_contract: '冻结合同',
+  write_draft: '写正文',
+  validate_draft: '校验正文',
+  persist_candidate: '保存候选',
+};
+
+function stepNoun(step: string): string {
+  return STEP_NOUNS[step] ?? step;
+}
+
+/**
+ * `current_step` → 中文**进行中**文案（未知步骤原样显示，便于发现新增步骤）。
+ *
+ * 只适用于 `queued` / `processing`；终态请用 `taskStepLabelForStatus`。
+ */
 export function taskStepLabel(step: string | null): string | null {
   if (step === null || step === '') {
     return null;
   }
-  switch (step) {
-    case 'assemble_context':
-      return '正在装配设定';
-    case 'plan_chapter':
-      return '正在规划章节';
-    case 'validate_and_freeze_contract':
-      return '正在冻结合同';
-    case 'write_draft':
-      return '正在写正文';
-    case 'validate_draft':
-      return '正在校验正文';
-    case 'persist_candidate':
-      return '正在保存候选';
-    default:
-      return step;
+  const noun = STEP_NOUNS[step];
+  return noun === undefined ? step : `正在${noun}`;
+}
+
+/**
+ * 依任务状态给出步骤文案。
+ *
+ * 终态任务的 `current_step` 会保留最后一次检查点（例如 `persist_candidate`），
+ * 直接复用进行中文案会出现「已完成 · 正在保存候选」这种自相矛盾的展示，
+ * 因此终态统一改成「最后步骤：…」。
+ */
+export function taskStepLabelForStatus(step: string | null, status: string): string | null {
+  if (step === null || step === '') {
+    return null;
   }
+  const noun = stepNoun(step);
+  return shouldPollTask(status) ? `正在${noun}` : `最后步骤：${noun}`;
+}
+
+/**
+ * 把作品的目标字数收敛成生成表单可用的值。
+ *
+ * 小于下限取 2500、大于上限取 4000；合法整数原样返回；
+ * 非有限值或非整数回落为 3000（不静默四舍五入，避免把 3000.5 变成 3001）。
+ */
+export function clampChapterTargetWords(value: number): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    return DEFAULT_CHAPTER_TARGET_WORDS;
+  }
+  if (value < MIN_CHAPTER_TARGET_WORDS) {
+    return MIN_CHAPTER_TARGET_WORDS;
+  }
+  if (value > MAX_CHAPTER_TARGET_WORDS) {
+    return MAX_CHAPTER_TARGET_WORDS;
+  }
+  return value;
 }
 
 /** 是否处于需要轮询的状态。 */

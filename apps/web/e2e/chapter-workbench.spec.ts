@@ -21,7 +21,8 @@ import {
  *
  * 覆盖：作品详情入口 → 创建章节 → Mock 生成 → 页面轮询到 succeeded →
  * 候选预览 → 采纳 → 正式版本 1 → 刷新后仍在 → finalized 无生成按钮 →
- * 后端权限断言 → 390×844 移动端。
+ * 后端权限断言 → 390×844 移动端 →
+ * （REV-01）取消后用相同参数重新生成不复用 requestId → 目标字数默认值收敛。
  */
 
 const screenshotDir = resolve(process.cwd(), '../../docs/screenshots');
@@ -71,7 +72,10 @@ test.beforeAll(async ({ browser }) => {
   await page.getByTestId('work-create-submit').click();
   await expect(page.getByTestId('work-notice')).toContainText('已创建');
 
-  const href = await page.getByTestId('work-card').first().getAttribute('href');
+  // 列表刷新是异步的：按标题定位卡片，避免拿到刷新前的第一张卡
+  const card = page.getByTestId('work-card').filter({ hasText: WORK_TITLE });
+  await expect(card).toHaveCount(1);
+  const href = await card.getAttribute('href');
   workId = href?.split('/').pop() ?? '';
   expect(workId).not.toBe('');
 });
@@ -309,4 +313,172 @@ test('10. 截图与页面不出现口令、邮箱、Cookie 或令牌', async () 
     expect(body).not.toContain(value);
   }
   expect(body).not.toContain('Bearer ');
+});
+
+/* -------------------------------------------------------------------------- */
+/* A1-4A-REV-01：取消后重新生成                                              */
+/* -------------------------------------------------------------------------- */
+
+interface StubTask {
+  readonly id: string;
+  readonly chapterId: string;
+  readonly status: string;
+  readonly currentStep: string | null;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly cancelRequestedAt: string | null;
+  readonly errorCode: string | null;
+  readonly errorMessage: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+function stubTask(id: string, overrides: Partial<StubTask> = {}): StubTask {
+  const now = new Date().toISOString();
+  return {
+    id,
+    chapterId: '',
+    status: 'queued',
+    currentStep: null,
+    attemptCount: 1,
+    maxAttempts: 3,
+    cancelRequestedAt: null,
+    errorCode: null,
+    errorMessage: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+/**
+ * 取消后重新生成：用测试替身把任务钉在 queued/processing，避免 Mock Worker 太快。
+ *
+ * 断言的是幂等不变量：相同表单参数在取消后必须换新的 requestId，
+ * 否则服务端会按 `(work_id, request_id)` 命中旧任务，页面永远看到旧的 cancelled。
+ */
+test('11. 取消生成后用相同参数重新生成：不复用 requestId，显示新任务', async () => {
+  const staleTaskId = randomUUID();
+  const freshTaskId = randomUUID();
+  const generateBodies: { requestId?: string; targetWords?: number }[] = [];
+  const polledTaskIds: string[] = [];
+  let generateCount = 0;
+
+  await page.goto(`/works/${workId}/chapters`);
+  await page.getByTestId('chapter-create-no').fill('4');
+  await page.getByTestId('chapter-create-title').fill('第四章 取消重试');
+  await page.getByTestId('chapter-create-submit').click();
+  await expect(page.getByTestId('chapter-item')).toHaveCount(4);
+  await page.getByTestId('chapter-open').last().click();
+  await expect(page.getByTestId('chapter-heading')).toContainText('第 4 章');
+
+  await page.route('**/api/works/*/chapters/*/generate', async (route) => {
+    generateCount += 1;
+    generateBodies.push(route.request().postDataJSON() as { requestId?: string });
+    const taskId = generateCount === 1 ? staleTaskId : freshTaskId;
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({ task: stubTask(taskId) }),
+    });
+  });
+
+  await page.route('**/api/works/*/generation-tasks/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === 'POST' && path.endsWith('/cancel')) {
+      // 最坏情况：取消接口仍返回 processing + cancelRequestedAt（不是终态）
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          task: stubTask(staleTaskId, {
+            status: 'processing',
+            currentStep: 'write_draft',
+            cancelRequestedAt: new Date().toISOString(),
+          }),
+        }),
+      });
+      return;
+    }
+    const taskId = path.split('/').pop() ?? '';
+    polledTaskIds.push(taskId);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        task: stubTask(taskId, { status: 'processing', currentStep: 'write_draft' }),
+      }),
+    });
+  });
+
+  try {
+    // 第一次生成
+    await page.getByTestId('generate-submit').click();
+    await expect(page.getByTestId('task-cancel')).toBeVisible();
+    await expect(page.getByTestId('task-progress')).toContainText('排队中');
+    expect(generateBodies).toHaveLength(1);
+
+    // 取消：即使返回 processing + cancelRequestedAt，幂等键也必须作废
+    await page.getByTestId('task-cancel').click();
+    await expect(page.getByTestId('task-progress')).toHaveText('尚未提交生成任务');
+    // 取消前的轮询是旧任务，清理后再验证新一轮只跟踪新任务
+    polledTaskIds.length = 0;
+
+    // 用完全相同的参数重新生成
+    await page.getByTestId('generate-submit').click();
+    await expect(page.getByTestId('task-progress')).toContainText('正在写正文', {
+      timeout: 30_000,
+    });
+    await expect(page.getByTestId('task-progress')).not.toContainText('已取消');
+    await expect(page.getByTestId('generate-submit')).toBeDisabled();
+
+    expect(generateBodies).toHaveLength(2);
+    const [first, second] = generateBodies;
+    expect(first?.requestId).toBeTruthy();
+    expect(second?.requestId).toBeTruthy();
+    expect(second?.requestId).not.toBe(first?.requestId);
+    expect(second?.targetWords).toBe(first?.targetWords);
+
+    // 轮询只跟踪新任务
+    expect(polledTaskIds).toContain(freshTaskId);
+    expect(polledTaskIds).not.toContain(staleTaskId);
+
+    // requestId 不出现在 URL / localStorage / sessionStorage
+    const currentRequestId = second?.requestId ?? '';
+    expect(page.url()).not.toContain(currentRequestId);
+    const stored = await page.evaluate(() =>
+      JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }),
+    );
+    expect(stored).not.toContain(currentRequestId);
+    await expectNoCredentials(page);
+  } finally {
+    await page.unroute('**/api/works/*/chapters/*/generate');
+    await page.unroute('**/api/works/*/generation-tasks/**');
+  }
+});
+
+test('12. 作品目标字数越界时，生成表单默认值收敛到合法区间', async () => {
+  await page.goto('/workspace');
+  const title = `目标字数-${randomUUID().slice(0, 8)}`;
+  await page.getByTestId('work-title-input').fill(title);
+  await page.getByTestId('work-words-input').fill('1200');
+  await page.getByTestId('work-create-submit').click();
+  await expect(page.getByTestId('work-notice')).toContainText('已创建');
+
+  const card = page.getByTestId('work-card').filter({ hasText: title });
+  await expect(card).toHaveCount(1);
+  const href = await card.getAttribute('href');
+  const clampedWorkId = href?.split('/').pop() ?? '';
+  expect(clampedWorkId).not.toBe('');
+
+  await page.goto(`/works/${clampedWorkId}/chapters`);
+  await page.getByTestId('chapter-create-no').fill('1');
+  await page.getByTestId('chapter-create-title').fill('第一章 目标字数');
+  await page.getByTestId('chapter-create-submit').click();
+  await page.getByTestId('chapter-open').first().click();
+
+  // 页面展示作品原始目标，生成表单用收敛后的合法默认值
+  await expect(page.getByTestId('chapter-target-words')).toHaveText('1200');
+  await expect(page.getByTestId('generate-target-words')).toHaveValue('2500');
 });

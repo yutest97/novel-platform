@@ -9,6 +9,8 @@
  * - 只读正文用 `pre-wrap` 纯文本渲染，不使用 `dangerouslySetInnerHTML`；
  * - 候选正文只在点击某个候选后才请求，避免一次加载所有长文；
  * - requestId 只存在组件内存（useRef），同一内容重复点击复用同一个 id；
+ *   任务进入终态或**取消成功**后立即作废，下一次生成必定换新 id；
+ * - 目标字数默认值收敛到 2500..4000（页面仍显示作品原始目标）；
  * - 轮询只针对 queued/processing；页面隐藏时暂停，重新可见立即刷新一次；
  * - 不提供人工编辑、human 版本、diff 或版本恢复（A1-4B 起再评估）。
  */
@@ -38,22 +40,22 @@ import {
   type WorkDetail,
 } from '@/lib/api';
 import {
+  MAX_CHAPTER_TARGET_WORDS,
+  MIN_CHAPTER_TARGET_WORDS,
   canGenerateChapter,
   chapterStatusLabel,
+  clampChapterTargetWords,
   displayPlan,
   isTerminalTaskStatus,
   nextPollDelay,
   shouldPollTask,
   taskProgressLabel,
   taskStatusLabel,
-  taskStepLabel,
+  taskStepLabelForStatus,
   versionSourceLabel,
 } from '@/lib/chapter-workbench';
 import { handleSessionError } from '@/lib/session-errors';
 import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
-
-const MIN_TARGET_WORDS = 2_500;
-const MAX_TARGET_WORDS = 4_000;
 
 export default function ChapterWorkbenchPage(): React.ReactElement {
   const router = useRouter();
@@ -150,7 +152,9 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       setDetail(nextDetail);
       setVersions(nextVersions);
       if (!targetInitialized.current) {
-        setTargetWords(String(nextWork.targetWordsPerChapter));
+        // 作品的目标字数可能超出生成表单允许的区间（例如 1200 或 6000），
+        // 表单默认值必须先收敛到合法范围，页面上仍展示作品的原始目标。
+        setTargetWords(String(clampChapterTargetWords(nextWork.targetWordsPerChapter)));
         targetInitialized.current = true;
       }
       setLoadError('');
@@ -271,8 +275,14 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       return;
     }
     const words = Number(targetWords);
-    if (!Number.isInteger(words) || words < MIN_TARGET_WORDS || words > MAX_TARGET_WORDS) {
-      setGenerateError(`目标字数必须是 ${MIN_TARGET_WORDS}..${MAX_TARGET_WORDS} 的整数`);
+    if (
+      !Number.isInteger(words) ||
+      words < MIN_CHAPTER_TARGET_WORDS ||
+      words > MAX_CHAPTER_TARGET_WORDS
+    ) {
+      setGenerateError(
+        `目标字数必须是 ${MIN_CHAPTER_TARGET_WORDS}..${MAX_CHAPTER_TARGET_WORDS} 的整数`,
+      );
       return;
     }
 
@@ -327,6 +337,10 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     setCancelError('');
     try {
       const task = await cancelGenerationTask(workId, latestTask.id);
+      // 取消成功后立刻作废幂等键：即使服务端仍返回 processing + cancelRequestedAt，
+      // 下一次生成也必须使用新的 requestId，否则会命中旧任务而永远看到 cancelled。
+      requestIdRef.current = null;
+      pollDelayRef.current = 1_000;
       setDetail((previous) => (previous === null ? previous : { ...previous, latestTask: task }));
       await refreshDetailAndVersions();
       void refreshSession();
@@ -494,7 +508,10 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                 {latestTask.maxAttempts}
                 {latestTask.currentStep === null
                   ? ''
-                  : ` · ${taskStepLabel(latestTask.currentStep) ?? latestTask.currentStep}`}
+                  : ` · ${
+                      taskStepLabelForStatus(latestTask.currentStep, latestTask.status) ??
+                      latestTask.currentStep
+                    }`}
               </p>
             )}
 
@@ -532,8 +549,8 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                   <input
                     id="generate-target-words"
                     type="number"
-                    min={MIN_TARGET_WORDS}
-                    max={MAX_TARGET_WORDS}
+                    min={MIN_CHAPTER_TARGET_WORDS}
+                    max={MAX_CHAPTER_TARGET_WORDS}
                     step={100}
                     value={targetWords}
                     onChange={(event) => setTargetWords(event.target.value)}

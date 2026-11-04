@@ -6,9 +6,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { ChapterListItem } from '../src/lib/api';
 import {
+  DEFAULT_CHAPTER_TARGET_WORDS,
+  MAX_CHAPTER_TARGET_WORDS,
+  MIN_CHAPTER_TARGET_WORDS,
   canGenerateChapter,
   chapterBadge,
   chapterStatusLabel,
+  clampChapterTargetWords,
   displayPlan,
   isTerminalTaskStatus,
   nextPollDelay,
@@ -16,6 +20,7 @@ import {
   taskProgressLabel,
   taskStatusLabel,
   taskStepLabel,
+  taskStepLabelForStatus,
   versionSourceLabel,
 } from '../src/lib/chapter-workbench';
 
@@ -124,6 +129,71 @@ describe('任务步骤与轮询', () => {
       }),
     ).toBe('正在写正文');
     expect(taskProgressLabel(null)).toBe('尚未提交生成任务');
+  });
+});
+
+describe('目标字数默认值', () => {
+  it('收敛到 2500..4000，非法值回落 3000', () => {
+    expect(clampChapterTargetWords(1200)).toBe(2500);
+    expect(clampChapterTargetWords(2500)).toBe(2500);
+    expect(clampChapterTargetWords(3000)).toBe(3000);
+    expect(clampChapterTargetWords(4000)).toBe(4000);
+    expect(clampChapterTargetWords(6000)).toBe(4000);
+    expect(clampChapterTargetWords(10000)).toBe(4000);
+    expect(clampChapterTargetWords(Number.NaN)).toBe(3000);
+    expect(clampChapterTargetWords(3000.5)).toBe(3000);
+    expect(clampChapterTargetWords(Number.POSITIVE_INFINITY)).toBe(3000);
+  });
+
+  it('常量与生成表单一致', () => {
+    expect(MIN_CHAPTER_TARGET_WORDS).toBe(2500);
+    expect(MAX_CHAPTER_TARGET_WORDS).toBe(4000);
+    expect(DEFAULT_CHAPTER_TARGET_WORDS).toBe(3000);
+    expect(clampChapterTargetWords(MIN_CHAPTER_TARGET_WORDS)).toBe(MIN_CHAPTER_TARGET_WORDS);
+    expect(clampChapterTargetWords(MAX_CHAPTER_TARGET_WORDS)).toBe(MAX_CHAPTER_TARGET_WORDS);
+  });
+});
+
+describe('终态步骤文案', () => {
+  it('进行中才用「正在…」', () => {
+    expect(taskStepLabelForStatus('persist_candidate', 'queued')).toBe('正在保存候选');
+    expect(taskStepLabelForStatus('write_draft', 'processing')).toBe('正在写正文');
+    expect(taskStepLabelForStatus('persist_candidate', 'processing')).toBe('正在保存候选');
+  });
+
+  it('终态改用「最后步骤：…」，不出现「正在」', () => {
+    for (const status of ['succeeded', 'failed', 'cancelled']) {
+      const label = taskStepLabelForStatus('persist_candidate', status);
+      expect(label, status).toBe('最后步骤：保存候选');
+      expect(label, status).not.toContain('正在');
+    }
+    expect(taskStepLabelForStatus('write_draft', 'failed')).toBe('最后步骤：写正文');
+  });
+
+  it('空步骤返回 null；未知步骤原样带前缀', () => {
+    expect(taskStepLabelForStatus(null, 'succeeded')).toBeNull();
+    expect(taskStepLabelForStatus('', 'processing')).toBeNull();
+    expect(taskStepLabelForStatus('future_step', 'processing')).toBe('正在future_step');
+    expect(taskStepLabelForStatus('future_step', 'succeeded')).toBe('最后步骤：future_step');
+  });
+
+  it('终态进度文案只显示任务状态', () => {
+    const base = {
+      id: 't',
+      chapterId: 'c',
+      currentStep: 'persist_candidate',
+      attemptCount: 1,
+      maxAttempts: 3,
+      cancelRequestedAt: null,
+      errorCode: null,
+      errorMessage: null,
+      createdAt: '',
+      updatedAt: '',
+    } as const;
+    expect(taskProgressLabel({ ...base, status: 'succeeded' })).toBe('已完成');
+    expect(taskProgressLabel({ ...base, status: 'failed' })).toBe('生成失败');
+    expect(taskProgressLabel({ ...base, status: 'cancelled' })).toBe('已取消');
+    expect(taskProgressLabel({ ...base, status: 'queued' })).toBe('正在保存候选');
   });
 });
 
