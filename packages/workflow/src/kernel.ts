@@ -18,6 +18,10 @@ export interface WorkflowTaskEnvelope {
   readonly chapterId: string | null;
   readonly requestId: string;
   readonly taskType: string;
+  /** 任务创建时记录的 Provider 名称；Worker 执行前必须与当前配置一致。 */
+  readonly provider: string;
+  /** 任务创建时记录的模型名；Worker 执行前必须与当前 Provider 的默认模型一致。 */
+  readonly model: string;
   readonly input: unknown;
 }
 

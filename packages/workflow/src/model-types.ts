@@ -69,6 +69,14 @@ export interface ModelProvider {
   generateText(input: ModelTextInput): Promise<ModelTextResult>;
 }
 
+/**
+ * Provider 身份（name + defaultModel）。
+ *
+ * Worker 只需这两项做「任务记录 vs 当前配置」预检，不需要完整的生成能力；
+ * 这样测试可以只传一个值对象，不会误构造真实网络客户端。
+ */
+export type ModelProviderIdentity = Pick<ModelProvider, 'name' | 'defaultModel'>;
+
 /** Provider 可用的错误码子集。 */
 export type ModelErrorCode = Extract<
   WorkflowErrorCode,

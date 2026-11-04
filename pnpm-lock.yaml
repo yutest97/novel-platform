@@ -97,6 +97,9 @@ importers:
       '@novel/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@novel/workflow':
+        specifier: workspace:*
+        version: link:../../packages/workflow
     devDependencies:
       '@types/node':
         specifier: 22.20.5

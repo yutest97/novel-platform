@@ -72,6 +72,9 @@ function createTask(
     maxAttempts?: number;
     chapterId?: string | null;
     requestId?: string;
+    /** 预检用例：任务记录刻意写成与 Worker 配置不一致。 */
+    provider?: string;
+    model?: string;
   } = {},
 ) {
   return createGenerationTask(db, {
@@ -81,8 +84,8 @@ function createTask(
     requestId: options.requestId ?? `req-${randomUUID()}`,
     taskType: CHAPTER_DRAFT_TASK_TYPE,
     inputSnapshot: options.input ?? { targetWords: 3000 },
-    provider: 'mock',
-    model: 'mock-model',
+    provider: options.provider ?? 'mock',
+    model: options.model ?? 'mock-model',
     maxAttempts: options.maxAttempts ?? 3,
   });
 }
@@ -91,6 +94,7 @@ function runnerFor(provider: ModelProvider): WorkerRunner {
   const registry = new WorkflowRegistry();
   registry.register(createChapterDraftWorkflow({ db, provider }));
   return new WorkerRunner(db, new WorkflowKernel(registry), {
+    provider,
     workerId: 'chapter-worker',
     leaseMs: 5_000,
     heartbeatIntervalMs: 1_000,
@@ -307,6 +311,39 @@ describe('全链路（MockProvider → Planner → 合同 → Writer → 候选�
     expect(logs.every((log) => log.success)).toBe(true);
     expect(logs.every((log) => log.promptTokens > 0 && log.completionTokens > 0)).toBe(true);
     expect(logs.every((log) => log.provider === 'mock')).toBe(true);
+  });
+});
+
+describe('provider/model 预检（A1-3C）', () => {
+  it('任务模型与 Worker 配置不一致 → failed，不调模型、不写上下文/合同/候选', async () => {
+    const fixture = await newFixture();
+    const { provider, calls } = createChapterProvider(
+      {},
+      { plan: defaultPlannerOutput(fixture), text: longDraft() },
+    );
+    const { task } = await createTask(fixture, { model: 'stale-model', maxAttempts: 5 });
+
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('failed');
+
+    const row = await taskRow(task.id);
+    expect(row.status).toBe('failed');
+    expect(row.errorCode).toBe('TASK_MODEL_CONFIG_MISMATCH');
+    expect(row.errorMessageSanitized).toBe('任务模型配置已变化，请重新提交生成任务');
+    expect(row.attemptCount).toBe(1);
+    expect(row.currentStep).toBeNull();
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+
+    expect(calls.planner).toHaveLength(0);
+    expect(calls.writer).toHaveLength(0);
+    expect(await db.llmCallLog.count({ where: { taskId: task.id } })).toBe(0);
+    expect(await db.taskContext.count({ where: { taskId: task.id } })).toBe(0);
+    expect(await db.chapterContract.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    expect((await chapterRow(fixture.chapterId)).status).toBe('planned');
+
+    // 不可重试：不会回到队列
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('idle');
   });
 });
 

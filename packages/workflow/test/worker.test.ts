@@ -76,6 +76,21 @@ function createTask(requestId = `req-${randomUUID()}`, maxAttempts = 3) {
   });
 }
 
+/** 任务记录刻意写成与 Worker 配置不一致，用于预检用例。 */
+function createTaskWithModel(provider: string, model: string) {
+  return createGenerationTask(db, {
+    authorId,
+    workId,
+    chapterId,
+    requestId: `req-${randomUUID()}`,
+    taskType: 'test.flow',
+    inputSnapshot: { question: '你好' },
+    provider,
+    model,
+    maxAttempts: 5,
+  });
+}
+
 function runnerWith(
   steps: { name: string; run: () => Promise<void> }[],
   options: {
@@ -88,6 +103,8 @@ function runnerWith(
   const registry = new WorkflowRegistry();
   registry.register({ taskType: 'test.flow', steps });
   return new WorkerRunner(db, new WorkflowKernel(registry), {
+    // 与 createTask 写入的 provider/model 保持一致
+    provider: { name: 'mock', defaultModel: 'mock-model' },
     workerId: options.workerId ?? 'worker-a',
     leaseMs: options.leaseMs ?? 5_000,
     ...(options.heartbeatIntervalMs === undefined
@@ -474,5 +491,58 @@ describe('WorkerRunner', () => {
     expect(logs[0]?.stage).toBe('agent:test.echo@1.0.0');
     expect(logs[0]?.success).toBe(true);
     expect(logs[0]?.promptTokens).toBeGreaterThan(0);
+  });
+
+  it('provider 与当前 Worker 不一致 → failed，不执行步骤、不重试', async () => {
+    const run = vi.fn(async () => undefined);
+    const runner = runnerWith([{ name: 'never', run }]);
+    const { task } = await createTaskWithModel('openai-compatible', 'mock-model');
+
+    await expect(runner.runOnce()).resolves.toBe('failed');
+    expect(run).not.toHaveBeenCalled();
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('failed');
+    expect(row.errorCode).toBe('TASK_MODEL_CONFIG_MISMATCH');
+    expect(row.errorMessageSanitized).toBe('任务模型配置已变化，请重新提交生成任务');
+    expect(row.attemptCount).toBe(1);
+    expect(row.currentStep).toBeNull();
+    expect(row.lockedBy).toBeNull();
+    expect(row.leaseUntil).toBeNull();
+    expect(await db.llmCallLog.count({ where: { taskId: task.id } })).toBe(0);
+
+    // 不可重试：不会回到 queued 被再次领取
+    await expect(runner.runOnce()).resolves.toBe('idle');
+  });
+
+  it('model 与当前 Worker 不一致 → failed，不执行步骤、不重试', async () => {
+    const run = vi.fn(async () => undefined);
+    const runner = runnerWith([{ name: 'never', run }]);
+    const { task } = await createTaskWithModel('mock', 'another-model');
+
+    await expect(runner.runOnce()).resolves.toBe('failed');
+    expect(run).not.toHaveBeenCalled();
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('failed');
+    expect(row.errorCode).toBe('TASK_MODEL_CONFIG_MISMATCH');
+    expect(row.attemptCount).toBe(1);
+    expect(row.leaseUntil).toBeNull();
+    expect(await db.llmCallLog.count({ where: { taskId: task.id } })).toBe(0);
+
+    await expect(runner.runOnce()).resolves.toBe('idle');
+  });
+
+  it('配置一致时正常执行（预检不误伤）', async () => {
+    const run = vi.fn(async () => undefined);
+    const runner = runnerWith([{ name: 'only', run }]);
+    const { task } = await createTask();
+
+    await expect(runner.runOnce()).resolves.toBe('succeeded');
+    expect(run).toHaveBeenCalledTimes(1);
+
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(row.status).toBe('succeeded');
+    expect(row.errorCode).toBeNull();
   });
 });

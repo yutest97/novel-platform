@@ -11,8 +11,8 @@ export const DEFAULT_WORKER_PORT = 3001;
 /**
  * 启动 worker 的健康检查 HTTP 服务。
  *
- * M1-A 阶段 worker 不消费任何任务（未接入模型、未建任务表），
- * 仅提供 /healthz 供编排层探活。
+ * 与任务轮询并发运行：`/healthz` 只反映进程与数据库状态，不参与任务领取。
+ * 停止时由进程入口调用 `server.close()` 释放端口。
  */
 export function startHealthServer(
   port: number = readIntEnv(process.env, 'WORKER_PORT', DEFAULT_WORKER_PORT),

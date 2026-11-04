@@ -52,7 +52,9 @@ cp .env.example .env            # .env 已被 .gitignore 排除，切勿提交
 | `ADMIN_INITIAL_PASSWORD` | 初始管理员口令（≥12 字符，不入 Git；首次登录必须改密）               |
 | `AUTH_SESSION_*`         | 会话绝对/空闲有效期（默认 12 小时 / 30 分钟）                        |
 | `APP_ORIGIN`             | 期望站点来源；留空则按请求 Host 同源校验                             |
-| `MODEL_API_KEY`          | 模型密钥。**M1-B1 阶段 worker 不调用模型**，留空即可                 |
+| `MODEL_API_KEY`          | 模型密钥。Mock 模式可留空；OpenAI 兼容模式必须配置                   |
+| `MODEL_PROVIDER`         | `mock`（默认，不联网）/ `openai-compatible`；web 与 worker 必须一致  |
+| `WORKER_*`               | Worker 租约 / 心跳 / 轮询 / 清扫（见 A1-3C 章节，默认值即可）        |
 
 > API Key 的唯一来源是环境变量 / Docker secret，**不入数据库、不入管理页面、不入日志**。
 > 管理员初始口令同样只从环境变量读取，**不入 Git、不入日志、不入数据库明文**。
@@ -719,6 +721,65 @@ runWorkWrite（作品级 advisory lock）
 `test/chapter-workflow.test.ts` +4）；web 包 **159** 个、workflow 包 **172** 个；
 全量单测 **585** 个。
 
+### Worker 常驻运行与后端闭环（A1-3C）
+
+`apps/worker` 不再是健康检查骨架：常驻进程同时提供 `/healthz` 并领取 `chapter.draft` 任务，
+把「HTTP 创建任务 → Worker 生成候选 → HTTP 读取候选 → HTTP 采纳版本」串成真实闭环。
+
+```bash
+# 本地开发（与 web 并行）
+pnpm dev
+# 或只启动 worker
+pnpm --filter @novel/worker dev
+
+# 生产构建与运行
+pnpm build:packages && pnpm --filter @novel/worker build
+node apps/worker/dist/index.js
+# 容器：pnpm compose:up
+```
+
+启动装配（`src/runtime.ts`）：
+
+- Provider 只在启动时构造**一次**，同一个实例既交给 `chapter.draft` 工作流，
+  也交给 `WorkerRunner` 的预检；Provider 选择只来自 `MODEL_PROVIDER`；
+- `WorkflowRegistry` 注册 `chapter.draft`（`createChapterDraftWorkflow({ db, provider })`）；
+- 健康检查 HTTP 服务与轮询循环并发启动，互不阻塞。
+
+| 变量                  | 默认   | 说明                                                       |
+| --------------------- | ------ | ---------------------------------------------------------- |
+| `WORKER_ID`           | 自动   | 可选；缺省 `host:pid:random`，最长 128                     |
+| `WORKER_LEASE_MS`     | 30000  | 租约 100..3600000                                          |
+| `WORKER_HEARTBEAT_MS` | 租约/3 | 可选；显式设置时必须**严格小于** `WORKER_LEASE_MS`         |
+| `WORKER_POLL_MS`      | 1000   | 空队列轮询间隔 1..600000                                   |
+| `WORKER_SWEEP_MS`     | 5000   | 过期租约清扫间隔 1..600000                                 |
+| `WORKER_PORT`         | 3001   | 健康检查端口                                               |
+| `MODEL_PROVIDER`      | mock   | `mock` / `openai-compatible`；web 与 worker 必须使用同一份 |
+
+**provider/model 预检**：`WorkerRunner` 领取任务后、启动心跳与 Kernel 之前，
+比较任务行记录的 `provider` / `model` 与当前 Provider 的 `name` / `defaultModel`：
+
+- 一致 → 正常执行；
+- 不一致 → 非重试失败 `TASK_MODEL_CONFIG_MISMATCH`，安全文案
+  「任务模型配置已变化，请重新提交生成任务」；不启动心跳、不调用 Agent、
+  不写合同/候选，任务直接 `failed`（若此刻已有取消请求，仍按取消优先记 `cancelled`）。
+
+因此**修改 `MODEL_PROVIDER` / `MODEL_NAME` 前应先清空排队任务**；已经创建的任务不会
+被静默换模型重跑。web 与 worker 的 `MODEL_PROVIDER` / `MODEL_NAME` 必须一致，
+compose 已把这两项同时注入两个服务。
+
+**关闭流程**：`SIGTERM` / `SIGINT` → `WorkerRunner.stop()`（不再领取新任务，
+当前任务完成）→ 关闭健康检查端口 → 等待轮询退出 → `prisma.$disconnect()` → 退出码 0；
+总时限 15 秒，超时强制退出（未完成任务的租约由其它 Worker 回收）。
+
+**异常**：未捕获异常 / 未处理的 Promise 拒绝只打印稳定错误码并退出码 1；
+启动配置错误（`WorkerConfigError` / `ModelProviderError`）只打印字段与固定文案。
+任何日志都不含 prompt、正文、API Key、任务快照或原始异常消息。
+
+**测试**：A1-3C 新增 32 个（worker 配置/运行时/健康检查 27、workflow 预检 4、
+web 后端 e2e 1）；全量单测 **617** 个（web 160 / workflow 176 / worker 29 /
+shared 15 / db 10 / auth 95 / works 132）。真实模型仍需人工 smoke；
+CI 只使用 MockProvider / fake fetch，不联网。
+
 ### 浏览器 E2E（Playwright Chromium）
 
 ```bash
@@ -865,8 +926,9 @@ pnpm license:report:dev  # 生成 THIRD_PARTY_LICENSES.dev.md（开发依赖）
 > `@novel/auth` 的 `dist` 产物（workspace 依赖以 `dist` 为入口）。因此必须**先执行
 > `pnpm build:packages`**，再执行 lint / typecheck / test。干净克隆后尤其要注意。
 
-> **数据库集成测试**：`packages/auth` 与 `apps/web` 的认证测试直接连接**真实
-> PostgreSQL**（不使用 mock 替代数据库），因此运行 `pnpm test` 前必须：
+> **数据库集成测试**：`packages/auth`、`packages/works`、`packages/workflow`、`apps/web`
+> 与 `apps/worker`（健康检查）的集成测试直接连接**真实 PostgreSQL**
+> （不使用 mock 替代数据库），因此运行 `pnpm test` 前必须：
 >
 > ```bash
 > export DATABASE_URL='postgresql://novel:密码@127.0.0.1:5432/novel?schema=public'

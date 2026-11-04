@@ -57,9 +57,12 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql://novel:change-me-local-only@postgres:5432/novel?schema=public}
       WEB_PORT: ${WEB_PORT:-3000}
+      # 与 worker 必须使用同一份模型配置：web 只把 provider/model 名称写进任务行。
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-}
       MODEL_NAME: ${MODEL_NAME:-}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_TIMEOUT_MS: ${MODEL_TIMEOUT_MS:-60000}
       # ---------- 认证（M1-B1） ----------
       # 会话与 Cookie 策略；默认值为安全默认（Secure + HttpOnly + Lax）。
       AUTH_SESSION_ABSOLUTE_HOURS: ${AUTH_SESSION_ABSOLUTE_HOURS:-12}
@@ -97,9 +100,19 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: ${DATABASE_URL:-postgresql://novel:change-me-local-only@postgres:5432/novel?schema=public}
       WORKER_PORT: ${WORKER_PORT:-3001}
+      # Worker 常驻轮询（A1-3C）。心跳必须小于租约；非法配置启动即失败。
+      WORKER_ID: ${WORKER_ID:-}
+      WORKER_LEASE_MS: ${WORKER_LEASE_MS:-30000}
+      WORKER_HEARTBEAT_MS: ${WORKER_HEARTBEAT_MS:-}
+      WORKER_POLL_MS: ${WORKER_POLL_MS:-1000}
+      WORKER_SWEEP_MS: ${WORKER_SWEEP_MS:-5000}
+      # 必须与 web 使用同一份模型配置，否则任务会被预检判为
+      # TASK_MODEL_CONFIG_MISMATCH（不重试、需作者重新提交）。
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-}
       MODEL_NAME: ${MODEL_NAME:-}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_TIMEOUT_MS: ${MODEL_TIMEOUT_MS:-60000}
     ports:
       - '127.0.0.1:${WORKER_PORT:-3001}:3001'
     healthcheck:

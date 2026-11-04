@@ -27,6 +27,8 @@ const task: WorkflowTaskEnvelope = {
   chapterId: null,
   requestId: 'req-1',
   taskType: 'test.flow',
+  provider: 'mock',
+  model: 'mock-model',
   input: { value: 1 },
 };
 

@@ -14,7 +14,9 @@
 export {
   NonRetryableTaskError,
   RetryableTaskError,
+  TASK_MODEL_CONFIG_MISMATCH_MESSAGE,
   TaskLeaseLostError,
+  TaskModelConfigMismatchError,
   WorkflowError,
   isRetryableError,
   sanitizeTaskError,
@@ -40,6 +42,7 @@ export {
   type ModelJsonResult,
   type ModelMessage,
   type ModelProvider,
+  type ModelProviderIdentity,
   type ModelTextInput,
   type ModelTextResult,
   type ModelUsage,

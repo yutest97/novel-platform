@@ -1,10 +1,10 @@
-# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A / A1-3B）
+# 08 工作流与 Agent（A1-1 / A1-2 / A1-3A / A1-3B / A1-3C）
 
-- 版本：v1.3
+- 版本：v1.4
 - 日期：2026-11-04
-- 对应代码：`packages/workflow`、`apps/web/app/api/works/**`
+- 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
-  `20261104030000_a1_chapter_versions`（A1-3B 无新增迁移）
+  `20261104030000_a1_chapter_versions`（A1-3B / A1-3C 均无新增迁移）
 
 ---
 
@@ -21,7 +21,7 @@
 
 ---
 
-## 2. A1-1 / A1-2 / A1-3A / A1-3B 范围
+## 2. A1-1 / A1-2 / A1-3A / A1-3B / A1-3C 范围
 
 **A1-1 交付**：确定性工作流内核、Provider 抽象、Agent 运行基础设施、
 PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张基础表。
@@ -38,23 +38,37 @@ PostgreSQL 任务队列（领取/租约/心跳/重试/取消/幂等）、四张�
 作者可以创建章节、提交生成任务、轮询任务状态、取消任务、读取候选并采纳。
 **没有章节 UI / 编辑器 / `human` 版本 / 版本恢复 / diff**，也不启动 Worker 常驻循环。
 
-**不交付**：章节生成 API、章节编辑器 UI、候选采纳、`chapter_versions`、
+**A1-3C 交付**：`apps/worker` 常驻进程真正消费任务。
+Worker 启动时只构造一次 Provider、注册 `chapter.draft`、并发启动健康检查与轮询；
+领取任务后先做 provider/model 预检（不一致 → 不可重试的
+`TASK_MODEL_CONFIG_MISMATCH`），再进入 Kernel；SIGTERM / SIGINT 优雅关闭。
+后端端到端测试覆盖「API 创建任务 → Worker 生成候选 → API 读取候选 → API 采纳版本」。
+仍然**没有章节 UI**。
+
+**不交付**：章节编辑器 UI、`human` 版本、版本恢复 / diff、
 Reviewer/Continuity/Fact、RAG/图数据库、资源流水、多人功能。
-A1-3 才做采纳、正式版本与章节工作台。
+A1-4 才做章节工作台。
 
 ---
 
 ## 3. 组件与调用关系
 
 ```
-WorkerRunner (apps/worker 未来接入)
-  ├─ sweepExpiredTasks      回收过期租约
-  ├─ claimNextTask          FOR UPDATE SKIP LOCKED
-  ├─ heartbeatTask          定时续租（失败 → abort）
-  └─ WorkflowKernel
-        └─ WorkflowDefinition（固定步骤）
-              └─ AgentRunner（可选）
-                    └─ ModelProvider（Mock / OpenAI 兼容）
+apps/worker（A1-3C 常驻进程）
+  ├─ /healthz                与轮询并发，停止时释放端口
+  └─ WorkerRunner
+        ├─ sweepExpiredTasks      回收过期租约
+        ├─ claimNextTask          FOR UPDATE SKIP LOCKED
+        ├─ provider/model 预检     与当前 Provider 身份比对
+        ├─ heartbeatTask          定时续租（失败 → abort）
+        └─ WorkflowKernel
+              └─ WorkflowDefinition（固定步骤）
+                    └─ AgentRunner（可选）
+                          └─ ModelProvider（Mock / OpenAI 兼容）
+
+Provider 只在进程启动时构造一次：同一个实例
+  ├─ 交给 createChapterDraftWorkflow（实际生成）
+  └─ 交给 WorkerRunner（预检 name / defaultModel）
 ```
 
 - Kernel 不碰数据库：进度、取消、租约由 Worker 以回调注入；
@@ -221,6 +235,8 @@ interface AgentDefinition {
   不能接受请求体里的作者字段。
 - **日志**：只允许 taskId / taskType / status / errorCode 等定位字段；
   禁止 input_snapshot、prompt、正文、模型原始错误、API Key。
+- **模型一致性**：任务行记录的 provider/model 必须与 Worker 当前配置一致；
+  不一致直接 `TASK_MODEL_CONFIG_MISMATCH`（不可重试），禁止静默换模型执行。
 - **不落库**：API Key、完整 prompt、正文、响应正文。
 
 ---
@@ -596,11 +612,129 @@ HTTP 层只做四件事：**会话与 Origin 校验 → 请求体白名单 → �
 
 ---
 
-## 15. A1-4 预告（不在本轮）
+## 15. A1-3C：Worker 常驻运行与后端闭环
+
+### 15.1 启动装配
+
+`apps/worker/src/index.ts` 的顺序固定：
+
+```
+读取 Worker 运行配置（非法 → 安全错误 + 退出码 1）
+  → 构造 Provider（唯一一次）+ WorkflowRegistry
+  → 注册 chapter.draft（createChapterDraftWorkflow({ db, provider })）
+  → 启动 /healthz HTTP 服务
+  → 并发启动 WorkerRunner.start()
+```
+
+- `apps/worker/src/config.ts`：只读环境变量，纯函数、可单测；
+- `apps/worker/src/runtime.ts`：`createWorkerRuntime(db, env)` 负责装配，不监听端口、
+  不连数据库；测试可注入 Provider 工厂验证"只构造一次"；
+- `apps/worker/src/index.ts`：进程生命周期（启动 / 信号 / 异常）。
+
+### 15.2 运行配置
+
+| 变量                  | 默认   | 校验                                             |
+| --------------------- | ------ | ------------------------------------------------ |
+| `WORKER_ID`           | 自动   | 可选；1..128 字符；空白视为未设置                |
+| `WORKER_LEASE_MS`     | 30000  | 100..3600000 的整数                              |
+| `WORKER_HEARTBEAT_MS` | 租约/3 | 1..600000；显式设置时必须**严格小于**租约        |
+| `WORKER_POLL_MS`      | 1000   | 1..600000 的整数                                 |
+| `WORKER_SWEEP_MS`     | 5000   | 1..600000 的整数                                 |
+| `WORKER_PORT`         | 3001   | 1..65535 的整数                                  |
+| `MODEL_PROVIDER`      | mock   | `mock` / `openai-compatible`（web 必须同值）     |
+
+只接受十进制整数：`1.5`、`1e3`、空串以外的非数字写法一律拒绝。
+错误只含字段名与范围，不回显同环境的其它变量（包括 `MODEL_API_KEY`、`DATABASE_URL`）。
+
+### 15.3 provider/model 预检
+
+`claimNextTask` 之后、启动 heartbeat / Kernel 之前：
+
+```
+task.provider === provider.name
+且 task.model === provider.defaultModel ?
+  ├─ 是 → 正常执行（心跳 → Kernel 固定 6 步）
+  └─ 否 → failTask(retryable=false, TASK_MODEL_CONFIG_MISMATCH)
+          不启动心跳、不调用 Agent、不写合同/候选/上下文
+          返回 failed（若已有取消请求，仍按取消优先返回 cancelled）
+```
+
+- 错误码：`TASK_MODEL_CONFIG_MISMATCH`（不可重试）；
+  它只出现在任务行 / 任务摘要（`errorCode` + 安全 `errorMessage`），
+  不是 HTTP 路由错误码，不会作为 API 的 4xx 响应返回；
+- 安全文案：**任务模型配置已变化，请重新提交生成任务**；
+- 不允许"静默用当前模型重跑"：换模型会改变产物，必须由作者重新提交；
+- 预检只比较 `name / defaultModel`，不读取也不记录 Key 或 prompt；
+- 任务信封 `WorkflowTaskEnvelope` 新增 `provider` / `model` 两个字段，
+  由 Worker 从任务行填充，Kernel 只透传。
+
+### 15.4 关闭与异常
+
+**SIGTERM / SIGINT**：
+
+```
+WorkerRunner.stop()（不再领取；当前任务执行完）
+  → server.close()（健康检查端口释放）
+  → 等待 start() 循环退出
+  → disconnectPrisma()
+  → process.exit(0)
+```
+
+总时限 15 秒；超时强制退出（未完成任务的租约由其它 Worker 回收，语义与进程崩溃一致）。
+
+**未捕获异常 / 未处理的 Promise 拒绝**：只打印稳定错误码（`WorkflowError.code` 或
+`WORKFLOW_INTERNAL_ERROR`）并退出码 1；启动配置错误只打印字段与固定文案。
+任何路径都不打印原始异常消息（可能含连接串）、prompt、正文或任务快照。
+
+### 15.5 后端端到端测试
+
+`apps/web/test/chapter-backend-e2e.test.ts`，真实 PostgreSQL + MockProvider：
+
+```
+POST /chapters                                  创建章节
+POST /chapters/:id/generate                    创建 chapter.draft 任务（provider=mock/model=mock-model）
+WorkerRunner.runOnce()                         领取 → 预检 → Planner → 合同 → Writer → 候选
+GET  /generation-tasks/:taskId                 轮询到 succeeded
+GET  /chapters/:chapterId                      latestTask=succeeded + 候选摘要
+GET  .../candidates/:candidateId               正文 = DRAFT（≥1200 字）
+（持有作品锁）POST 采纳 + POST 创建章节          两个写操作都阻塞 → 证明共用同一把 work lock
+POST .../adopt                                 201，versionNo=1，chapter in_review
+再次 POST .../adopt                            200，deduplicated=true，版本数仍为 1
+```
+
+- 候选正文与正式版本逐字节一致，`source='ai'`、`source_candidate_id` 指向候选；
+- `llm_call_logs` 恰好两条（planner / writer），无正文；
+- 结束时该作品无 `queued / processing` 残留。
+
+### 15.6 安全边界
+
+- Worker 不监听业务 HTTP 请求、不接收请求正文，只提供 `/healthz`；
+- 任务快照 / prompt / 正文 / Key 不写日志；
+- Agent 调用日志仍只写 token / 延迟 / 成功标志 / 稳定错误码；
+- 管理员不是作者，仍无任务执行入口；没有新增公开执行接口；
+- `llm_call_logs` 与 `task_contexts` 只由 Worker 内部写，HTTP 层不暴露。
+
+### 15.7 健康检查
+
+- `/healthz` 结构不变：`service / version / stage / status / components / uptimeSeconds`；
+- 组件固定为 `worker`（恒 `ok`）与 `database`（探测结果）；
+- 数据库不可用 → 整体 `error` + HTTP 503，`detail` 只保留 Prisma 错误首行，不含连接串；
+- 停止信号后端口释放，旧连接不会挂住进程；
+- compose 的 worker healthcheck 与 Caddy `/worker/healthz` 行为不变。
+
+### 15.8 测试
+
+A1-3C 新增 32 个：worker 27（配置 19 / 运行时 5 / 健康检查 5，其中 2 个为既有状态映射）、
+workflow 4（预检 3 + 章节流水线 1）、web 后端 e2e 1。
+全量单测 **617**（web 160 / workflow 176 / worker 29 / shared 15 / db 10 / auth 95 / works 132）；
+浏览器 E2E 仍为 **67**，本阶段未改 UI。
+
+---
+
+## 16. A1-4 预告（不在本轮）
 
 - 章节工作台（列表 / 正文阅读 / 候选查看与采纳按钮 / 任务轮询）；
 - 正式版本读取接口与版本列表；
 - 人工修订（`source='human'`）；
 - 重新生成与差异对比；
-- `apps/worker` 常驻循环接入部署；
 - 仍不接 Reviewer / RAG。

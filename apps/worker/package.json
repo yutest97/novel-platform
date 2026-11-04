@@ -2,7 +2,7 @@
   "name": "@novel/worker",
   "version": "0.1.0",
   "private": true,
-  "description": "后台任务 Worker（M1-A 阶段仅骨架与健康检查）",
+  "description": "后台任务 Worker：常驻轮询、chapter.draft 执行与健康检查（A1-3C）",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@novel/db": "workspace:*",
-    "@novel/shared": "workspace:*"
+    "@novel/shared": "workspace:*",
+    "@novel/workflow": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

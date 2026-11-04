@@ -25,7 +25,11 @@ export type WorkflowErrorCode =
   | 'MODEL_TIMEOUT'
   | 'MODEL_ABORTED'
   | 'MODEL_HTTP_ERROR'
-  | 'MODEL_INVALID_RESPONSE';
+  | 'MODEL_INVALID_RESPONSE'
+  | 'TASK_MODEL_CONFIG_MISMATCH';
+
+/** 任务记录的 provider/model 与 Worker 当前配置不一致时的安全文案。 */
+export const TASK_MODEL_CONFIG_MISMATCH_MESSAGE = '任务模型配置已变化，请重新提交生成任务';
 
 /** 工作流基础错误。 */
 export class WorkflowError extends Error {
@@ -66,6 +70,19 @@ export class TaskLeaseLostError extends WorkflowError {
   constructor() {
     super('TASK_LEASE_LOST', '任务租约已失效', { retryable: false });
     this.name = 'TaskLeaseLostError';
+  }
+}
+
+/**
+ * 任务创建时记录的 provider/model 与 Worker 当前配置不一致。
+ *
+ * 不重试：换模型重跑会静默改变产物，必须让作者重新提交；
+ * 文案固定，不含模型名、Key、prompt 或任务快照。
+ */
+export class TaskModelConfigMismatchError extends WorkflowError {
+  constructor() {
+    super('TASK_MODEL_CONFIG_MISMATCH', TASK_MODEL_CONFIG_MISMATCH_MESSAGE, { retryable: false });
+    this.name = 'TaskModelConfigMismatchError';
   }
 }
 

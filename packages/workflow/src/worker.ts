@@ -4,9 +4,10 @@
  * 一个轮询周期：
  *   1. 回收过期租约（取消优先 → 次数用尽判失败 → 其余重新排队）；
  *   2. `FOR UPDATE SKIP LOCKED` 领取一个 queued 任务；
- *   3. 启动心跳定时器（续租失败立即 abort，停止后续步骤）；
- *   4. 交给 WorkflowKernel 按固定步骤执行，每步写 current_step；
- *   5. 完成 / 重试 / 失败 / 取消四选一，全部带 `locked_by` fencing。
+ *   3. 预检任务记录的 provider/model 与当前配置是否一致（不一致直接 failed）；
+ *   4. 启动心跳定时器（续租失败立即 abort，停止后续步骤）；
+ *   5. 交给 WorkflowKernel 按固定步骤执行，每步写 current_step；
+ *   6. 完成 / 重试 / 失败 / 取消四选一，全部带 `locked_by` fencing。
  *      成功与取消共用一个终态入口：`cancel_requested_at` 在同一条 UPDATE 里
  *      原子判断，取消优先于成功与失败（含可重试错误）。
  *
@@ -22,8 +23,14 @@ import { hostname } from 'node:os';
 
 import type { PrismaClient } from '@novel/db';
 
-import { sanitizeTaskError, TaskLeaseLostError } from './errors.js';
+import {
+  sanitizeTaskError,
+  TaskLeaseLostError,
+  TaskModelConfigMismatchError,
+  type SanitizedTaskError,
+} from './errors.js';
 import type { WorkflowKernel } from './kernel.js';
+import type { ModelProviderIdentity } from './model-types.js';
 import {
   claimNextTask,
   completeTask,
@@ -59,6 +66,13 @@ const consoleLogger: WorkerLogger = {
 };
 
 export interface WorkerRunnerOptions {
+  /**
+   * 当前 Worker 的 Provider 身份。
+   *
+   * 预检用它和任务行上的 `provider / model` 比对：不一致的任务直接 failed
+   * （`TASK_MODEL_CONFIG_MISMATCH`，不可重试），绝不静默换模型执行。
+   */
+  readonly provider: ModelProviderIdentity;
   readonly workerId?: string;
   readonly leaseMs?: number;
   /** 默认 leaseMs/3。 */
@@ -95,12 +109,13 @@ export class WorkerRunner {
   private readonly sweepIntervalMs: number;
   private readonly logger: WorkerLogger;
   private readonly now: () => number;
+  private readonly provider: ModelProviderIdentity;
 
   private stopped = false;
   private wake: (() => void) | null = null;
   private lastSweepAt = 0;
 
-  constructor(db: PrismaClient, kernel: WorkflowKernel, options: WorkerRunnerOptions = {}) {
+  constructor(db: PrismaClient, kernel: WorkflowKernel, options: WorkerRunnerOptions) {
     this.db = db;
     this.kernel = kernel;
     this.workerId = options.workerId ?? defaultWorkerId();
@@ -122,6 +137,10 @@ export class WorkerRunner {
     );
     this.logger = options.logger ?? consoleLogger;
     this.now = options.now ?? (() => Date.now());
+    this.provider = options.provider;
+    if (this.provider.name.trim() === '' || this.provider.defaultModel.trim() === '') {
+      throw new Error('WorkerRunner 需要非空的 provider.name / provider.defaultModel');
+    }
   }
 
   /** 当前 Worker 标识（测试断言用）。 */
@@ -142,6 +161,14 @@ export class WorkerRunner {
     }
 
     this.logger.info('task claimed', { taskId: task.id, taskType: task.taskType });
+
+    // 预检：任务创建时记录的 provider/model 必须与当前 Worker 配置一致。
+    // 在启动心跳与 Kernel 之前完成 —— 不一致时不调 Agent、不写合同/候选。
+    const mismatch = this.checkTaskModelConfig(task);
+    if (mismatch !== null) {
+      return this.failModelConfigMismatch(task, mismatch);
+    }
+
     return this.executeTask(task);
   }
 
@@ -180,6 +207,47 @@ export class WorkerRunner {
         requeued: result.requeued,
       });
     }
+  }
+
+  /** 返回 null 表示一致；否则返回可直接落库的安全错误。 */
+  private checkTaskModelConfig(task: GenerationTaskView): SanitizedTaskError | null {
+    if (task.provider === this.provider.name && task.model === this.provider.defaultModel) {
+      return null;
+    }
+    return sanitizeTaskError(new TaskModelConfigMismatchError());
+  }
+
+  /**
+   * 模型配置不一致：直接判失败，不启动心跳、不进入 Kernel。
+   *
+   * `failTask` 内部仍保留「取消优先」语义：若此刻已有取消请求，
+   * 结果为 `cancelled` 而不是 `failed`。
+   */
+  private async failModelConfigMismatch(
+    task: GenerationTaskView,
+    sanitized: SanitizedTaskError,
+  ): Promise<WorkerRunOutcome> {
+    const status = await failTask(this.db, {
+      taskId: task.id,
+      workerId: this.workerId,
+      errorCode: sanitized.code,
+      message: sanitized.message,
+      retryable: false,
+    });
+    if (status === 'lost') {
+      this.logger.warn('task lease lost while rejecting model config', { taskId: task.id });
+      return 'lease-lost';
+    }
+    if (status === 'cancelled') {
+      this.logger.info('task cancelled', { taskId: task.id, taskType: task.taskType });
+      return 'cancelled';
+    }
+    this.logger.warn('task model config mismatch', {
+      taskId: task.id,
+      taskType: task.taskType,
+      errorCode: sanitized.code,
+    });
+    return 'failed';
   }
 
   private async executeTask(task: GenerationTaskView): Promise<WorkerRunOutcome> {
@@ -230,6 +298,8 @@ export class WorkerRunner {
           chapterId: task.chapterId,
           requestId: task.requestId,
           taskType: task.taskType,
+          provider: task.provider,
+          model: task.model,
           input: task.inputSnapshot,
         },
         {

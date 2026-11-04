@@ -80,6 +80,15 @@ export class OpenAICompatibleProvider implements ModelProvider {
     return this.config.model;
   }
 
+  /**
+   * 只序列化身份信息。
+   *
+   * 防止误用 `JSON.stringify(provider)` / 结构化日志时把 API Key 带进日志或错误。
+   */
+  toJSON(): { name: string; defaultModel: string } {
+    return { name: this.name, defaultModel: this.defaultModel };
+  }
+
   constructor(config: OpenAICompatibleConfig) {
     const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : '';
     if (baseUrl === '' || typeof config.apiKey !== 'string' || config.apiKey.trim() === '') {

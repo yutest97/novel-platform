@@ -1,0 +1,68 @@
+/**
+ * Worker 运行时装配（A1-3C）。
+ *
+ * 启动时**只构造一次** Provider，并把同一个实例同时交给：
+ * - `chapter.draft` 工作流（Planner / Writer 的实际模型调用）；
+ * - `WorkerRunner` 的预检（任务记录的 provider/model 必须与它一致）。
+ *
+ * 这样不会出现「预检用一个 Provider、执行用另一个 Provider」的漂移。
+ */
+
+import type { PrismaClient } from '@novel/db';
+import {
+  createModelProvider,
+  createChapterDraftWorkflow,
+  readProviderConfig,
+  WorkflowKernel,
+  WorkflowRegistry,
+  WorkerRunner,
+  type ModelProvider,
+  type ProviderRuntimeConfig,
+} from '@novel/workflow';
+
+import { readWorkerRuntimeConfig, type WorkerRuntimeConfig } from './config.js';
+
+/** 装配结果（不启动任何循环 / 端口）。 */
+export interface WorkerRuntime {
+  readonly provider: ModelProvider;
+  readonly config: WorkerRuntimeConfig;
+  readonly runner: WorkerRunner;
+}
+
+/** 测试注入点：默认 `createModelProvider`，生产不传。 */
+export interface WorkerRuntimeDeps {
+  readonly createProvider?: (config: ProviderRuntimeConfig) => ModelProvider;
+}
+
+/**
+ * 构造 Worker 运行时。
+ *
+ * 不做任何数据库连接或网络请求：健康检查与轮询由 `index.ts` 启动。
+ * 配置错误（`WorkerConfigError` / `ModelProviderError`）原样抛出，
+ * 由进程入口转成安全日志 + 退出码 1。
+ */
+export function createWorkerRuntime(
+  db: PrismaClient,
+  env: NodeJS.ProcessEnv = process.env,
+  deps: WorkerRuntimeDeps = {},
+): WorkerRuntime {
+  const config = readWorkerRuntimeConfig(env);
+  // 只构造一次：同一个实例同时用于工作流执行与 Worker 预检。
+  const provider = (deps.createProvider ?? createModelProvider)(readProviderConfig(env));
+
+  const registry = new WorkflowRegistry();
+  registry.register(createChapterDraftWorkflow({ db, provider }));
+
+  const runner = new WorkerRunner(db, new WorkflowKernel(registry), {
+    provider,
+    ...(config.workerId === undefined ? {} : { workerId: config.workerId }),
+    leaseMs: config.leaseMs,
+    ...(config.heartbeatIntervalMs === undefined
+      ? {}
+      : { heartbeatIntervalMs: config.heartbeatIntervalMs }),
+    pollIntervalMs: config.pollIntervalMs,
+    sweepIntervalMs: config.sweepIntervalMs,
+  });
+
+  return { provider, config, runner };
+}

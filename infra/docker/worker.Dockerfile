@@ -25,6 +25,9 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/db/package.json packages/db/package.json
+COPY packages/auth/package.json packages/auth/package.json
+COPY packages/works/package.json packages/works/package.json
+COPY packages/workflow/package.json packages/workflow/package.json
 RUN pnpm install --frozen-lockfile
 
 # ---------- 构建层 ----------
@@ -34,12 +37,18 @@ COPY tsconfig.base.json ./
 COPY scripts ./scripts
 COPY packages/shared packages/shared
 COPY packages/db packages/db
+COPY packages/auth packages/auth
+COPY packages/works packages/works
+COPY packages/workflow packages/workflow
 COPY apps/worker apps/worker
 
-# 先构建库包（@novel/shared、@novel/db 的 dist 是 workspace 依赖的入口）
+# 先构建库包（@novel/* 的 dist 是 workspace 依赖的入口）
 RUN pnpm --filter @novel/shared build \
  && pnpm --filter @novel/db generate \
  && pnpm --filter @novel/db build \
+ && pnpm --filter @novel/auth build \
+ && pnpm --filter @novel/works build \
+ && pnpm --filter @novel/workflow build \
  && pnpm --filter @novel/worker build
 
 # 生成可移植的生产依赖目录（hoisted；校验器逐条判定链接可移植性）
