@@ -13,6 +13,7 @@ import { resolve } from 'node:path';
  */
 
 const credentialFile = resolve(process.cwd(), '.e2e-admin-password');
+const authorCredentialFile = resolve(process.cwd(), '.e2e-author.json');
 
 /** 管理员邮箱（来自运行环境）。 */
 export const ADMIN_EMAIL = process.env['ADMIN_EMAIL'] ?? '';
@@ -41,6 +42,33 @@ export function readAdminPassword(): string {
   } catch {
     throw new Error(
       '未找到管理员改密后的口令：请先运行 admin-flow.spec.ts（它会完成首次改密并写入共享凭据文件）。',
+    );
+  }
+}
+
+/** 可复用的既有作者账号（由 admin-flow 创建并完成改密）。 */
+export interface E2EAuthorCredentials {
+  readonly email: string;
+  readonly password: string;
+}
+
+/** admin-flow 在结束时写入，供后续章节工作台等 spec 复用（不新建账号）。 */
+export function writeAuthorCredentials(email: string, password: string): void {
+  writeFileSync(authorCredentialFile, JSON.stringify({ email, password }), { encoding: 'utf8' });
+}
+
+/** 读取既有 e2e-author；缺失时给出明确的运行顺序提示。 */
+export function readAuthorCredentials(): E2EAuthorCredentials {
+  try {
+    const raw = readFileSync(authorCredentialFile, 'utf8');
+    const parsed = JSON.parse(raw) as { email?: unknown; password?: unknown };
+    if (typeof parsed.email !== 'string' || typeof parsed.password !== 'string') {
+      throw new Error('字段不完整');
+    }
+    return { email: parsed.email, password: parsed.password };
+  } catch {
+    throw new Error(
+      '未找到可复用的 e2e-author 凭据：请先运行 admin-flow.spec.ts（它会创建作者并写入共享凭据文件）。',
     );
   }
 }

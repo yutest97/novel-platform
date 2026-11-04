@@ -10,8 +10,9 @@
 
 import type { PrismaClient } from '@novel/db';
 import {
-  createModelProvider,
   createChapterDraftWorkflow,
+  createChapterMockProvider,
+  createModelProvider,
   readProviderConfig,
   WorkflowKernel,
   WorkflowRegistry,
@@ -47,8 +48,15 @@ export function createWorkerRuntime(
   deps: WorkerRuntimeDeps = {},
 ): WorkerRuntime {
   const config = readWorkerRuntimeConfig(env);
+  const providerConfig = readProviderConfig(env);
   // 只构造一次：同一个实例同时用于工作流执行与 Worker 预检。
-  const provider = (deps.createProvider ?? createModelProvider)(readProviderConfig(env));
+  // Mock 模式使用章节专用输出（通用 MockProvider 的默认值无法通过 Planner Schema）。
+  const provider =
+    deps.createProvider !== undefined
+      ? deps.createProvider(providerConfig)
+      : providerConfig.kind === 'mock'
+        ? createChapterMockProvider()
+        : createModelProvider(providerConfig);
 
   const registry = new WorkflowRegistry();
   registry.register(createChapterDraftWorkflow({ db, provider }));

@@ -174,10 +174,9 @@ test('3. 作者 A 打开作品详情', async ({ browser }) => {
   await expect(page.getByTestId('work-detail-words')).toHaveText('4000');
   await expect(page.getByTestId('back-to-works')).toBeVisible();
 
-  // 明确提示后续阶段才开放的功能
-  await expect(
-    page.getByText('人物、势力、功法、物品、卷纲与章节创作将在后续阶段开放。'),
-  ).toBeVisible();
+  // A1-4A：章节创作入口已开放；设定中心仍可从详情进入
+  await expect(page.getByTestId('open-chapters')).toBeVisible();
+  await expect(page.getByTestId('open-settings')).toBeVisible();
 
   await page.screenshot({ path: shot('work-detail'), fullPage: true });
 

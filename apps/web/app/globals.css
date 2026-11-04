@@ -699,3 +699,122 @@ fieldset.field legend {
   font-size: 0.9rem;
   font-weight: 600;
 }
+
+/* ---------------- 章节工作台（A1-4A） ---------------- */
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.status-row h2,
+.status-row h3 {
+  margin: 0;
+}
+
+.chapter-form {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.chapter-form .field {
+  margin-bottom: 0;
+}
+
+@media (max-width: 40rem) {
+  .chapter-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chapter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.chapter-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: var(--panel);
+}
+
+.chapter-item__main {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.chapter-item__main h3 {
+  margin: 0 0 0.2rem;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.chapter-item__main p {
+  margin: 0;
+}
+
+.chapter-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  background: #fafbfc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  max-height: 28rem;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  line-height: 1.8;
+  margin: 1rem 0;
+}
+
+.version-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.version-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+
+.version-item--active {
+  border-color: var(--accent);
+  background: #eef2ff;
+}
+
+.plan {
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  background: #fafbfc;
+}
+
+.plan summary {
+  cursor: pointer;
+  font-weight: 600;
+}

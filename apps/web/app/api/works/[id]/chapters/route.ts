@@ -1,5 +1,5 @@
 import { assertTrustedOrigin, readClientIp } from '@novel/auth';
-import { createChapter } from '@novel/workflow';
+import { createChapter, listChapters } from '@novel/workflow';
 
 import { authErrorResponse, authJson, readJsonObject } from '@/auth-http';
 import { authConfig, db } from '@/auth-runtime';
@@ -9,6 +9,27 @@ import { requireAuthorSession } from '@/work-guard';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+/**
+ * GET /api/works/:workId/chapters —— 章节列表（A1-4A）。
+ *
+ * - 按 chapterNo 升序；只返回章节状态与最新任务状态，**不含正文**；
+ * - 他人作品 404；管理员 403；未登录 401。
+ */
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<Response> {
+  try {
+    const author = await requireAuthorSession(request);
+    const { id } = await context.params;
+
+    const chapters = await listChapters({ db: db(), workId: id, authorId: author.id });
+    return authJson({ chapters }, 200);
+  } catch (error) {
+    return authErrorResponse(error);
+  }
+}
 
 /**
  * POST /api/works/:workId/chapters —— 创建章节（A1-3B）。

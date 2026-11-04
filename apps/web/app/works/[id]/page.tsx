@@ -148,9 +148,20 @@ export default function WorkDetailPage(): React.ReactElement {
           </div>
 
           <div className="card">
+            <h2>章节创作</h2>
+            <p className="hint">创建章节、提交生成、查看进度、预览候选并采纳为正式版本。</p>
+            <Link
+              href={`/works/${work.id}/chapters`}
+              className="btn-secondary"
+              data-testid="open-chapters"
+            >
+              进入章节创作
+            </Link>
+          </div>
+
+          <div className="card">
             <h2>后续阶段</h2>
-            <p>人物、势力、功法、物品、卷纲与章节创作将在后续阶段开放。</p>
-            <p className="hint">本阶段不提供 AI 生成入口。</p>
+            <p className="hint">人工编辑、版本差异对比与版本恢复将在后续阶段开放。</p>
           </div>
         </>
       )}

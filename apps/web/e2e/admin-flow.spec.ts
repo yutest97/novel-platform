@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
-import { writeAdminPassword } from './shared-credentials.js';
+import { writeAdminPassword, writeAuthorCredentials } from './shared-credentials.js';
 import { recordSecret, resetSecretLedger } from './secret-ledger';
 
 /**
@@ -75,6 +75,8 @@ test.beforeAll(async ({ browser }) => {
 });
 
 test.afterAll(async () => {
+  // 复用既有 e2e-author：后续章节工作台 spec 不再新建作者账号
+  writeAuthorCredentials(AUTHOR_EMAIL, AUTHOR_PASSWORD_2);
   await adminContext?.close();
 });
 

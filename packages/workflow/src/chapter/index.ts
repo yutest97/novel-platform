@@ -8,6 +8,7 @@ export {
   prepareDraftText,
 } from './agents.js';
 export { buildChapterDraftContext, type BuildContextInput } from './context.js';
+export { MOCK_CHAPTER_DRAFT, createChapterMockProvider } from './mock.js';
 export {
   adoptChapterCandidate,
   type AdoptChapterCandidateInput,
@@ -20,13 +21,19 @@ export {
   createChapter,
   getChapterCandidate,
   getChapterDetail,
+  getChapterVersion,
+  listChapterVersions,
+  listChapters,
   startChapterDraft,
   toTaskSummary,
   type ChapterCandidateDetailView,
   type ChapterCandidateSummaryView,
   type ChapterDetailView,
+  type ChapterListItemView,
   type ChapterSummaryView,
   type ChapterTaskSummaryView,
+  type ChapterVersionDetailView,
+  type ChapterVersionSummaryView,
   type CreateChapterInput,
   type StartChapterDraftInput,
 } from './service.js';

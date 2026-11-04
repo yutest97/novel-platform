@@ -811,16 +811,56 @@ workflow 预检 4、web 后端 e2e 1）；全量单测 **651** 个（web 160 / w
 worker 63 / shared 15 / db 10 / auth 95 / works 132）。真实模型仍需人工 smoke；
 CI 只使用 MockProvider / fake fetch，不联网。
 
+### 章节工作台（A1-4A）
+
+作者首次可以在浏览器中完成「创建章节 → 提交生成 → 查看进度 → 预览候选 → 采纳 → 阅读正式版本」。
+
+```
+/works/:id                     作品详情 →「进入章节创作」
+/works/:id/chapters            章节列表 + 创建（章号 / 标题）+ 状态徽标
+/works/:id/chapters/:chapterId 工作台：生成 / 轮询 / 取消 / 候选 / 采纳 / 正式版本
+```
+
+- **生成**：`targetWords` 默认取作品 `targetWordsPerChapter`（2500..4000），
+  `tone / pointOfView / pacing` 可选；`requestId` 由 `crypto.randomUUID()` 生成，
+  **只存在组件内存**，同内容重复点击复用同一个 id，任务终态后才允许下一次新 id；
+- **轮询**：1s 起、每次 +1s、最大 5s；只轮询 `queued / processing`；
+  `succeeded / failed / cancelled` 立即停止；页面隐藏暂停，重新可见立即刷新一次；
+  组件卸载清理 timer；
+- **进度**：`currentStep` 显示中文（装配设定 / 规划章节 / 冻结合同 / 写正文 / 校验正文 / 保存候选）；
+  `queued / processing` 显示取消；取消后刷新章节、任务与候选；
+- **候选**：章节详情只返回摘要；点击候选后才请求正文；`pre-wrap` 纯文本渲染；
+  结构化计划可折叠查看目标 / 场景 / 必须包含；
+- **采纳**：仅 `candidate` 显示按钮，二次确认；成功显示「已生成正式版本 N」并自动选中
+  最大版本；重复采纳显示已存在（`deduplicated`），不做乐观更新；
+- **正式阅读**：`pre-wrap` 纯文本，显示版本号 / 来源（AI/人工）/ 字数 / 时间；刷新后仍在；
+- `finalized / abandoned` 章节不显示生成控件，显示稳定提示；
+- 401 跳登录，404 显示作品 / 章节不存在，管理员 403；正文、requestId 不写 URL/Storage。
+
+**Mock 演示**：`MODEL_PROVIDER=mock` 时 Worker 使用章节专用 MockProvider，
+Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无需真实模型即可跑通全链路。
+生成仍需要 **Worker 常驻进程** 在运行。
+
+**尚未开放**：Markdown 人工编辑、`human` 版本、版本 diff / 恢复、Reviewer / RAG。
+
+**测试**：A1-4A 新增 31 个（只读 API 7、展示纯函数 10、浏览器 E2E 10、
+workflow 章节 Mock 4）；全量单测 **672** 个（web 177 / workflow 180 / worker 63 /
+shared 15 / db 10 / auth 95 / works 132）；浏览器 E2E 合计 **77**。
+
 ### 浏览器 E2E（Playwright Chromium）
 
 ```bash
-# 需要先有一个干净数据库 + 一次性管理员，并让应用指向它
+# 需要先有一个干净数据库 + 一次性管理员，并让 web 与 **真实 Worker** 指向同一数据库
+# Worker：DATABASE_URL=… MODEL_PROVIDER=mock node apps/worker/dist/index.js
+# DATABASE_URL 还用于 A1-4A 把第 2 章置为 finalized（仅测试种子）
 BASE_URL=https://localhost:8443 \
+DATABASE_URL='postgresql://…' \
 ADMIN_EMAIL='e2e-admin@example.test' ADMIN_INITIAL_PASSWORD='…' \
   pnpm --filter @novel/web exec playwright test
 ```
 
-覆盖（67 个用例，分五个 spec 文件：账号管理 / 物品事件 / 设定中心 / 作品流程 / 账号上限）：
+覆盖（77 个用例，分六个 spec 文件：账号管理 / 章节工作台 / 物品事件 / 设定中心 /
+作品流程 / 账号上限）：
 未登录跳转、首登强制改密、管理员列表、一次性口令只出现一次、
 刷新不可回看、作者首登改密、作者越权被拒、重置后旧会话失效、停用后登录被拒、
 启用后可登录、退出后保持未登录、第 11 个账号的上限提示，
@@ -850,15 +890,25 @@ events（`limit=50`）→ 未登记空态 → 登记获得（备注不进 URL/st
 冲正行不再可冲正 → 删除当前持有人 `409` 并显示「物品 · 青锋剑」→ 390×844 完成登记 / 转手 / 冲正
 且按钮 ≥40px → 转走后可删（历史行只显示「已删除角色」）→ 另一作者 `404`、管理员 `403` →
 软删物品后深链可读但只读 → 截图不含口令 / 邮箱 / Cookie / 令牌。
+**章节工作台（A1-4A）**：作品详情进入章节页 → 创建第 1 章并打开 → Mock 生成 →
+真实 Worker 领取 → 页面轮询到 succeeded → 候选预览（正文 + 计划）→ 二次确认采纳 →
+正式版本 1 与正文 → 刷新后仍在 → 第 2 章置为 finalized 后无生成控件 →
+未登录 401 / 不存在作品 404 / 管理员 403 → 390×844 移动端创建、生成、候选预览与正式阅读 →
+页面与截图不含邮箱 / 口令 / Cookie / 令牌。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`
-> 在 spec 文件之间共享（该文件不入仓库、不进镜像上下文）。
+> 在 spec 文件之间共享，既有 `e2e-author` 的邮箱与口令通过
+> `apps/web/.e2e-author.json` 共享（两个文件都不入仓库、不进镜像上下文）。
+> 章节工作台 spec 复用该作者，不新建账号。
 
 移动端截图：`docs/screenshots/m1b3-mobile-login.png`、`m1b3-mobile-admin.png`、
 `m1b3-mobile-one-time-password.png`（一次性口令区域同样做模糊处理）；
 物品事件：`docs/screenshots/m2b3b-item-events-desktop.png`、`m2b3b-mobile-item-events.png`、
-`m2b3b-item-holder-cards.png`。
+`m2b3b-item-holder-cards.png`；
+章节工作台：`docs/screenshots/a1_4a-chapters-empty.png`、`a1_4a-workbench.png`、
+`a1_4a-candidate.png`、`a1_4a-reading.png`、`a1_4a-mobile-chapters.png`、
+`a1_4a-mobile-workbench.png`、`a1_4a-mobile-candidate.png`、`a1_4a-mobile-reading.png`。
 
 CI 的 `docker` job 会另建一个独立数据库（库名含 `run_id` 与 `run_attempt`，
 重跑不会撞上已存在的库）并把 web 重建指向它，用运行时生成的凭据跑同一套用例。

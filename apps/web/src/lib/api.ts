@@ -814,3 +814,66 @@ export async function adoptChapterCandidate(
   );
   return (body as { version: ChapterVersionSummary }).version;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 章节列表 / 正式版本（A1-4A）                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** 章节列表项（不含正文；`latestTask*` 供状态徽标）。 */
+export interface ChapterListItem {
+  readonly id: string;
+  readonly workId: string;
+  readonly chapterNo: number;
+  readonly title: string;
+  readonly status: string;
+  readonly latestTaskStatus: string | null;
+  readonly latestTaskStep: string | null;
+  readonly updatedAt: string;
+}
+
+/** 正式版本摘要（列表用，不含正文）。 */
+export interface ChapterVersionListItem {
+  readonly id: string;
+  readonly versionNo: number;
+  /** `ai` | `human`。 */
+  readonly source: string;
+  readonly wordCount: number;
+  readonly createdAt: string;
+}
+
+/** 正式版本详情（含正文）。 */
+export interface ChapterVersionDetail extends ChapterVersionListItem {
+  readonly chapterId: string;
+  readonly content: string;
+}
+
+/** 读取作品下的章节列表（chapterNo 升序）。 */
+export async function fetchChapters(workId: string): Promise<ChapterListItem[]> {
+  const { body } = await apiRequest(`/api/works/${encodeURIComponent(workId)}/chapters`);
+  return (body as { chapters: ChapterListItem[] }).chapters;
+}
+
+/** 读取章节的正式版本摘要（versionNo 倒序，最新在前）。 */
+export async function fetchChapterVersions(
+  workId: string,
+  chapterId: string,
+): Promise<ChapterVersionListItem[]> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}/versions`,
+  );
+  return (body as { versions: ChapterVersionListItem[] }).versions;
+}
+
+/** 读取正式版本正文。 */
+export async function fetchChapterVersion(
+  workId: string,
+  chapterId: string,
+  versionId: string,
+): Promise<ChapterVersionDetail> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/versions/${encodeURIComponent(versionId)}`,
+  );
+  return (body as { version: ChapterVersionDetail }).version;
+}

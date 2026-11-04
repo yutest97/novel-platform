@@ -71,6 +71,38 @@ export interface ChapterDetailView {
   readonly candidates: readonly ChapterCandidateSummaryView[];
 }
 
+/**
+ * 章节列表项（A1-4A）。
+ *
+ * 只含徽标所需的章节状态与最新任务状态，**不含正文 / 候选 / 版本**。
+ */
+export interface ChapterListItemView {
+  readonly id: string;
+  readonly workId: string;
+  readonly chapterNo: number;
+  readonly title: string;
+  readonly status: string;
+  readonly latestTaskStatus: string | null;
+  readonly latestTaskStep: string | null;
+  readonly updatedAt: string;
+}
+
+/** 正式版本摘要（列表用，**不含正文**）。 */
+export interface ChapterVersionSummaryView {
+  readonly id: string;
+  readonly versionNo: number;
+  /** `ai` | `human`。 */
+  readonly source: string;
+  readonly wordCount: number;
+  readonly createdAt: string;
+}
+
+/** 正式版本详情（含正文；不含任务快照 / prompt / Key）。 */
+export interface ChapterVersionDetailView extends ChapterVersionSummaryView {
+  readonly chapterId: string;
+  readonly content: string;
+}
+
 /** 候选详情（含正文与结构化计划）。 */
 export interface ChapterCandidateDetailView {
   readonly id: string;
@@ -255,6 +287,164 @@ export async function getChapterDetail(input: {
       wordCount: row.wordCount,
       createdAt: row.createdAt.toISOString(),
     })),
+  };
+}
+
+/**
+ * 读取作品下的章节列表（A1-4A）。
+ *
+ * - 按 `chapterNo` 升序；不含正文、候选或版本内容；
+ * - 只返回最新任务的 `status / currentStep`，供列表徽标使用；
+ * - 他人作品 404（不区分存在性），管理员在路由层 403。
+ */
+export async function listChapters(input: {
+  readonly db: PrismaClient;
+  readonly workId: string;
+  readonly authorId: string;
+}): Promise<readonly ChapterListItemView[]> {
+  const workId = normalizeUuid(input.workId, '作品 id');
+  await requireOwnedWork(input.db, workId, input.authorId);
+
+  const [chapters, tasks] = await Promise.all([
+    input.db.chapter.findMany({
+      where: { workId },
+      orderBy: [{ chapterNo: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        workId: true,
+        chapterNo: true,
+        title: true,
+        status: true,
+        updatedAt: true,
+      },
+    }),
+    input.db.generationTask.findMany({
+      where: { workId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { chapterId: true, status: true, currentStep: true },
+    }),
+  ]);
+
+  const latestTask = new Map<string, { status: string; currentStep: string | null }>();
+  for (const task of tasks) {
+    if (task.chapterId !== null && !latestTask.has(task.chapterId)) {
+      latestTask.set(task.chapterId, { status: task.status, currentStep: task.currentStep });
+    }
+  }
+
+  return chapters.map((chapter) => {
+    const task = latestTask.get(chapter.id) ?? null;
+    return {
+      id: chapter.id,
+      workId: chapter.workId,
+      chapterNo: chapter.chapterNo,
+      title: chapter.title,
+      status: chapter.status,
+      latestTaskStatus: task?.status ?? null,
+      latestTaskStep: task?.currentStep ?? null,
+      updatedAt: chapter.updatedAt.toISOString(),
+    };
+  });
+}
+
+/** 章节必须属于该作品；不存在与跨作品同样 404。 */
+async function requireChapterInWork(
+  db: PrismaClient,
+  workId: string,
+  chapterId: string,
+): Promise<void> {
+  const chapter = await db.chapter.findFirst({
+    where: { id: chapterId, workId },
+    select: { id: true },
+  });
+  if (chapter === null) {
+    throw new AuthError('NOT_FOUND', '章节不存在');
+  }
+}
+
+/**
+ * 读取章节的正式版本摘要列表（A1-4A）。
+ *
+ * - 按 `versionNo` 倒序（最新在前）；
+ * - 只返回 id / versionNo / source / wordCount / createdAt，**不含正文**；
+ * - 只允许作品作者；跨作品 / 跨章节 404。
+ */
+export async function listChapterVersions(input: {
+  readonly db: PrismaClient;
+  readonly workId: string;
+  readonly authorId: string;
+  readonly chapterId: string;
+}): Promise<readonly ChapterVersionSummaryView[]> {
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const chapterId = normalizeUuid(input.chapterId, '章节 id');
+  await requireOwnedWork(input.db, workId, input.authorId);
+  await requireChapterInWork(input.db, workId, chapterId);
+
+  const versions = await input.db.chapterVersion.findMany({
+    where: { workId, chapterId },
+    orderBy: [{ versionNo: 'desc' }, { id: 'desc' }],
+    select: {
+      id: true,
+      versionNo: true,
+      source: true,
+      wordCount: true,
+      createdAt: true,
+    },
+  });
+
+  return versions.map((version) => ({
+    id: version.id,
+    versionNo: version.versionNo,
+    source: version.source,
+    wordCount: version.wordCount,
+    createdAt: version.createdAt.toISOString(),
+  }));
+}
+
+/**
+ * 读取正式版本正文（A1-4A）。
+ *
+ * - 版本必须属于当前作品 + 当前章节，否则 404；
+ * - 只返回正文与版本元信息，不含候选、任务快照、prompt、Key；
+ * - `pre-wrap` 阅读由前端负责，本接口不做任何 HTML 处理。
+ */
+export async function getChapterVersion(input: {
+  readonly db: PrismaClient;
+  readonly workId: string;
+  readonly authorId: string;
+  readonly chapterId: string;
+  readonly versionId: string;
+}): Promise<ChapterVersionDetailView> {
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const chapterId = normalizeUuid(input.chapterId, '章节 id');
+  const versionId = normalizeUuid(input.versionId, '版本 id');
+  await requireOwnedWork(input.db, workId, input.authorId);
+  await requireChapterInWork(input.db, workId, chapterId);
+
+  const version = await input.db.chapterVersion.findFirst({
+    where: { id: versionId, workId, chapterId },
+    select: {
+      id: true,
+      chapterId: true,
+      versionNo: true,
+      source: true,
+      wordCount: true,
+      content: true,
+      createdAt: true,
+    },
+  });
+  if (version === null) {
+    throw new AuthError('NOT_FOUND', '版本不存在');
+  }
+
+  return {
+    id: version.id,
+    chapterId: version.chapterId,
+    versionNo: version.versionNo,
+    source: version.source,
+    wordCount: version.wordCount,
+    content: version.content,
+    createdAt: version.createdAt.toISOString(),
   };
 }
 
