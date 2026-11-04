@@ -29,6 +29,7 @@ import {
 import { claimNextTask, createGenerationTask, listTaskContexts } from '../src/queue.js';
 import { WorkerRunner } from '../src/worker.js';
 import {
+  addCharacters,
   createChapterFixture,
   createChapterProvider,
   defaultPlannerOutput,
@@ -173,7 +174,7 @@ describe('全链路（MockProvider → Planner → 合同 → Writer → 候选�
       mustNotInclude: ['真实身世'],
     });
     const { provider } = createChapterProvider({}, { plan, text: longDraft() });
-    const { task } = await createTask(fixture);
+    const { task } = await createTask(fixture, { input: { targetWords: 3200 } });
 
     await expect(runnerFor(provider).runOnce()).resolves.toBe('succeeded');
 
@@ -247,6 +248,41 @@ describe('全链路（MockProvider → Planner → 合同 → Writer → 候选�
     expect(text).toContain(fixture.factions[0]?.name ?? '');
     expect(text).toContain(`吞星古卷-${fixture.tag}`);
     expect(text).not.toContain(`他其实是${fixture.tag}界的转世`);
+  });
+
+  it('人物超过 50 条时只选前 50 条，Planner Schema 不失败且留截断记录', async () => {
+    const fixture = await newFixture();
+    const extras = await addCharacters(db, fixture, 60);
+    const { provider, calls } = createChapterProvider(
+      {},
+      { plan: defaultPlannerOutput(fixture), text: longDraft() },
+    );
+    const { task } = await createTask(fixture);
+
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('succeeded');
+
+    const plannerInput = calls.planner[0];
+    expect(plannerInput).toBeDefined();
+    const payload = JSON.parse(lastUserContent(plannerInput as ModelJsonInput)) as {
+      characters: { id: string }[];
+    };
+    expect(payload.characters).toHaveLength(50);
+    const selected = payload.characters.map((item) => item.id);
+    expect(selected[0]).toBe(fixture.characters[0]?.id);
+    expect(selected[1]).toBe(fixture.characters[1]?.id);
+    expect(selected).toContain(extras[47]?.id);
+    expect(selected).not.toContain(extras[48]?.id);
+
+    const rows = await listTaskContexts(db, task.id);
+    const characterRows = rows.filter((row) => row.contextType === 'character');
+    expect(characterRows).toHaveLength(50);
+    expect(characterRows.map((row) => row.refId)).toEqual(selected);
+    expect(rows.some((row) => row.refId === extras[59]?.id)).toBe(false);
+    const truncated = rows.find((row) => row.contextType === 'context.truncated');
+    expect(truncated?.refId).toBeNull();
+    expect(truncated?.rank).toBe(500);
+    expect(truncated?.snippet).toContain('人物');
+    expect(rows).toHaveLength(1 + 50 + 2 + 1 + 1 + 1);
   });
 
   it('llm_call_logs 有 planner 与 writer 两条成功记录', async () => {
@@ -325,6 +361,29 @@ describe('失败路径：不留下半成品', () => {
     expect((await chapterRow(fixture.chapterId)).status).toBe('planned');
   });
 
+  it('Planner 虚构人物 / 改动目标字数 → failed，无合同与候选', async () => {
+    const fixture = await newFixture();
+    const valid = defaultPlannerOutput(fixture);
+    const badPlans: unknown[] = [
+      { ...valid, characters: ['虚构人物'] },
+      { ...valid, targetWords: 3200 },
+    ];
+
+    for (const bad of badPlans) {
+      const { provider } = createChapterProvider(
+        { planner: () => bad },
+        { plan: valid, text: longDraft() },
+      );
+      const { task } = await createTask(fixture);
+      await expect(runnerFor(provider).runOnce()).resolves.toBe('failed');
+      expect((await taskRow(task.id)).errorCode).toBe('AGENT_OUTPUT_INVALID');
+    }
+
+    expect(await db.chapterContract.count({ where: { workId: fixture.workId } })).toBe(0);
+    expect(await db.chapterCandidate.count({ where: { workId: fixture.workId } })).toBe(0);
+    expect((await chapterRow(fixture.chapterId)).status).toBe('planned');
+  });
+
   it('Writer 少于 1200 字 → failed，无候选；章节停在 drafting', async () => {
     const fixture = await newFixture();
     const { provider } = createChapterProvider(
@@ -378,6 +437,7 @@ describe('失败路径：不留下半成品', () => {
     });
     expect(failedLog.success).toBe(false);
     expect(failedLog.errorCode).toBe('MODEL_TIMEOUT');
+    expect(failedLog.model).toBe('mock-model');
     expect(failedLog.promptTokens).toBe(0);
 
     await expect(runnerFor(provider).runOnce()).resolves.toBe('succeeded');
@@ -385,6 +445,32 @@ describe('失败路径：不留下半成品', () => {
     expect(row.status).toBe('succeeded');
     expect(await db.chapterContract.count({ where: { workId: fixture.workId } })).toBe(1);
     expect(await db.chapterCandidate.count({ where: { workId: fixture.workId } })).toBe(1);
+  });
+
+  it('失败 LLM 日志记录 resolved model，且不含 Key / prompt', async () => {
+    const fixture = await newFixture();
+    const { provider } = createChapterProvider(
+      {
+        planner: () => {
+          throw new Error('sk-live-SECRET 这是 prompt');
+        },
+      },
+      { plan: defaultPlannerOutput(fixture), text: longDraft() },
+    );
+    // 未知异常按可重试处理；用 maxAttempts=1 让它直接落到 failed。
+    const { task } = await createTask(fixture, { maxAttempts: 1 });
+
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('failed');
+
+    const log = await db.llmCallLog.findFirstOrThrow({ where: { taskId: task.id } });
+    expect(log.model).toBe('mock-model');
+    expect(log.model.length).toBeGreaterThan(0);
+    expect(log.success).toBe(false);
+    expect(log.errorCode).toBe('WORKFLOW_INTERNAL_ERROR');
+    const serialized = JSON.stringify(log);
+    expect(serialized).not.toContain('sk-live-SECRET');
+    expect(serialized).not.toContain('这是 prompt');
+    expect((await taskRow(task.id)).errorMessageSanitized).not.toContain('sk-live-SECRET');
   });
 
   it('任务输入非法（targetWords 越界 / 未知字段 / 缺 chapterId）→ failed', async () => {
@@ -489,6 +575,7 @@ describe('重试幂等：合同与候选复用', () => {
 
     const provider: ModelProvider = {
       name: 'mock',
+      defaultModel: 'mock-model',
       generateJson: () => {
         throw new Error('不应调用模型');
       },
@@ -505,6 +592,80 @@ describe('重试幂等：合同与候选复用', () => {
   });
 });
 
+describe('合同与候选不可变（数据库触发器）', () => {
+  it('合同不可更新/删除；候选不可更新/删除；正常读取不受影响', async () => {
+    const fixture = await newFixture();
+    const { provider } = createChapterProvider(
+      {},
+      { plan: defaultPlannerOutput(fixture), text: longDraft() },
+    );
+    const { task } = await createTask(fixture);
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('succeeded');
+
+    const contract = await db.chapterContract.findUniqueOrThrow({
+      where: { generationTaskId: task.id },
+    });
+    const candidate = await db.chapterCandidate.findUniqueOrThrow({
+      where: { generationTaskId: task.id },
+    });
+
+    // 额外建一份没有候选引用的合同：删除若失败只可能是不可变触发器（不是外键）。
+    const { task: unusedTask } = await createTask(fixture);
+    const unreferencedContract = await db.chapterContract.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        generationTaskId: unusedTask.id,
+        versionNo: 2,
+        goal: '第二版计划',
+        mustInclude: [],
+        mustNotInclude: [],
+        sceneBeats: { version: 1, characters: [], scenes: [] },
+        targetWords: 3000,
+      },
+    });
+    await expect(
+      db.chapterContract.delete({ where: { id: unreferencedContract.id } }),
+    ).rejects.toThrow();
+
+    await expect(
+      db.chapterContract.update({ where: { id: contract.id }, data: { goal: '被篡改' } }),
+    ).rejects.toThrow();
+    await expect(
+      db.chapterContract.update({
+        where: { id: contract.id },
+        data: { sceneBeats: { version: 1, characters: [], scenes: [] } },
+      }),
+    ).rejects.toThrow();
+    await expect(db.chapterContract.delete({ where: { id: contract.id } })).rejects.toThrow();
+
+    await expect(
+      db.chapterCandidate.update({ where: { id: candidate.id }, data: { content: '被篡改' } }),
+    ).rejects.toThrow();
+    await expect(
+      db.chapterCandidate.update({ where: { id: candidate.id }, data: { wordCount: 99_999 } }),
+    ).rejects.toThrow();
+    await expect(
+      db.chapterCandidate.update({
+        where: { id: candidate.id },
+        data: { structuredPlan: { version: 9 } },
+      }),
+    ).rejects.toThrow();
+    await expect(
+      db.chapterCandidate.update({ where: { id: candidate.id }, data: { status: 'adopted' } }),
+    ).rejects.toThrow();
+    await expect(db.chapterCandidate.delete({ where: { id: candidate.id } })).rejects.toThrow();
+
+    // 正常读取（包括重试复用）不受影响
+    expect((await db.chapterContract.findUniqueOrThrow({ where: { id: contract.id } })).goal).toBe(
+      contract.goal,
+    );
+    expect(
+      (await db.chapterCandidate.findUniqueOrThrow({ where: { id: candidate.id } })).content,
+    ).toBe(candidate.content);
+  });
+});
+
 describe('取消、审计与隔离', () => {
   it('Writer 执行中取消 → cancelled，无候选，章节停在 drafting', async () => {
     const fixture = await newFixture();
@@ -512,6 +673,7 @@ describe('取消、审计与隔离', () => {
 
     const provider: ModelProvider = {
       name: 'mock',
+      defaultModel: 'mock-model',
       generateJson: (input: ModelJsonInput): Promise<ModelJsonResult> => {
         const system = input.messages[0]?.content ?? '';
         if (system.includes('planner.chapter')) {
@@ -612,7 +774,10 @@ describe('取消、审计与隔离', () => {
     const claimed = await claimNextTask(db, { workerId: 'worker-a', leaseMs: 5_000 });
     expect(claimed?.id).toBe(task.id);
 
-    const plan = normalizePlannerOutput(defaultPlannerOutput(fixture) as unknown as PlannerOutput);
+    const plan = normalizePlannerOutput(defaultPlannerOutput(fixture) as unknown as PlannerOutput, {
+      allowedCharacters: fixture.characters.map((entity) => entity.name),
+      targetWords: 3000,
+    });
     await expect(
       freezeChapterContract({
         db,

@@ -253,7 +253,10 @@ rule_packages (题材规则包，系统级)
 - `source_task_id` 在本实现中命名为 `generation_task_id`；
 - `chapter_versions` **本轮不建**，候选不是正式正文；
 - 章节状态由工作流推进：合同 → `outlined`，Writer 开始 → `drafting`，候选写入 → `in_review`；
-- 合同 / 候选 / 章节状态 / 审计在同一事务提交；失败或取消不会留下候选。
+- 合同 / 候选 / 章节状态 / 审计在同一事务提交；失败或取消不会留下候选；
+- 两张表都有 `BEFORE UPDATE / BEFORE DELETE` 触发器（`restrict_violation`）：
+  合同完全不可改、不可删；候选本轮不可改、不可删，A1-3 才开放
+  `status candidate → adopted` 的单一迁移。
 
 ### 3.5 entities + entity_attributes（题材解耦核心）
 

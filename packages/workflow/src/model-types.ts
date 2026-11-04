@@ -58,6 +58,13 @@ export interface ModelTextResult {
 /** Provider 统一接口。 */
 export interface ModelProvider {
   readonly name: string;
+  /**
+   * 默认模型名（非空）。
+   *
+   * `AgentDefinition.model` 为空时由 AgentRunner 回落到这里；
+   * 任务角色不应把某个 mock 模型硬编码进 Agent 定义。
+   */
+  readonly defaultModel: string;
   generateJson(input: ModelJsonInput): Promise<ModelJsonResult>;
   generateText(input: ModelTextInput): Promise<ModelTextResult>;
 }

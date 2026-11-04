@@ -192,6 +192,27 @@ export async function createChapterFixture(
   };
 }
 
+/** 追加若干人物（用于验证 50 条上限）。 */
+export async function addCharacters(
+  db: PrismaClient,
+  fixture: ChapterFixture,
+  count: number,
+): Promise<FixtureEntity[]> {
+  const created: FixtureEntity[] = [];
+  for (let index = 0; index < count; index += 1) {
+    created.push(
+      await createEntity(db, {
+        workId: fixture.workId,
+        entityType: 'character',
+        name: `群演-${fixture.tag}-${String(index).padStart(2, '0')}`,
+        orderIndex: 100 + index,
+        attributes: { identity: '外门弟子' },
+      }),
+    );
+  }
+  return created;
+}
+
 /** 合法的 Planner 输出（人物名取自 fixture）。 */
 export function defaultPlannerOutput(
   fixture: ChapterFixture,

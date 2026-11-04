@@ -89,7 +89,8 @@ const styleSchema: JsonSchema = {
 export const PLANNER_CHAPTER_AGENT: AgentDefinition = {
   name: 'planner.chapter',
   promptVersion: '1.0.0',
-  model: 'mock-model',
+  // 空模型 = 使用 Provider 的 defaultModel（真实环境为 MODEL_NAME）
+  model: '',
   inputSchema: {
     type: 'object',
     properties: {
@@ -129,7 +130,8 @@ export const PLANNER_CHAPTER_AGENT: AgentDefinition = {
 export const WRITER_CHAPTER_AGENT: AgentDefinition = {
   name: 'writer.chapter',
   promptVersion: '1.0.0',
-  model: 'mock-model',
+  // 空模型 = 使用 Provider 的 defaultModel（真实环境为 MODEL_NAME）
+  model: '',
   inputSchema: {
     type: 'object',
     properties: {
@@ -194,13 +196,28 @@ function normalizeScene(scene: PlannerScene, index: number): PlannerScene {
   return { purpose, location, conflict, outcome };
 }
 
+/** 代码侧语义校验所需的上下文。 */
+export interface PlannerValidationContext {
+  /** 本次 ContextBuilder 实际提供给模型的人物名称（精确匹配）。 */
+  readonly allowedCharacters: readonly string[];
+  /** 本次上下文请求的目标字数；Planner 不得自行改动。 */
+  readonly targetWords: number;
+}
+
 /**
  * 代码侧语义校验（Schema 通过之后）。
  *
  * 与 Schema 的重复检查是有意的：Schema 是模型契约，代码是最后一道闸门；
  * 任何一项不满足都按**不可重试**失败，不写合同。
+ *
+ * 额外约束（A1-2-REV-01）：
+ * - `characters` 只能引用本次上下文中真实存在的人物（精确匹配 name）；
+ * - `targetWords` 必须等于本次上下文请求的目标字数，不能由模型改动。
  */
-export function normalizePlannerOutput(output: PlannerOutput): PlannerOutput {
+export function normalizePlannerOutput(
+  output: PlannerOutput,
+  context: PlannerValidationContext,
+): PlannerOutput {
   const goal = output.goal.trim();
   if (goal === '') {
     invalidOutput('goal 不能为空');
@@ -218,12 +235,23 @@ export function normalizePlannerOutput(output: PlannerOutput): PlannerOutput {
       `targetWords 必须是 ${MIN_CONTRACT_TARGET_WORDS}..${MAX_CONTRACT_TARGET_WORDS} 的整数`,
     );
   }
+  if (output.targetWords !== context.targetWords) {
+    invalidOutput(`targetWords 必须等于本次请求的 ${context.targetWords}`);
+  }
+
+  const allowed = new Set(context.allowedCharacters);
+  const characters = normalizeStringList(output.characters, 'characters');
+  for (const name of characters) {
+    if (!allowed.has(name)) {
+      invalidOutput('characters 包含上下文中未提供的人物');
+    }
+  }
 
   return {
     goal,
     mustInclude: normalizeStringList(output.mustInclude, 'mustInclude'),
     mustNotInclude: normalizeStringList(output.mustNotInclude, 'mustNotInclude'),
-    characters: normalizeStringList(output.characters, 'characters'),
+    characters,
     scenes,
     targetWords: output.targetWords,
   };

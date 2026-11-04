@@ -75,6 +75,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
     readonly fetchImpl: FetchLike;
   };
 
+  /** 环境变量 / 配置中的 MODEL_NAME；Agent 未显式指定时使用。 */
+  get defaultModel(): string {
+    return this.config.model;
+  }
+
   constructor(config: OpenAICompatibleConfig) {
     const baseUrl = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : '';
     if (baseUrl === '' || typeof config.apiKey !== 'string' || config.apiKey.trim() === '') {

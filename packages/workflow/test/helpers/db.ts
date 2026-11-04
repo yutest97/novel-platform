@@ -82,11 +82,32 @@ export async function createTestChapter(
  * 合同/候选对任务、章节、作品都是 RESTRICT，顺序不能反。
  */
 export async function cleanupWork(db: PrismaClient, workId: string): Promise<void> {
-  await db.chapterCandidate.deleteMany({ where: { workId } });
-  await db.chapterContract.deleteMany({ where: { workId } });
-  await db.generationTask.deleteMany({ where: { workId } });
-  await db.chapter.deleteMany({ where: { workId } });
-  await db.work.deleteMany({ where: { id: workId } });
+  const immutable =
+    (await db.chapterContract.count({ where: { workId } })) +
+    (await db.chapterCandidate.count({ where: { workId } }));
+  if (immutable === 0) {
+    await db.generationTask.deleteMany({ where: { workId } });
+    await db.chapter.deleteMany({ where: { workId } });
+    await db.work.deleteMany({ where: { id: workId } });
+    return;
+  }
+
+  // 合同/候选有 append-only 触发器，测试清理必须临时禁用（事务内，
+  // 失败回滚后触发器仍然生效）。仅用于测试库。
+  await db.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_candidates" DISABLE TRIGGER USER');
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_contracts" DISABLE TRIGGER USER');
+      await tx.chapterCandidate.deleteMany({ where: { workId } });
+      await tx.chapterContract.deleteMany({ where: { workId } });
+      await tx.generationTask.deleteMany({ where: { workId } });
+      await tx.chapter.deleteMany({ where: { workId } });
+      await tx.work.deleteMany({ where: { id: workId } });
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_contracts" ENABLE TRIGGER USER');
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_candidates" ENABLE TRIGGER USER');
+    },
+    { maxWait: 15000, timeout: 30000 },
+  );
 }
 
 /** 清理用户（作品已清理后）。 */

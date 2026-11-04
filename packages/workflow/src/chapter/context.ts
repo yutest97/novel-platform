@@ -16,6 +16,7 @@ import { parseRuleFieldSchema, type FieldDefinition, type FieldGroup } from '@no
 import { NonRetryableTaskError } from '../errors.js';
 import { MAX_CONTEXT_SNIPPET_CHARS } from '../queue.js';
 import {
+  MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,
   MIN_CONTRACT_TARGET_WORDS,
   type AssembledContext,
@@ -38,6 +39,13 @@ const RANK_CHARACTER_BASE = 100;
 const RANK_REALM_BASE = 200;
 const RANK_FACTION_BASE = 300;
 const RANK_DIRECTION = 400;
+const RANK_TRUNCATED = 500;
+
+const ENTITY_TYPE_LABELS: Readonly<Record<string, string>> = {
+  character: '人物',
+  realm_level: '境界',
+  faction: '势力',
+};
 
 const DEFAULT_STYLE: ChapterStyle = {
   tone: '克制',
@@ -191,15 +199,22 @@ export async function buildChapterDraftContext(
     directionValues.set(row.settingKey, row.settingValue);
   }
 
-  const entityRows = await db.entity.findMany({
-    where: {
-      workId: work.id,
-      entityType: { in: [...CONTEXT_ENTITY_TYPES] },
-      deletedAt: null,
-    },
-    orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    select: { id: true, entityType: true, name: true },
-  });
+  // 每类最多取 50 条（多取 1 条只用于判断是否发生截断）。
+  // 顺序固定：order_index asc → createdAt asc → id asc，保证分页/重试稳定。
+  const entityRows: { id: string; entityType: string; name: string }[] = [];
+  const truncatedTypes: string[] = [];
+  for (const entityType of CONTEXT_ENTITY_TYPES) {
+    const rows = await db.entity.findMany({
+      where: { workId: work.id, entityType, deletedAt: null },
+      orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      take: MAX_CONTEXT_ENTITIES_PER_TYPE + 1,
+      select: { id: true, entityType: true, name: true },
+    });
+    if (rows.length > MAX_CONTEXT_ENTITIES_PER_TYPE) {
+      truncatedTypes.push(entityType);
+    }
+    entityRows.push(...rows.slice(0, MAX_CONTEXT_ENTITIES_PER_TYPE));
+  }
 
   const names = new Map<string, string>();
   for (const entity of entityRows) {
@@ -340,6 +355,16 @@ export async function buildChapterDraftContext(
       rank: RANK_DIRECTION,
     },
   ];
+
+  if (truncatedTypes.length > 0) {
+    const labels = truncatedTypes.map((type) => ENTITY_TYPE_LABELS[type] ?? type).join('/');
+    sources.push({
+      contextType: 'context.truncated',
+      refId: null,
+      snippet: `上下文截断：${labels}超过 ${MAX_CONTEXT_ENTITIES_PER_TYPE} 条，仅保留前 ${MAX_CONTEXT_ENTITIES_PER_TYPE} 条`,
+      rank: RANK_TRUNCATED,
+    });
+  }
 
   return { context, sources };
 }

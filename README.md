@@ -630,15 +630,21 @@ assemble_context → plan_chapter → validate_and_freeze_contract
   Schema + 代码双重校验（空值、场景四字段、2500–4000 字），通过后冻结为 `chapter_contracts`；
 - `writer.chapter@1.0.0`：输出 `{ text }`；服务端按"非空白字符数"重新统计，
   少于 1200 字直接失败，不写候选；`word_count` 不信任模型；
+- **模型选择**：章节 Agent 的 `model` 为空 → 使用 Provider 的 `defaultModel`
+  （OpenAI 兼容 = `MODEL_NAME`，Mock = `mock-model`）；显式 `model` 仍可覆盖；
+  成功 / 失败日志都记录解析后的实际模型，不允许空字符串；
 - 确定性 ContextBuilder：章节 → 人物 → 境界 → 势力 → 作品方向，写入 `task_contexts`
   （snippet ≤500）；**不跨作品**，`secret` 类字段不进入模型输入；
+  人物/境界/势力各最多 50 条，截断时追加 `context.truncated` 安全提示；
+- Planner 输出的人物必须来自上下文（精确匹配），`targetWords` 不得改动；
+- 合同与候选有数据库级不可变触发器（UPDATE/DELETE 一律拒绝），候选状态迁移留给 A1-3；
 - 合同 / 候选 / 章节状态 / 审计同事务；失败或取消不留下候选；
 - 重试幂等：同任务已有合同 → 不再调 Planner；已有候选 → 不再调 Writer、不重复插行；
 - 章节状态：合同 `outlined` → Writer 开始 `drafting` → 候选 `in_review`；任务终态仍是 `succeeded`；
 - 不建 `chapter_versions`，不提供采纳接口；这些属于 A1-3。
 
-**测试**：A1-2 新增 24 个（流水线 17 / Agent 校验 7）；workflow 包 **142** 个；
-全量单测 **532** 个。
+**测试**：A1-2 系列（含 REV-01）新增 35 个（流水线 21 / Agent 校验 9 / Provider 4 /
+Agent 基础 1）；workflow 包 **153** 个；全量单测 **543** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 

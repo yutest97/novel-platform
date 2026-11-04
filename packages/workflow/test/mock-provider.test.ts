@@ -23,6 +23,12 @@ afterEach(() => {
 });
 
 describe('MockProvider', () => {
+  it('defaultModel 默认 mock-model，可配置且空白回落', () => {
+    expect(new MockProvider().defaultModel).toBe('mock-model');
+    expect(new MockProvider({ model: 'mock-large' }).defaultModel).toBe('mock-large');
+    expect(new MockProvider({ model: '   ' }).defaultModel).toBe('mock-model');
+  });
+
   it('默认输出固定，不联网', async () => {
     const fetchSpy = vi.fn(() => Promise.reject(new Error('不应联网')));
     vi.stubGlobal('fetch', fetchSpy);

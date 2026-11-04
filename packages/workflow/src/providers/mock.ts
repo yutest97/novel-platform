@@ -33,6 +33,8 @@ export type MockTextResponder = string | ((input: ModelTextInput) => string);
 export interface MockProviderOptions {
   readonly json?: MockJsonResponder;
   readonly text?: MockTextResponder;
+  /** 默认模型名；缺省 `mock-model`（非空）。 */
+  readonly model?: string;
   /** 固定延迟（毫秒），不读系统时钟，保证确定性。 */
   readonly latencyMs?: number;
 }
@@ -48,10 +50,14 @@ function cloneJson(value: MockJsonValue): MockJsonValue {
 
 export class MockProvider implements ModelProvider {
   readonly name = 'mock';
+  /** 默认模型名：Agent 未显式指定时使用。 */
+  readonly defaultModel: string;
   private readonly options: MockProviderOptions;
 
   constructor(options: MockProviderOptions = {}) {
     this.options = options;
+    const configured = options.model?.trim() ?? '';
+    this.defaultModel = configured === '' ? 'mock-model' : configured;
   }
 
   /**

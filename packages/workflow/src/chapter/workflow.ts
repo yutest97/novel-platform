@@ -18,7 +18,7 @@ import { AgentRunner, type AgentDefinition, type AgentRunResult } from '../agent
 import { NonRetryableTaskError, sanitizeTaskError } from '../errors.js';
 import type { WorkflowDefinition, WorkflowStepContext } from '../kernel.js';
 import type { ModelProvider } from '../model-types.js';
-import { recordLlmCall, upsertTaskContext } from '../queue.js';
+import { recordLlmCall } from '../queue.js';
 import {
   normalizePlannerOutput,
   PLANNER_CHAPTER_AGENT,
@@ -234,7 +234,8 @@ async function callAgent<T>(input: {
       taskId: input.taskId,
       stage,
       provider: input.providerName,
-      model: input.agent.model,
+      // 失败时也要记录实际解析出的模型（不能是空字符串）。
+      model: input.runner.resolveModel(input.agent),
       promptTokens: 0,
       completionTokens: 0,
       latencyMs: Math.max(0, Date.now() - startedAt),
@@ -286,16 +287,23 @@ export function createChapterDraftWorkflow(
             authorId: assembled.context.work.authorId,
           };
 
-          // 只记录来源与摘要，不记录正文 / prompt；重试时按唯一键覆盖。
-          for (const source of assembled.sources) {
-            await upsertTaskContext(db, {
-              taskId: context.task.taskId,
-              contextType: source.contextType,
-              refId: source.refId,
-              snippet: source.snippet,
-              rank: source.rank,
-            });
-          }
+          // 只记录来源与摘要，不记录正文 / prompt。
+          // 先删后插（同事务）：重试时不会重复、也不会留下上一轮已失效的来源；
+          // `context.truncated` 的 ref_id 为 NULL，不能依赖唯一键去重。
+          await db.$transaction(async (tx) => {
+            await tx.taskContext.deleteMany({ where: { taskId: context.task.taskId } });
+            if (assembled.sources.length > 0) {
+              await tx.taskContext.createMany({
+                data: assembled.sources.map((source) => ({
+                  taskId: context.task.taskId,
+                  contextType: source.contextType,
+                  refId: source.refId,
+                  snippet: source.snippet,
+                  rank: source.rank,
+                })),
+              });
+            }
+          });
 
           context.state.set(STATE_CONTEXT, assembled.context);
           context.state.set(STATE_FENCE, fence);
@@ -325,7 +333,10 @@ export function createChapterDraftWorkflow(
             signal: context.signal,
           });
 
-          const plan = normalizePlannerOutput(result.output);
+          const plan = normalizePlannerOutput(result.output, {
+            allowedCharacters: chapterContext.characters.map((entity) => entity.name),
+            targetWords: chapterContext.targetWords,
+          });
           context.state.set(STATE_PLAN, plan);
         },
       },

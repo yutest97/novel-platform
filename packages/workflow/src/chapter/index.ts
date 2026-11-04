@@ -10,6 +10,7 @@ export {
 export { buildChapterDraftContext, type BuildContextInput } from './context.js';
 export {
   CHAPTER_DRAFT_TASK_TYPE,
+  MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,
   MAX_DRAFT_CHARS,
   MIN_CONTRACT_TARGET_WORDS,

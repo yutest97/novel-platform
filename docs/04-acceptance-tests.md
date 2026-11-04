@@ -484,7 +484,11 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-25 | 审计脱敏 | 合同冻结 / 三次状态迁移 / 候选创建均有审计；detail 不含正文、goal、API Key、邮箱 | 同上 |
 | AT-WF-26 | 跨作品隔离 | 模型输入与 task_contexts 只含本作品数据，不含另一作品的名称/方向/账号 | 同上 |
 | AT-WF-27 | 数据库归属约束 | 复合外键拒绝"跨作品的合同"与"跨任务引用合同"的候选 | 同上 |
-| AT-WF-28 | 既有测试不减少 | 既有 508 个测试全绿；A1-2 新增 24 个（workflow 142） | 全量 `pnpm test` |
+| AT-WF-28 | 既有测试不减少 | 既有 508 个测试全绿；A1-2 + REV-01 共新增 35 个（workflow 153） | 全量 `pnpm test` |
+| AT-WF-29 | 模型解析 | 章节 Agent 空模型 → OpenAI 请求体使用 `MODEL_NAME`；显式模型覆盖生效；失败日志记录解析后的模型且不含 Key/prompt | `test/openai-provider.test.ts`、`test/agent.test.ts`、`test/mock-provider.test.ts`、`test/chapter-workflow.test.ts` |
+| AT-WF-30 | 合同/候选不可变 | 直接 SQL / Prisma 更新合同 goal/scene_beats、删除合同、更新候选 content/word_count/structured_plan/status、删除候选全部失败；正常读取不受影响 | `test/chapter-workflow.test.ts` |
+| AT-WF-31 | Planner 语义校验 | 虚构人物、改动 targetWords → `failed`，合同/候选 0；合法人物通过 | `test/chapter-agents.test.ts`、`test/chapter-workflow.test.ts` |
+| AT-WF-32 | 上下文 50 条上限 | 60 个人物时 Planner 输入恰好 50 条、Schema 不失败；task_contexts 只含选中实体；`context.truncated`（ref_id=null、rank=500）留痕 | `test/chapter-workflow.test.ts` |
 
 **未交付（不得标记完成）**：生成 API、章节工作台 UI、候选采纳、`chapter_versions`、
 Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。

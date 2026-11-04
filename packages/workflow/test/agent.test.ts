@@ -41,6 +41,19 @@ const baseAgent: AgentDefinition = {
   rolePrompt: '你负责起标题。',
 };
 
+describe('模型解析', () => {
+  it('agent.model 为空时回落 provider.defaultModel；显式值优先', async () => {
+    const provider = new MockProvider({ model: 'provider-default', json: { title: '标题' } });
+    const runner = new AgentRunner(provider);
+
+    expect(runner.resolveModel({ ...baseAgent, model: '' })).toBe('provider-default');
+    expect(runner.resolveModel(baseAgent)).toBe('mock-model');
+
+    const result = await runner.run({ ...baseAgent, model: '' }, { text: '你好' });
+    expect(result.model).toBe('provider-default');
+  });
+});
+
 describe('AgentDefinition', () => {
   it('合法定义通过校验', () => {
     expect(() => assertAgentDefinition(baseAgent)).not.toThrow();

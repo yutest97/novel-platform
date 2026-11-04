@@ -224,8 +224,8 @@ interface AgentDefinition {
 | Worker | 真实 PostgreSQL + 测试工作流（含 Agent 集成、心跳、取消、重试、崩溃恢复） |
 | 迁移 | 全新空库执行全部 migration；既有表不动 |
 
-A1-1 系列（含 A1-1-REV-01）新增 118 个测试；A1-2 新增 24 个；既有 390 个测试不减少。
-workflow 包当前共 **142** 个测试。
+A1-1 系列（含 A1-1-REV-01）新增 118 个测试；A1-2 系列（含 REV-01）新增 35 个；
+既有 390 个测试不减少。workflow 包当前共 **153** 个测试。
 
 ---
 
@@ -276,7 +276,10 @@ WorkerRunner
 代码校验（Schema 之后再做一遍）：
 
 - `goal` trim 后非空；`scenes` 至少 1 个，四个字段 trim 后都非空；
-- `targetWords` 必须是 2500–4000 的整数；
+- `targetWords` 必须是 2500–4000 的整数，且**必须等于本次上下文请求的目标字数**
+  （Planner 不能自行改动）；
+- `characters` 只能引用本次上下文中真实存在的人物（精确匹配 `name`），
+  不允许新增未提供人物；空数组允许，但非空时必须全部合法；
 - 数组项 trim 后不能为空，按原顺序去重；
 - 未知字段由 Schema 直接拒绝；任何一项不满足 → **不可重试失败**，不写合同。
 
@@ -306,8 +309,14 @@ WorkerRunner
 - 只按 `work_id` 读取；章节额外校验 `chapter.work_id`，**不跨作品**；
 - 只读当前 `schemaRef` 的属性；`secret` / `secretKnownBy` 永不进入摘要与模型输入；
 - 人物引用的境界 / 势力会解析为名称后再给模型；
+- **每类实体最多 50 条**（人物 / 境界 / 势力各自计算），顺序固定为
+  `order_index asc → createdAt asc → id asc`；超过 50 条时只取前 50 条，
+  并在 `task_contexts` 末尾追加一条 `context_type='context.truncated'`、
+  `ref_id=null`、`rank=500` 的安全提示（只说明哪类被截断，不包含实体内容）；
 - 不调用模型决定上下文、不做 RAG；
-- 每条来源写入 `task_contexts`（snippet ≤ 500，重试时按唯一键覆盖，不重复插行）。
+- 每条来源写入 `task_contexts`（snippet ≤ 500）；写入采用**同事务先删后插**，
+  重试不会重复、也不会留下上一轮已失效的来源（`context.truncated` 的 `ref_id`
+  为 NULL，不能依赖唯一键去重）。
 
 ### 12.5 合同与候选的数据边界
 
@@ -322,9 +331,29 @@ WorkerRunner
   候选必须引用同任务合同；
 - 合同 / 候选写入、章节状态更新、审计在**同一事务**提交；审计只记 ids、版本、
   字数与状态，**不记 goal / 场景 / 正文 / prompt**；
-- 本轮**不建 `chapter_versions`**，候选不是正式正文。
+- 两张表都有数据库级**不可变保护**：
+  - `chapter_contracts`：`BEFORE UPDATE / BEFORE DELETE` 一律 `restrict_violation`；
+  - `chapter_candidates`：`BEFORE DELETE` 一律拒绝；`BEFORE UPDATE` 本轮一律拒绝，
+    触发器里保留了 A1-3 `candidate → adopted` 的扩展分支（当前不开放）；
+  - 因此直接 SQL 也改不了合同、删不掉候选；正常重试只做 SELECT，不受影响；
+- 本轮**不建 `chapter_versions`**，候选不是正式正文；候选状态迁移与正式版本创建
+  都留给 A1-3。
 
-### 12.6 重试幂等
+### 12.6 模型选择（AgentDefinition.model 允许为空）
+
+- `AgentDefinition.model` 表示"任务角色希望使用的模型"，**允许为空**；
+- `ModelProvider.defaultModel` 是 Provider 的默认模型（非空）：
+  - `MockProvider` → `mock-model`（可通过构造参数覆盖）；
+  - `OpenAICompatibleProvider` → 环境变量 `MODEL_NAME`；
+- `AgentRunner.resolveModel(agent)`：
+  - `agent.model` 非空 → 使用它（显式覆盖）；
+  - 为空 → 使用 `provider.defaultModel`；
+- 章节 Planner / Writer 的 `model` 都是空字符串：真实环境自动使用 `MODEL_NAME`，
+  单测 / CI 使用 Mock 的默认模型，不会把 `mock-model` 带进生产；
+- `llm_call_logs` 成功记录 Provider 返回的实际 `model`；失败记录
+  `resolveModel()` 的结果，**不允许空字符串**。
+
+### 12.7 重试幂等
 
 同一个 `generation_task` 重试时：
 
@@ -334,7 +363,7 @@ WorkerRunner
 4. 章节状态按需补齐（合同 → outlined，候选 → in_review），状态已到位则不重复审计；
 5. `llm_call_logs` 只对应**实际发生**的模型调用：重试跳过 Planner 时不会多出 planner 日志。
 
-### 12.7 章节状态
+### 12.8 章节状态
 
 ```
 planned ──合同冻结──▶ outlined ──Writer 开始──▶ drafting ──候选写入──▶ in_review

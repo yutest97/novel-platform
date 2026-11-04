@@ -3,6 +3,7 @@
 -- 设计要点（改动前请先读）：
 --
 -- 1. 两张表都**只追加**：合同冻结后不再修改，候选写入后不再修改；
+--    数据库触发器在 UPDATE / DELETE 层兜底（见文件末尾）；
 --    采纳为正式版本属于 A1-3（chapter_versions），本轮不建。
 --
 -- 2. 归属关系用**复合外键**在数据库层钉死：
@@ -153,3 +154,42 @@ ALTER TABLE "chapter_candidates" ADD CONSTRAINT "chapter_candidates_contract_tas
     FOREIGN KEY ("contract_id", "generation_task_id", "chapter_id", "work_id")
     REFERENCES "chapter_contracts"("id", "generation_task_id", "chapter_id", "work_id")
     ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- ---------------------------------------------------------------------------
+-- 不可变保护：合同 / 候选只能插入与读取
+-- ---------------------------------------------------------------------------
+-- 为什么要数据库兜底：合同是"作者签发前的计划基线"，候选是"这一次生成的证据"；
+-- 任何 UPDATE / DELETE 都会让审计与重试幂等失去意义。应用层没有修改入口，
+-- 这里再拦一次直接的 SQL。
+
+CREATE OR REPLACE FUNCTION "chapter_contracts_immutable"() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'chapter_contracts 不可修改或删除（冻结合同）'
+    USING ERRCODE = 'restrict_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "chapter_contracts_immutable_trigger"
+  BEFORE UPDATE OR DELETE ON "chapter_contracts"
+  FOR EACH ROW EXECUTE FUNCTION "chapter_contracts_immutable"();
+
+CREATE OR REPLACE FUNCTION "chapter_candidates_immutable"() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    -- A1-3 扩展口：届时只允许 status candidate -> adopted，且其它列保持不变。
+    -- 本轮不开放任何 UPDATE。
+    IF NEW."status" IS DISTINCT FROM OLD."status" THEN
+      RAISE EXCEPTION 'chapter_candidates 状态迁移尚未开放（A1-3）'
+        USING ERRCODE = 'restrict_violation';
+    END IF;
+    RAISE EXCEPTION 'chapter_candidates 不可修改'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+  RAISE EXCEPTION 'chapter_candidates 不可删除'
+    USING ERRCODE = 'restrict_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "chapter_candidates_immutable_trigger"
+  BEFORE UPDATE OR DELETE ON "chapter_candidates"
+  FOR EACH ROW EXECUTE FUNCTION "chapter_candidates_immutable"();

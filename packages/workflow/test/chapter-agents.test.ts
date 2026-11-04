@@ -74,6 +74,11 @@ describe('Agent 定义与输出 Schema', () => {
   });
 });
 
+const VALIDATION_CONTEXT = {
+  allowedCharacters: ['李青', '赵四'],
+  targetWords: 3000,
+};
+
 describe('Planner 输出代码校验', () => {
   it('trim 并去重，保持顺序', () => {
     const plan = normalizePlannerOutput(
@@ -89,6 +94,7 @@ describe('Planner 输出代码校验', () => {
           },
         ],
       }),
+      VALIDATION_CONTEXT,
     );
     expect(plan.goal).toBe('目标');
     expect(plan.mustInclude).toEqual(['外门大比', '隐藏修为']);
@@ -101,15 +107,44 @@ describe('Planner 输出代码校验', () => {
   });
 
   it('拒绝空白 goal / 空白场景字段 / 越界 targetWords', () => {
-    expect(() => normalizePlannerOutput(validPlan({ goal: '   ' }))).toThrow(/goal/);
+    expect(() => normalizePlannerOutput(validPlan({ goal: '   ' }), VALIDATION_CONTEXT)).toThrow(
+      /goal/,
+    );
     expect(() =>
       normalizePlannerOutput(
         validPlan({
           scenes: [{ purpose: '  ', location: '演武场', conflict: '冲突', outcome: '结果' }],
         }),
+        VALIDATION_CONTEXT,
       ),
     ).toThrow(/scenes\[0\]/);
-    expect(() => normalizePlannerOutput(validPlan({ targetWords: 2000 }))).toThrow(/targetWords/);
+    expect(() =>
+      normalizePlannerOutput(validPlan({ targetWords: 2000 }), VALIDATION_CONTEXT),
+    ).toThrow(/targetWords/);
+  });
+
+  it('characters 只能引用上下文中真实存在的人物；空数组允许', () => {
+    expect(() =>
+      normalizePlannerOutput(validPlan({ characters: ['虚构人物'] }), VALIDATION_CONTEXT),
+    ).toThrow(/characters/);
+    expect(
+      normalizePlannerOutput(validPlan({ characters: ['李青'] }), VALIDATION_CONTEXT).characters,
+    ).toEqual(['李青']);
+    expect(
+      normalizePlannerOutput(validPlan({ characters: [] }), VALIDATION_CONTEXT).characters,
+    ).toEqual([]);
+  });
+
+  it('targetWords 必须等于本次上下文请求的目标字数', () => {
+    expect(() =>
+      normalizePlannerOutput(validPlan({ targetWords: 3200 }), VALIDATION_CONTEXT),
+    ).toThrow(/targetWords/);
+    expect(
+      normalizePlannerOutput(validPlan({ targetWords: 3200 }), {
+        ...VALIDATION_CONTEXT,
+        targetWords: 3200,
+      }).targetWords,
+    ).toBe(3200);
   });
 });
 

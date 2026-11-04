@@ -20,7 +20,12 @@ export interface AgentDefinition {
   readonly name: string;
   /** Prompt 版本，例如 `1.0.0`；同一 name 可有多个版本。 */
   readonly promptVersion: string;
-  /** 默认模型；Provider 可覆盖为空时回落到服务端配置。 */
+  /**
+   * 任务角色希望使用的模型。
+   *
+   * 允许为空：为空表示"由 Provider 决定"，AgentRunner 回落到
+   * `provider.defaultModel`；不得把 mock 模型硬编码进业务 Agent。
+   */
   readonly model: string;
   readonly inputSchema: JsonSchema;
   readonly outputSchema: JsonSchema;
@@ -163,12 +168,24 @@ export class AgentRegistry {
 export class AgentRunner {
   constructor(private readonly provider: ModelProvider) {}
 
+  /**
+   * 解析本次调用实际使用的模型。
+   *
+   * - `agent.model` 非空 → 显式覆盖；
+   * - 为空 → `provider.defaultModel`（OpenAI 兼容 = MODEL_NAME，Mock = mock-model）。
+   */
+  resolveModel(agent: AgentDefinition): string {
+    const explicit = agent.model.trim();
+    return explicit === '' ? this.provider.defaultModel : explicit;
+  }
+
   async run<TOutput = unknown>(
     agent: AgentDefinition,
     input: unknown,
     options: AgentRunOptions = {},
   ): Promise<AgentRunResult<TOutput>> {
     assertAgentDefinition(agent);
+    const model = this.resolveModel(agent);
 
     const inputIssues = validateJson(agent.inputSchema, input);
     if (inputIssues.length > 0) {
@@ -176,7 +193,7 @@ export class AgentRunner {
     }
 
     const result = await this.provider.generateJson({
-      model: agent.model,
+      model,
       maxOutputTokens: agent.maxOutputTokens,
       ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),

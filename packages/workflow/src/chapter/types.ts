@@ -19,6 +19,9 @@ export const MAX_CONTRACT_TARGET_WORDS = 4000;
 /** 正文候选的最大字符数（与数据库 CHECK 一致）。 */
 export const MAX_DRAFT_CHARS = 200_000;
 
+/** 单类上下文实体（人物 / 境界 / 势力）最多进入 Agent 的条数。 */
+export const MAX_CONTEXT_ENTITIES_PER_TYPE = 50;
+
 /** 写作风格参数（由任务输入覆盖，缺省从作品方向推导）。 */
 export interface ChapterStyle {
   readonly tone: string;
@@ -77,7 +80,8 @@ export interface ChapterDraftContext {
 /** 实际写入 task_contexts 的一条来源。 */
 export interface ContextSource {
   readonly contextType: string;
-  readonly refId: string;
+  /** 截断提示等非实体来源为 null。 */
+  readonly refId: string | null;
   readonly snippet: string;
   readonly rank: number;
 }

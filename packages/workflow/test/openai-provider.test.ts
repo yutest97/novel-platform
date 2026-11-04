@@ -7,6 +7,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { AgentRunner } from '../src/agent.js';
+import { PLANNER_CHAPTER_AGENT } from '../src/chapter/agents.js';
 import { ModelProviderError } from '../src/model-types.js';
 import { OpenAICompatibleProvider, type FetchLike } from '../src/providers/openai-compatible.js';
 import { createModelProvider, readProviderConfig } from '../src/provider.js';
@@ -111,6 +113,91 @@ describe('OpenAICompatibleProvider 请求与解析', () => {
     const init = fetchImpl.mock.calls[0]?.[1] as RequestInit;
     expect(bodyOf(init)['model']).toBe('default-model');
     expect(result.model).toBe('default-model');
+  });
+});
+
+describe('AgentRunner 模型解析（真实 Provider）', () => {
+  const plannerInput = {
+    chapter: { chapterNo: 1, title: '第 1 章', targetWords: 3000 },
+    style: { tone: '克制', pointOfView: '第三人称限知', pacing: '中速' },
+    workDirection: {},
+    characters: [],
+    realms: [],
+    factions: [],
+  };
+
+  const plannerOutput = {
+    goal: '目标',
+    mustInclude: [],
+    mustNotInclude: [],
+    characters: [],
+    scenes: [{ purpose: '推进', location: '山门', conflict: '对峙', outcome: '离开' }],
+    targetWords: 3000,
+  };
+
+  function plannerFetch(): { fetchImpl: FetchLike; calls: RequestInit[] } {
+    const calls: RequestInit[] = [];
+    const fetchImpl: FetchLike = (_url, init) => {
+      calls.push(init);
+      return Promise.resolve(
+        okJson({ choices: [{ message: { content: JSON.stringify(plannerOutput) } }] }),
+      );
+    };
+    return { fetchImpl, calls };
+  }
+
+  it('章节 Agent 空模型 → 请求体与结果使用 MODEL_NAME（real-model）', async () => {
+    expect(PLANNER_CHAPTER_AGENT.model).toBe('');
+    const { fetchImpl, calls } = plannerFetch();
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: 'https://model.example.test/v1',
+      apiKey: SECRET_KEY,
+      model: 'real-model',
+      fetchImpl,
+    });
+    const runner = new AgentRunner(provider);
+
+    const result = await runner.run(PLANNER_CHAPTER_AGENT, plannerInput);
+
+    expect(bodyOf(calls[0] as RequestInit)['model']).toBe('real-model');
+    expect(result.model).toBe('real-model');
+  });
+
+  it('Agent 显式模型覆盖仍生效', async () => {
+    const { fetchImpl, calls } = plannerFetch();
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: 'https://model.example.test/v1',
+      apiKey: SECRET_KEY,
+      model: 'real-model',
+      fetchImpl,
+    });
+    const runner = new AgentRunner(provider);
+
+    await runner.run({ ...PLANNER_CHAPTER_AGENT, model: 'explicit-model' }, plannerInput);
+
+    expect(bodyOf(calls[0] as RequestInit)['model']).toBe('explicit-model');
+  });
+
+  it('失败错误与日志不包含 Key / prompt', async () => {
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(new Response(JSON.stringify({ error: SECRET_PROMPT }), { status: 401 }));
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: 'https://model.example.test/v1',
+      apiKey: SECRET_KEY,
+      model: 'real-model',
+      fetchImpl,
+    });
+    const runner = new AgentRunner(provider);
+
+    try {
+      await runner.run(PLANNER_CHAPTER_AGENT, plannerInput);
+      throw new Error('should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelProviderError);
+      const serialized = JSON.stringify(error);
+      expect(serialized).not.toContain(SECRET_KEY);
+      expect(serialized).not.toContain(SECRET_PROMPT);
+    }
   });
 });
 
