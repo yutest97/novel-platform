@@ -733,6 +733,47 @@ describe('生成任务', () => {
     expect(row.lockedBy).toBeNull();
   });
 
+  it('取消后用相同参数、新 requestId 重新生成 → 新任务（旧 requestId 仍幂等命中 cancelled）', async () => {
+    const author = await createUser('author');
+    const workId = await createWork(author.id);
+    const chapter = await createChapter(workId, author.token);
+    const firstRequestId = `req-${randomUUID()}`;
+    const first = await startTask(workId, chapter.id, author.token, {
+      requestId: firstRequestId,
+      targetWords: 3000,
+    });
+
+    const cancelled = await cancelPost(
+      request(`/api/works/${workId}/generation-tasks/${String(first.task['id'])}/cancel`, {
+        method: 'POST',
+        token: author.token,
+      }),
+      taskParams(workId, String(first.task['id'])),
+    );
+    expect(cancelled.status).toBe(200);
+
+    // 旧 requestId 重放：按幂等返回既有 cancelled 任务，这就是前端必须换新 id 的原因
+    const replay = await startTask(workId, chapter.id, author.token, {
+      requestId: firstRequestId,
+      targetWords: 3000,
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.task['id']).toBe(first.task['id']);
+    expect(replay.task['status']).toBe('cancelled');
+
+    // 新 requestId：必须创建新任务，页面才不会停在旧的 cancelled 上
+    const fresh = await startTask(workId, chapter.id, author.token, {
+      requestId: `req-${randomUUID()}`,
+      targetWords: 3000,
+    });
+    expect(fresh.status).toBe(201);
+    expect(fresh.task['id']).not.toBe(first.task['id']);
+    expect(fresh.task['status']).toBe('queued');
+
+    const count = await db.generationTask.count({ where: { chapterId: chapter.id } });
+    expect(count).toBe(2);
+  });
+
   it('取消 processing 任务只写 cancel_requested_at，状态仍为 processing', async () => {
     const author = await createUser('author');
     const workId = await createWork(author.id);

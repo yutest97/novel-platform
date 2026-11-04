@@ -846,8 +846,8 @@ Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无�
 **尚未开放**：Markdown 人工编辑、`human` 版本、版本 diff / 恢复、Reviewer / RAG。
 
 **测试**：A1-4A 新增 31 个（只读 API 7、展示纯函数 10、浏览器 E2E 10、
-workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 8 个（展示纯函数 6、浏览器 E2E 2）；
-全量单测 **678** 个（web 183 / workflow 180 / worker 63 / shared 15 / db 10 /
+workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展示纯函数 6、浏览器 E2E 2）；
+全量单测 **679** 个（web 184 / workflow 180 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **79**。
 
 ### 浏览器 E2E（Playwright Chromium）
