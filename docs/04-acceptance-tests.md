@@ -377,7 +377,7 @@ B3-B2 交付 item 卡片入口、时间线（分页 / 冲正关系）、追加�
 | F-WRK-05 | AT-SET-4/8（势力设定，M2-B2 已交付部分）、AT-FLOW-1 |
 | F-WRK-06 | AT-SET-1/2/6/10（境界体系）、AT-FLOW-1、AT-CONT-3 |
 | F-WRK-07 | AT-SET-13/14/15/16/17/19/20/22（**完成**：持有人由事件流回放派生、item 卡片时间线入口、删除当前持有人 409；**AT-CHK-4 待章节**）、AT-FLOW-1 |
-| F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 |
+| F-WRK-08 | AT-CHK-3（资源）、AT-FACT-2 —— **暂停**（个人可用版优先，A1 工作流内核先行；不删除） |
 | F-WRK-09 | AT-SET-11/13/15（**已完成**）、AT-FLOW-1（功法） |
 | F-WRK-11 | AT-SET-16/17/18/19/21/22（**完成**：追加 / 冲正 / 回放 / 序号 / append-only + 时间线 UI 与 E2E；**AT-CHK-4 待章节**） |
 | F-WRK-15 | AT-CHK-5（认知）——**仍待 M6 事实版本系统交付，M2-B2 未交付** |
@@ -434,3 +434,29 @@ B3-B2 交付 item 卡片入口、时间线（分页 / 冲正关系）、追加�
 - 许可证检查通过（见 `05` §6）。
 
 > 说明：上述用例由实现方在阶段二落地为自动化测试（桩模型优先）；本轮仅定义用例，**不视为已通过**。
+
+---
+
+## 17. 工作流内核验收（A1-1）
+
+> 对应 `docs/07-master-roadmap.md` A1-1、`docs/08-workflow-and-agents.md`。
+> A1-1 **不交付** Planner/Writer、生成 API/UI、章节候选/版本；这些属于 A1-2/A1-3。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-1 | Provider 接口与 MockProvider | Mock 不联网、输出确定、深拷贝隔离；同一输入两次结果相等 | `test/mock-provider.test.ts` |
+| AT-WF-2 | 非法 JSON 被 Schema 拒绝 | 缺字段/类型错/未声明字段/超长/非法枚举均被拒绝；错误只带路径与原因 | `test/json-schema.test.ts`、`test/agent.test.ts` |
+| AT-WF-3 | API Key / prompt 不出现在错误与日志 | Provider 错误只含固定文案与状态码；`llm_call_logs` 无 prompt/正文列；任务错误只存安全文案 | `test/openai-provider.test.ts`、`test/worker.test.ts`、`test/queue.test.ts` |
+| AT-WF-4 | 两个 Worker 并发领取同一任务 | 只有一个成功；`attempt_count` 只 +1 | `test/queue.test.ts`、`test/worker.test.ts` |
+| AT-WF-5 | 租约过期可恢复 | 过期后 sweep 重新排队；新 Worker 可完成；旧 Worker 写入全部 0 行 | `test/queue.test.ts`、`test/worker.test.ts` |
+| AT-WF-6 | heartbeat 延长租约 | `lease_until` 明显后移；执行期间可观察到心跳更新 | `test/queue.test.ts`、`test/worker.test.ts` |
+| AT-WF-7 | attempt_count / max_attempts | 未用尽回到 queued；用尽转 failed；不可重试一次即 failed | `test/queue.test.ts`、`test/worker.test.ts` |
+| AT-WF-8 | cancel_requested_at 阻止后续步骤 | 步骤之间检测到取消即停止；queued 取消后不再被领取 | `test/kernel.test.ts`、`test/worker.test.ts`、`test/queue.test.ts` |
+| AT-WF-9 | 同 work_id + request_id 只创建一个任务 | 并发创建只有一行；第二次返回既有任务 | `test/queue.test.ts` |
+| AT-WF-10 | 非法状态迁移被拒绝 | queued→succeeded 被数据库拒绝；终态不可再修改 | `test/queue.test.ts` |
+| AT-WF-11 | chapters 数据隔离 | `UNIQUE(work_id, chapter_no)`；不同作品可同章号；跨作品章节不能建任务 | `test/queue.test.ts` |
+| AT-WF-12 | 既有测试不减少 | 既有 390 个测试全绿；A1-1 新增 98 个 | 全量 `pnpm test` |
+
+**未交付（不得标记完成）**：Planner/Writer 流水线、生成 API、章节 UI、
+`chapter_contracts / chapter_candidates / chapter_versions`、Reviewer/Continuity/Fact、
+RAG/图数据库、资源流水（M2-B4 暂停）、多人功能。

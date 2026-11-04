@@ -1,13 +1,11 @@
 # AI 小说写作平台
 
-> 封闭源码、限定用户使用的中文 AI 小说写作 Web 系统。
-> 当前阶段：**M1-A（工程骨架与持续集成）**。
+> 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
+> 当前阶段：**A1-1（工作流内核 + Model Provider + Agent 基础 + PostgreSQL Worker）**。
 
-本阶段**只交付工程骨架**：monorepo 结构、四个服务的容器编排、数据库连接与迁移框架、
-健康检查、代码质量与许可证门禁。
-
-**本阶段不包含**：注册/登录/会话/权限、小说业务表与 CRUD、真实模型 API 接入、模型 SDK、
-玄幻规则、事实回写、生成流程。产品范围见 `docs/`，以 `docs/00-product-brief.md` 为准。
+已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核。
+暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
+工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
 ---
 
@@ -457,7 +455,7 @@ v4 迁移只动 `3.0.0`）。
 | F-WRK-09 功法/能力（名称、类型、境界门槛、效果、副作用） | **完成**：`technique` 五个字段齐全，`realmRequirement` 引用境界，删除被引用境界 → `409` + 摘要                                                           |
 | F-WRK-07 物品/法宝（名称、类别、品质、持有人、获取方式） | **完成**：持有人由 `item_events` 回放派生；item 卡片「持有人 / 事件」可查看时间线并追加 / 冲正；删除当前持有人 → `409` + 物品清单；**`AT-CHK-4` 待章节** |
 | F-WRK-11 物品获得/消耗/丢失/转手事件流水                 | **完成**：追加 / 冲正 / 回放 / 序号 / append-only + 时间线 UI（分页、二次确认、错误映射）+ E2E；**`AT-CHK-4` 待章节**                                    |
-| F-WRK-08 资源流水                                        | **未交付**（M2-B4）                                                                                                                                      |
+| F-WRK-08 资源流水                                        | **暂停**（个人可用版优先；代码与文档保留，不删除）                                                                                                       |
 
 > `AT-CHK-4`（正文使用但无转手事件 / 同时被两人持有 → 「物品归属矛盾」）
 > **仍未交付**：它需要章节正文与场景节拍（M2-D/M2-E），不是 B3-B2 能验证的。
@@ -560,6 +558,56 @@ detail 只有 `workId / itemId / eventId / eventType / seq`（冲正额外记 `r
 （`03-data-model.md` §3.11 `knowledge_marks`）。
 本轮 `character.secretKnownBy` 只表示**设定层「谁知道这个秘密」**，
 不构成事实级认知模型，也不等同于 F-WRK-15。
+
+### 工作流内核、Provider 与 PostgreSQL Worker（A1-1）
+
+迁移：`packages/db/prisma/migrations/20261104010000_a1_workflow_kernel/`。
+A1-1 只搭**确定性工作流基础设施**：不接 Planner/Writer、不提供生成 API/UI、不建章节候选与版本。
+
+| 表                 | 用途            | 关键约束                                                                                        |
+| ------------------ | --------------- | ----------------------------------------------------------------------------------------------- |
+| `chapters`         | 最小章节骨架    | `UNIQUE(work_id, chapter_no)`、`chapter_no >= 1`、状态六态、FK works RESTRICT                   |
+| `generation_tasks` | 任务队列 + 租约 | `UNIQUE(work_id, request_id)`、状态白名单、processing 必须有锁/租约、状态迁移触发器、终态不可变 |
+| `task_contexts`    | 任务上下文摘要  | `(task_id, context_type, ref_id)` 唯一、snippet ≤ 500、rank ≥ 0                                 |
+| `llm_call_logs`    | 模型调用计量    | 只有 token / 延迟 / 成功 / `error_code`，**没有 prompt / 正文列**                               |
+
+**Provider**（Mock / 真实只由配置切换）：
+
+```bash
+MODEL_PROVIDER=mock                 # 默认：不联网、确定性输出（单测 / CI）
+MODEL_PROVIDER=openai-compatible
+MODEL_BASE_URL=https://api.example.com/v1
+MODEL_NAME=your-model
+MODEL_API_KEY=...                   # 只进请求头，不落库、不进日志
+MODEL_TIMEOUT_MS=60000
+```
+
+- `MockProvider`：固定输出或纯函数，token 由字符数估算，供单测/CI；
+- `OpenAICompatibleProvider`：只依赖标准 `fetch`，JSON 模式；错误只含固定文案 + HTTP 状态码，
+  429/5xx 可重试；
+- 不引入 Agent 框架；不提供管理页面 Key 输入。
+
+**Agent 与工作流**：
+
+- `AgentDefinition(name / promptVersion / model / inputSchema / outputSchema / maxOutputTokens / rolePrompt)`；
+- 输入与输出都做**严格 JSON Schema** 校验（未声明字段默认拒绝）；Agent 不访问数据库、
+  不决定工作流下一步；
+- `WorkflowKernel` 只按注册表里的固定步骤执行，进度/取消/租约由 Worker 回调注入；
+- `DETERMINISTIC_TEST_AGENT` 只用于证明"注册 → 校验 → Provider → 输出校验"链路。
+
+**Worker**：
+
+- `FOR UPDATE SKIP LOCKED` 领取 `queued`，写 `locked_by / lease_until / heartbeat_at`，`attempt_count + 1`；
+- 心跳失败立即停止后续步骤；租约过期由 sweep 回收（取消优先 → 次数用尽判 failed → 其余回 queued）；
+- 所有 Worker 写都带 `locked_by` fencing，旧 Worker 不会覆盖新 Worker；
+- 崩溃不会留下永久 `processing`；同一 `work_id + request_id` 只创建一个任务。
+
+**权限与日志**：A1-1 **没有新增公开 API**；作者侧服务（创建/读取/取消）必须传会话里的
+`authorId` 并经 `requireOwnedWork`，管理员没有普通任务入口（测试覆盖 404）。
+任务与模型日志只记录 ids / 状态 / 稳定错误码，不含 API Key、prompt、正文或模型原始错误。
+
+**测试**：A1-1 新增 98 个（Provider 14 / Schema 20 / Agent 15 / Kernel 11 / Queue 20 / Worker 13 /
+Mock 5），全量单测 **488** 个。
 
 ### 浏览器 E2E（Playwright Chromium）
 
@@ -892,9 +940,11 @@ pnpm --filter <应用> deploy --prod --legacy --config.node-linker=hoisted /out
 │   └── worker/              # 独立 Node Worker（/healthz）
 ├── packages/
 │   ├── shared/              # 前后端共享类型与纯函数（健康状态逻辑）
-│   ├── db/                  # Prisma 迁移与连接（users / sessions / audit_logs）
-│   └── auth/                # 账号、argon2id 哈希、会话、审计、限流、Origin 校验
-│       └── scripts/         # seed-admin.mjs（一次性创建管理员）
+│   ├── db/                  # Prisma 迁移与连接（账号 / 作品 / 设定 / 物品事件 / 任务）
+│   ├── auth/                # 账号、argon2id 哈希、会话、审计、限流、Origin 校验
+│   │   └── scripts/         # seed-admin.mjs（一次性创建管理员）
+│   ├── works/               # 作品、规则包、设定实体与物品事件流水
+│   └── workflow/            # A1-1：工作流内核、Provider、Agent、PostgreSQL 任务队列
 ├── infra/
 │   ├── docker-compose.yml       # postgres / web / worker / caddy（默认 production）
 │   ├── docker-compose.dev.yml   # 开发模式 override（不改变默认 production）
@@ -928,12 +978,14 @@ docker compose -f infra/docker-compose.yml up -d --wait
 
 ## 12. 相关文档
 
-| 文档                                   | 内容                         |
-| -------------------------------------- | ---------------------------- |
-| `docs/00-product-brief.md`             | 产品目标、用户、范围边界     |
-| `docs/01-mvp-scope.md`                 | 功能清单、优先级、阶段工期   |
-| `docs/02-user-flows.md`                | 用户流程与页面清单           |
-| `docs/03-data-model.md`                | 数据模型与题材解耦边界       |
-| `docs/04-acceptance-tests.md`          | 验收用例与追踪矩阵           |
-| `docs/05-architecture-and-licenses.md` | 架构、部署、备份、许可证准入 |
-| `docs/06-open-questions.md`            | 待负责人决策的问题           |
+| 文档                                   | 内容                           |
+| -------------------------------------- | ------------------------------ |
+| `docs/00-product-brief.md`             | 产品目标、用户、范围边界       |
+| `docs/01-mvp-scope.md`                 | 功能清单、优先级、阶段工期     |
+| `docs/02-user-flows.md`                | 用户流程与页面清单             |
+| `docs/03-data-model.md`                | 数据模型与题材解耦边界         |
+| `docs/04-acceptance-tests.md`          | 验收用例与追踪矩阵             |
+| `docs/05-architecture-and-licenses.md` | 架构、部署、备份、许可证准入   |
+| `docs/06-open-questions.md`            | 待负责人决策的问题             |
+| `docs/07-master-roadmap.md`            | 个人可用版优先的总路线         |
+| `docs/08-workflow-and-agents.md`       | A1-1 工作流、Provider 与 Agent |

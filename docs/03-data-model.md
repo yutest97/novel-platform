@@ -171,6 +171,11 @@ rule_packages (题材规则包，系统级)
 | chapter_outlines | chapter_id, content(jsonb: 目标/冲突/伏笔动作/结尾钩子), edited_flag, version |
 | chapter_beats | chapter_id, beats(jsonb: 每节拍视角/在场人物/地点/动作/情绪/字数预算) |
 
+> **A1-1 实现口径（2026-11）**：本轮只落地最小 `chapters(id, work_id, chapter_no, title,
+> status, created_at, updated_at)`，`UNIQUE(work_id, chapter_no)`，状态仍为六态（默认 `planned`）。
+> `volumes`、`volume_id`、`order_index`、`target_words`、`summary`、`chapter_outlines`、
+> `chapter_beats` 延后到章节工作台阶段（A1-2/A1-3）。
+
 ### 3.4 chapter_candidates + chapter_versions（v1.1 拆分草稿与正式版本）
 
 **chapter_candidates（候选/草稿区）**：生成结果先落这里，**不直接成为正式版本**。
@@ -267,56 +272,73 @@ rule_packages (题材规则包，系统级)
 
 **causal_links**：`from_event_id, to_event_id, note`（因果边，用于检测"果早于因"）。
 
-### 3.8 generation_tasks（v1.1 强化幂等与队列）
+### 3.8 chapters / generation_tasks / task_contexts / llm_call_logs（A1-1 实现口径）
+
+> 本节以迁移 `20261104010000_a1_workflow_kernel` 为准。早期方案中的
+> `pending/running`、`UNIQUE(user_id, request_id)`、`request_payload/input_hash`、
+> `scope`、`total_tokens` 等字段在 A1-1 按实际实现收敛，差异见本节末尾。
+
+**chapters**：`id, work_id, chapter_no, title, status, created_at, updated_at`。
+`UNIQUE(work_id, chapter_no)`；`chapter_no >= 1`；状态六态；
+FK `work_id → works` **ON DELETE RESTRICT**。本轮不建卷/大纲表。
+
+**generation_tasks**：任务队列 + 租约。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | id | uuid PK | |
-| request_id | uuid **NOT NULL** | 客户端生成，**始终非空**；唯一约束为 `UNIQUE(user_id, request_id)`（见下） |
-| user_id | uuid FK→users | 任务发起者；与 request_id 组成幂等键 |
-| scope | enum('work','chapter','rewrite') | 作品级/章节级/重写级任务 |
-| work_id | uuid FK | |
-| chapter_id | uuid nullable | 作品级任务为 null |
-| task_type | enum(volume_outline/stage_goal/chapter_outline/beats/draft/rewrite/review/fact_extract) | |
-| status | enum(pending/running/succeeded/failed/cancelled) | |
-| input_hash | text | 入参指纹；**仅作审计与输入比较，不设唯一约束** |
-| locked_by | text nullable | 当前持有该任务的 Worker 实例 ID |
-| lease_until | timestamptz nullable | 租约到期时间 |
-| heartbeat_at | timestamptz nullable | 最后心跳 |
-| attempt_count | int default 0 | 重试次数 |
-| cancel_requested_at | timestamptz nullable | 用户请求取消时间 |
-| request_payload | jsonb | 原始入参 |
-| error_code / error_message | text | |
-| progress | jsonb | 阶段步进 |
+| work_id | uuid FK→works | 作品隔离；RESTRICT |
+| chapter_id | uuid nullable FK→chapters | A1-1 允许为空；A1-2 正文任务必填 |
+| request_id | text | 客户端逻辑请求 id；与 work_id 组成幂等键 |
+| task_type | text | 工作流类型（A1-1 为自由字符串，A1-2 收敛枚举） |
+| status | text | `queued / processing / succeeded / failed / cancelled` |
+| current_step | text nullable | 最近完成的步骤名（检查点） |
+| input_snapshot | jsonb | 结构化输入，≤ 64 KiB；**不放 prompt/正文/密钥** |
+| provider / model | text | 任务使用的 Provider 与模型（仅名称） |
+| attempt_count / max_attempts | int | 领取即 +1；用尽转 failed |
+| locked_by / lease_until / heartbeat_at | text/timestamptz | 租约三件套；processing 必须非空 |
+| cancel_requested_at | timestamptz | 作者请求取消的时间 |
+| error_code / error_message_sanitized | text | 稳定错误码 + 安全文案 |
 | created_at / updated_at | timestamptz | |
 
-**幂等键与 request_id 语义（v1.3 补全，回应审查第 5 条）**：
-- `request_id`：客户端为每次"逻辑操作"生成 UUID，**按用户唯一**，唯一约束为 `UNIQUE(user_id, request_id)`。
-- `input_hash`：入参指纹，**只作审计与输入比较字段，不设全局唯一约束**。
+`UNIQUE(work_id, request_id)`；`status` 白名单；`attempt_count <= max_attempts`；
+`processing` 必须有锁与租约、其它状态必须没有；状态迁移由触发器校验，终态不可修改。
 
-四种情况的精确语义：
+**状态机**：
 
-| 情况 | 判定条件 | 行为 |
+```
+queued ──claim──▶ processing ──complete──▶ succeeded
+  │                   ├──retryable（未用尽）──▶ queued
+  │                   ├──non-retryable / 用尽──▶ failed
+  │                   └──cancel────────────────▶ cancelled
+  └──cancel（未领取）──────────────────────────▶ cancelled
+```
+
+**幂等与租约**：
+
+- 同 `work_id + request_id` 只创建一条任务；并发创建由唯一索引兜底，
+  冲突时返回既有任务（`created=false`）；
+- Worker 用 `FOR UPDATE SKIP LOCKED` 领取 `queued`，写锁与租约、`attempt_count + 1`；
+- 心跳失败（0 行）立即停止后续步骤；旧 Worker 的任何写入都带
+  `locked_by` fencing，不会覆盖新 Worker；
+- 租约过期由 sweep 回收：取消优先 → 次数用尽判 failed → 其余回 queued。
+
+**task_contexts**：`id, task_id, context_type, ref_id, snippet, rank`。
+`(task_id, context_type, ref_id)` 唯一；snippet ≤ 500（只存摘要，不存正文）；rank ≥ 0。
+
+**llm_call_logs**：`id, task_id, stage, provider, model, prompt_tokens,
+completion_tokens, latency_ms, success, error_code, created_at`。
+**没有 prompt / 正文 / 响应列**；失败只记稳定 `error_code`。
+
+**与早期方案的差异（A1-1 有意收敛）**：
+
+| 早期方案 | A1-1 实现 | 原因 |
 | --- | --- | --- |
-| 幂等命中 | 同 `user_id` + 同 `request_id` + 同 `input_hash` | 返回**原任务**（不新建），阻止并发重复提交 |
-| request_id 复用冲突 | 同 `user_id` + 同 `request_id` + **不同** `input_hash` | 返回 `409 REQUEST_ID_REUSED`（同一 request_id 被用于不同入参，属客户端 bug） |
-| Worker 自动重试 | 同 task（租约过期/崩溃后重抢） | **同一 task**，`attempt_count + 1`，不新建 task |
-| 用户主动重新生成 | 同 `user_id` + **新 `request_id`**（input_hash 可相同可不同） | 新建 task |
-
-- **作用域**（用于业务校验与任务分类，不参与唯一约束）：
-  - `work` 级（卷纲、阶段目标）：`chapter_id = null`。
-  - `chapter` 级（细纲、节拍、正文草稿、检查）：`chapter_id` 非空。
-  - `rewrite` 级（局部重写）：`chapter_id` 非空 + 选中范围指纹记录于 `request_payload`。
-
-**队列与租约（v1.1）**：
-- Worker 用 `SELECT ... FOR UPDATE SKIP LOCKED` 抢 `pending` 任务，抢到后写 `locked_by + lease_until + heartbeat_at`。
-- Worker 定期心跳；`lease_until` 过期且无心跳 → 视为崩溃，任务可被重新抢占，`attempt_count + 1`（**同一 task，不新建**）。
-- 超过最大 attempt（默认 3）→ 标 `failed`。
-- `cancel_requested_at` 非空 → Worker 在处理前检查并停止后续动作。
-
-**task_contexts**：`task_id, context_type(setting/history/fact/outline), ref_id, snippet, rank`。
-
-**llm_call_logs**：`task_id, model, provider, prompt_tokens, completion_tokens, total_tokens, latency_ms, error, created_at`。
+| `status = pending/running` | `queued/processing` | 与"领取 queued"的队列语义一致 |
+| `UNIQUE(user_id, request_id)` | `UNIQUE(work_id, request_id)` | 任务天然属于作品；同作者不同作品可复用 request_id |
+| `request_payload` + `input_hash` | `input_snapshot`（无指纹） | A1-1 不做入参冲突 409；调用方保证 request_id 与内容一一对应 |
+| `scope` / `task_type` 枚举 / `progress` | 暂未落地 | A1-2 接入 Planner/Writer 时按实际任务类型收敛 |
+| `total_tokens` | 由两列相加得出 | 少一列冗余，避免不一致 |
 
 ### 3.9 rule_packages / rule_definitions（规则包，系统级）
 

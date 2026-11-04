@@ -141,6 +141,8 @@ model Work {
   settings WorkSetting[]
   entities Entity[]
   itemEvents ItemEvent[]
+  chapters Chapter[]
+  generationTasks GenerationTask[]
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -282,4 +284,113 @@ model ItemEvent {
   @@unique([reversalOf])
   @@index([workId, itemEntityId, seqNo])
   @@map("item_events")
+}
+
+/// 章节（A1-1 最小骨架）。
+///
+/// 本阶段只建立表与隔离约束，不提供章节 UI / 生成 API；
+/// status 沿用数据模型文档的六态枚举，默认 planned。
+/// chapter_no 在**同一作品内**唯一且从 1 开始；不存卷号（卷纲属后续阶段）。
+model Chapter {
+  id        String   @id @default(uuid()) @db.Uuid
+  workId    String   @map("work_id") @db.Uuid
+  chapterNo Int      @map("chapter_no")
+  title     String
+  status    String   @default("planned")
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  work            Work             @relation(fields: [workId], references: [id], onDelete: Restrict)
+  generationTasks GenerationTask[]
+
+  @@unique([workId, chapterNo])
+  @@index([workId, chapterNo])
+  @@map("chapters")
+}
+
+/// 生成任务（A1-1 工作流内核）。
+///
+/// - `(work_id, request_id)` 唯一：同一逻辑请求只创建一个任务；
+/// - status 只允许 queued → processing → succeeded/failed/cancelled，
+///   processing 可回到 queued（重试）；迁移合法性与"终态不可变"
+///   由数据库触发器兜底；
+/// - 租约（locked_by/lease_until）用于崩溃恢复：租约过期后由 sweep 重新排队，
+///   详见 docs/08-workflow-and-agents.md；
+/// - input_snapshot 只放结构化输入（不含 prompt/正文/密钥）；
+/// - error_message_sanitized 只存服务端映射后的安全文案，永不存模型原始错误。
+model GenerationTask {
+  id                    String    @id @default(uuid()) @db.Uuid
+  workId                String    @map("work_id") @db.Uuid
+  chapterId             String?   @map("chapter_id") @db.Uuid
+  requestId             String    @map("request_id")
+  taskType              String    @map("task_type")
+  status                String    @default("queued")
+  currentStep           String?   @map("current_step")
+  inputSnapshot         Json      @map("input_snapshot")
+  provider              String
+  model                 String
+  attemptCount          Int       @default(0) @map("attempt_count")
+  maxAttempts           Int       @default(3) @map("max_attempts")
+  lockedBy              String?   @map("locked_by")
+  leaseUntil            DateTime? @map("lease_until") @db.Timestamptz(3)
+  heartbeatAt           DateTime? @map("heartbeat_at") @db.Timestamptz(3)
+  cancelRequestedAt     DateTime? @map("cancel_requested_at") @db.Timestamptz(3)
+  errorCode             String?   @map("error_code")
+  errorMessageSanitized String?   @map("error_message_sanitized")
+  createdAt             DateTime  @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  work       Work        @relation(fields: [workId], references: [id], onDelete: Restrict)
+  chapter    Chapter?    @relation(fields: [chapterId], references: [id], onDelete: Restrict)
+  contexts   TaskContext[]
+  llmLogs    LlmCallLog[]
+
+  @@unique([workId, requestId])
+  @@index([workId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([status, leaseUntil])
+  @@map("generation_tasks")
+}
+
+/// 任务上下文引用（A1-1）。
+///
+/// 只保存"引用了什么 + 简短摘要"，**不保存正文**；
+/// snippet 由调用方裁剪，长度 ≤ 500。
+model TaskContext {
+  id          String  @id @default(uuid()) @db.Uuid
+  taskId      String  @map("task_id") @db.Uuid
+  contextType String  @map("context_type")
+  refId       String? @map("ref_id") @db.Uuid
+  snippet     String?
+  rank        Int     @default(0)
+
+  task GenerationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, contextType, refId])
+  @@index([taskId, rank])
+  @@map("task_contexts")
+}
+
+/// 模型调用日志（A1-1）。
+///
+/// 只记可计量字段：**不保存 prompt、不保存响应正文、不保存 API Key**；
+/// 失败只记稳定的 error_code（不记模型原始错误，避免带出请求内容）。
+model LlmCallLog {
+  id               String   @id @default(uuid()) @db.Uuid
+  taskId           String   @map("task_id") @db.Uuid
+  stage            String
+  provider         String
+  model            String
+  promptTokens     Int      @default(0) @map("prompt_tokens")
+  completionTokens Int      @default(0) @map("completion_tokens")
+  latencyMs        Int      @default(0) @map("latency_ms")
+  success          Boolean
+  errorCode        String?  @map("error_code")
+  createdAt        DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  task GenerationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+  @@index([createdAt])
+  @@map("llm_call_logs")
 }

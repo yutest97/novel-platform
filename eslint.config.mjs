@@ -70,6 +70,8 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',
+      // 测试里的步骤/桩函数经常是 async 但无 IO，不强制 await
+      '@typescript-eslint/require-await': 'off',
     },
   },
   prettier,
