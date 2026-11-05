@@ -67,6 +67,7 @@
 - Writer 候选保存与审阅任务入队在**同一个作品锁事务**内提交，崩溃不会留下没有审阅任务的候选；
 - `chapter_review_runs` / `chapter_review_issues`：`UNIQUE(candidate_id)`、
   `UNIQUE(generation_task_id)`、issue 复合外键、结论自洽 CHECK、append-only 触发器；
+- issue 只允许写入 running run；succeeded / failed 终态后不可追加，避免 issue_count 失真；
 - 固定三步 `load_review_input → run_reviewer → persist_review_result`；
 - run 复用：成功跳过、失败重试复用同一行、失去租约的 running 被接管；
 - 失败只影响 review task / run，不回滚候选、不改变章节状态与采纳权；
@@ -150,15 +151,15 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B 已完成主体实现，但复审发现终态 run 仍可追加 issue；当前修复卡：
+A2-C-B 主体与复审修复均已在本地完成，等待负责人复审：
 
 `docs/tasks/A2-C-B-REV-01-review-integrity.md`
 
-WorkBuddy 修复并通过复审前，不进入推送或下一阶段实现。
+该文件是已完成修复的追溯记录，不再派发。复审通过前不推送，也不进入下一阶段实现。
 
 复审通过后的候选顺序：
 
-1. A2-D-A Summarizer Agent 契约（卡已备：
+1. A2-D-A Summarizer Agent 契约（已备卡，A2-C-B 复审通过后派发：
    `docs/tasks/A2-D-A-summarizer-agent.md`）；
 2. Reviewer 结果读取 API / UI（当前 run 与 issues 已落库，但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
@@ -211,14 +212,14 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **909**（web 309 / workflow 285 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **911**（web 309 / workflow 287 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | migrations | **12** |
 | 数据表 | **22** |
-| 数据库触发器 | **13** |
+| 数据库触发器 | **14** |
 
-新增 22 个 workflow 集成测试（`chapter-review-workflow.test.ts`）；
+新增 24 个 workflow 集成测试（`chapter-review-workflow.test.ts`）；
 另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review），
-因此 workflow 285、全量 909。
+因此 workflow 287、全量 911。
 
 最近新增质量门禁：
 
@@ -230,7 +231,7 @@ A2-C-B（本地，未推送）后的当前数字：
 - 单 SQL 列表快照；
 - Reviewer 输入字段封锁与 evidence 子串校验；
 - 审阅任务的**任务行锁 + `locked_by` fence**（旧 Worker 晚返回写不进 issue）；
-- review run 的结论自洽 CHECK 与 append-only 触发器；
+- review run 的结论自洽 CHECK 与 append-only 触发器；issue 只能在 running run 追加；
 - review 任务终态时由触发器关闭 running run（取消不留下永久 running）；
 - 元数据摘要（实体摘要加载）在事实提取与 Reviewer 之间共用同一套 secret 过滤。
 

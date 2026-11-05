@@ -381,9 +381,22 @@ describe('审阅运行与问题落库', () => {
   it('问题表的归属与顺序由数据库兜底（复合外键 / UNIQUE / CHECK）', async () => {
     const fixture = await newFixture();
     const drafted = await draftCandidate(fixture);
-    await expect(runnerFor(drafted.provider.provider).runOnce()).resolves.toBe('succeeded');
+    const claimed = await claimNextTask(db, { workerId: 'constraint-worker', leaseMs: 5_000 });
+    expect(claimed?.id).toBe(drafted.reviewTaskId);
+    await prepareReviewRun({
+      db,
+      fence: fenceFor({
+        reviewTaskId: drafted.reviewTaskId,
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        candidateId: drafted.candidateId,
+        workerId: 'constraint-worker',
+      }),
+      provider: 'mock',
+      model: 'mock-model',
+    });
     const run = await getReviewRunByTaskId(db, drafted.reviewTaskId);
-    expect(run?.status).toBe('succeeded');
+    expect(run?.status).toBe('running');
 
     const inserted = await db.chapterReviewIssue.create({
       data: {
@@ -489,6 +502,49 @@ describe('审阅运行与问题落库', () => {
       await tx.chapterReviewIssue.deleteMany({ where: { id: inserted.id } });
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_review_issues" ENABLE TRIGGER USER');
     });
+  });
+
+  it('running 结束后不能再追加问题（成功 / 失败终态均拒绝）', async () => {
+    const fixture = await newFixture();
+    const succeeded = await draftCandidate(fixture);
+    await expect(runnerFor(succeeded.provider.provider).runOnce()).resolves.toBe('succeeded');
+    const succeededRun = await getReviewRunByTaskId(db, succeeded.reviewTaskId);
+    expect(succeededRun?.status).toBe('succeeded');
+
+    await expect(
+      db.$executeRawUnsafe(
+        `INSERT INTO "chapter_review_issues"
+           ("id", "run_id", "work_id", "chapter_id", "candidate_id",
+            "ordinal", "severity", "type", "evidence", "suggestion")
+         VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+                 0, 'low', 'prose_quality', '成功后的追加', '不应写入')`,
+        succeededRun?.id ?? '',
+        fixture.workId,
+        fixture.chapterId,
+        succeeded.candidateId,
+      ),
+    ).rejects.toThrow(/只有 running/);
+
+    const failed = await draftCandidate(fixture, {
+      reviewer: () => ({ passed: false, issues: [] }),
+    });
+    await expect(runnerFor(failed.provider.provider).runOnce()).resolves.toBe('failed');
+    const failedRun = await getReviewRunByTaskId(db, failed.reviewTaskId);
+    expect(failedRun?.status).toBe('failed');
+
+    await expect(
+      db.$executeRawUnsafe(
+        `INSERT INTO "chapter_review_issues"
+           ("id", "run_id", "work_id", "chapter_id", "candidate_id",
+            "ordinal", "severity", "type", "evidence", "suggestion")
+         VALUES (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4::uuid,
+                 0, 'low', 'prose_quality', '失败后的追加', '不应写入')`,
+        failedRun?.id ?? '',
+        fixture.workId,
+        fixture.chapterId,
+        failed.candidateId,
+      ),
+    ).rejects.toThrow(/只有 running/);
   });
 
   it('问题 append-only，成功的 run 不可改、不可删，非法迁移被拒绝', async () => {
@@ -689,6 +745,58 @@ describe('失败隔离与重试', () => {
     expect(await db.chapterReviewIssue.count({ where: { candidateId: drafted.candidateId } })).toBe(
       0,
     );
+  });
+
+  it('任务以 failed 终态关闭仍为 running 的 run', async () => {
+    const fixture = await newFixture();
+    const drafted = await draftCandidate(fixture);
+
+    const claimed = await claimNextTask(db, { workerId: 'failed-worker', leaseMs: 5_000 });
+    expect(claimed?.id).toBe(drafted.reviewTaskId);
+    await prepareReviewRun({
+      db,
+      fence: fenceFor({
+        reviewTaskId: drafted.reviewTaskId,
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        candidateId: drafted.candidateId,
+        workerId: 'failed-worker',
+      }),
+      provider: 'mock',
+      model: 'mock-model',
+    });
+    expect((await getReviewRunByTaskId(db, drafted.reviewTaskId))?.status).toBe('running');
+
+    await expect(
+      failTask(db, {
+        taskId: drafted.reviewTaskId,
+        workerId: 'failed-worker',
+        errorCode: 'TASK_VALIDATION_FAILED',
+        message: '任务不可重试失败',
+        retryable: false,
+      }),
+    ).resolves.toBe('failed');
+
+    const task = await reviewTaskRow(drafted.reviewTaskId);
+    expect(task).toMatchObject({
+      status: 'failed',
+      errorCode: 'TASK_VALIDATION_FAILED',
+      lockedBy: null,
+    });
+    const run = await getReviewRunByTaskId(db, drafted.reviewTaskId);
+    expect(run).toMatchObject({
+      status: 'failed',
+      errorCode: 'TASK_VALIDATION_FAILED',
+      passed: null,
+      issueCount: 0,
+    });
+    expect(run?.finishedAt).not.toBeNull();
+    expect(await db.chapterReviewIssue.count({ where: { candidateId: drafted.candidateId } })).toBe(
+      0,
+    );
+    expect(
+      (await db.chapterCandidate.findUniqueOrThrow({ where: { id: drafted.candidateId } })).content,
+    ).toBe(drafted.candidateContent);
   });
 
   it('租约丢失后重新领取会接管同一个 run（不会新建第二行）', async () => {
