@@ -127,6 +127,8 @@ Agent 产出候选
 
 目标：Writer 完成后增加受工作流约束的 Reviewer Agent。
 
+当前可执行任务卡：`docs/tasks/A2-C-A-reviewer-agent.md`。
+
 初步边界：
 
 - 输入：冻结合同、正文候选、必要上下文与已有连续性摘要；
