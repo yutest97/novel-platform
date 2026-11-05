@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 
 import { SESSION_COOKIE_NAME } from '@novel/auth';
 import { getPrismaClient, type PrismaClient } from '@novel/db';
+import { WorkerRunner, WorkflowKernel, WorkflowRegistry } from '@novel/workflow';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { POST as finalizePost } from '../app/api/works/[id]/chapters/[chapterId]/finalize/route.js';
@@ -579,5 +580,191 @@ describe('并发与回滚', () => {
     const ok = await finalize(fixture, { versionId: v2 });
     expect(ok.status).toBe(200);
     expect(await chapterStatus(fixture.chapterId)).toBe('finalized');
+  });
+});
+
+/**
+ * A2-D-B-REV-01：模型配置异常不得阻断定稿。
+ *
+ * 摘要只是派生数据。finalize 路由对 summary spec 做 best-effort 解析：
+ * 配置缺失 / 非法时返回 null，定稿照常成功，只是不创建摘要任务。
+ */
+const MODEL_ENV_KEYS = ['MODEL_PROVIDER', 'MODEL_BASE_URL', 'MODEL_API_KEY', 'MODEL_NAME'] as const;
+
+type ModelEnvKey = (typeof MODEL_ENV_KEYS)[number];
+
+async function withModelEnv<T>(
+  env: Partial<Record<ModelEnvKey, string>>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const backup = new Map<ModelEnvKey, string | undefined>(
+    MODEL_ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+  try {
+    for (const key of MODEL_ENV_KEYS) {
+      const value = env[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    return await run();
+  } finally {
+    for (const key of MODEL_ENV_KEYS) {
+      const value = backup.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+const MOCK_ENV = { MODEL_PROVIDER: 'mock' } as const;
+const BROKEN_OPENAI_ENV = { MODEL_PROVIDER: 'openai-compatible' } as const;
+const VALID_OPENAI_ENV = {
+  MODEL_PROVIDER: 'openai-compatible',
+  MODEL_BASE_URL: 'https://model.invalid/v1',
+  MODEL_API_KEY: 'test-key-not-real',
+  MODEL_NAME: 'gpt-4o-mini-test',
+} as const;
+
+async function summaryTasks(chapterId: string) {
+  return db.generationTask.findMany({
+    where: { chapterId, taskType: 'chapter.summarize' },
+    orderBy: { createdAt: 'asc' },
+  });
+}
+
+describe('模型配置异常不阻断定稿', () => {
+  it('openai-compatible 缺配置时仍返回 200，且不创建摘要任务', async () => {
+    const fixture = await createFixture();
+    const { v2 } = await seedTwoVersions(fixture);
+
+    const result = await withModelEnv(BROKEN_OPENAI_ENV, () =>
+      finalize(fixture, { versionId: v2 }),
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.json.chapter).toMatchObject({
+      chapterId: fixture.chapterId,
+      status: 'finalized',
+      versionId: v2,
+      versionNo: 2,
+      deduplicated: false,
+    });
+    expect(await chapterStatus(fixture.chapterId)).toBe('finalized');
+    // 定稿审计照常写入
+    expect(await finalizeAuditRows(fixture.chapterId)).toHaveLength(1);
+
+    // 不创建摘要任务、不产生 LLM 日志
+    expect(await summaryTasks(fixture.chapterId)).toHaveLength(0);
+    expect(await db.llmCallLog.count({ where: { task: { workId: fixture.workId } } })).toBe(0);
+
+    // 响应字段不变，且不泄露配置错误 / provider / model
+    expect(Object.keys(result.json).sort()).toEqual(['chapter']);
+    expect(Object.keys(result.json.chapter as Record<string, unknown>).sort()).toEqual(
+      ['chapterId', 'deduplicated', 'status', 'versionId', 'versionNo'].sort(),
+    );
+    expect(result.text).not.toContain('MODEL_NOT_CONFIGURED');
+    expect(result.text).not.toContain('provider');
+    expect(result.text).not.toContain('model');
+  });
+
+  it('配置恢复后同版本幂等定稿补齐摘要任务', async () => {
+    const fixture = await createFixture();
+    const { v2 } = await seedTwoVersions(fixture);
+
+    const skipped = await withModelEnv(BROKEN_OPENAI_ENV, () =>
+      finalize(fixture, { versionId: v2 }),
+    );
+    expect(skipped.status).toBe(200);
+    expect(await summaryTasks(fixture.chapterId)).toHaveLength(0);
+
+    const recovered = await withModelEnv(MOCK_ENV, () => finalize(fixture, { versionId: v2 }));
+    expect(recovered.status).toBe(200);
+    expect(recovered.json.chapter?.deduplicated).toBe(true);
+
+    const tasks = await summaryTasks(fixture.chapterId);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      status: 'queued',
+      provider: 'mock',
+      model: 'mock-model',
+      requestId: `summary:${v2}`,
+    });
+    expect(tasks[0]?.inputSnapshot).toEqual({ sourceVersionId: v2 });
+    // 幂等定稿不重复写审计
+    expect(await finalizeAuditRows(fixture.chapterId)).toHaveLength(1);
+  });
+
+  it('合法 openai-compatible 配置记录正确元数据，且不联网', async () => {
+    const fixture = await createFixture();
+    const { v2 } = await seedTwoVersions(fixture);
+
+    const result = await withModelEnv(VALID_OPENAI_ENV, () => finalize(fixture, { versionId: v2 }));
+    expect(result.status).toBe(200);
+
+    const tasks = await summaryTasks(fixture.chapterId);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      provider: 'openai-compatible',
+      model: 'gpt-4o-mini-test',
+    });
+    // 只写任务，不在请求期调用模型
+    expect(await db.llmCallLog.count({ where: { task: { workId: fixture.workId } } })).toBe(0);
+  });
+
+  it('配置漂移后重复定稿复用既有任务，不覆盖 provider / model', async () => {
+    const fixture = await createFixture();
+    const { v2 } = await seedTwoVersions(fixture);
+
+    const first = await withModelEnv(MOCK_ENV, () => finalize(fixture, { versionId: v2 }));
+    expect(first.status).toBe(200);
+    const [created] = await summaryTasks(fixture.chapterId);
+    expect(created).toBeDefined();
+
+    // 配置漂移：模型名换了，但同一 sourceVersion 的幂等定稿不能被阻断
+    const drifted = await withModelEnv(VALID_OPENAI_ENV, () =>
+      finalize(fixture, { versionId: v2 }),
+    );
+    expect(drifted.status).toBe(200);
+    expect(drifted.json.chapter?.deduplicated).toBe(true);
+
+    const tasks = await summaryTasks(fixture.chapterId);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.id).toBe(created?.id);
+    // 不被 finalize 静默改写
+    expect(tasks[0]).toMatchObject({ provider: 'mock', model: 'mock-model' });
+    expect(tasks[0]?.inputHash).toBe(created?.inputHash);
+  });
+
+  it('配置漂移后 Worker 预检仍按既有规则判定模型配置不一致', async () => {
+    const fixture = await createFixture();
+    const { v2 } = await seedTwoVersions(fixture);
+
+    await withModelEnv(MOCK_ENV, () => finalize(fixture, { versionId: v2 }));
+    const [task] = await summaryTasks(fixture.chapterId);
+    expect(task).toBeDefined();
+
+    // 只保留本用例的排队任务，保证 runOnce 领到的就是它
+    await db.generationTask.deleteMany({
+      where: { status: 'queued', taskType: 'chapter.summarize', id: { not: task?.id ?? '' } },
+    });
+
+    const runner = new WorkerRunner(db, new WorkflowKernel(new WorkflowRegistry()), {
+      provider: { name: 'openai-compatible', defaultModel: 'gpt-4o-mini-test' },
+      workerId: 'preflight-worker',
+      leaseMs: 5_000,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+
+    await expect(runner.runOnce()).resolves.toBe('failed');
+    const row = await db.generationTask.findUniqueOrThrow({ where: { id: task?.id ?? '' } });
+    expect(row.errorCode).toBe('TASK_MODEL_CONFIG_MISMATCH');
+    // finalize 没有静默改写任务
+    expect(row).toMatchObject({ provider: 'mock', model: 'mock-model' });
   });
 });

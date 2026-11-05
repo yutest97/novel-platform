@@ -42,8 +42,11 @@ export interface FinalizeChapterInput {
    *
    * 由 API 层在**服务端**按 `readProviderConfig()` / Provider 构造结果解析后传入；
    * 请求体永远不能提交这两个值，事务内也不读取环境。
+   *
+   * `null` 表示模型服务未配置：定稿照常成功，只**跳过**摘要任务。
+   * 摘要只是派生数据，配置问题不得阻断作者定稿。
    */
-  readonly summary: ModelTaskSpec;
+  readonly summary: ModelTaskSpec | null;
 }
 
 /** 定稿结果（**不含正文**）。 */
@@ -54,9 +57,14 @@ export interface FinalizedChapter {
   readonly versionNo: number;
   /** `true` 表示本次是幂等重试，没有新增审计。 */
   readonly deduplicated: boolean;
-  /** 同事务入队的 `chapter.summarize` 任务（内部字段，不进入 HTTP 响应）。 */
-  readonly summaryTaskId: string;
-  /** `true` 表示本次新建了摘要任务（幂等重复定稿 / 恢复补齐时为 `false`）。 */
+  /**
+   * 同事务入队的 `chapter.summarize` 任务（内部字段，不进入 HTTP 响应）。
+   *
+   * `null` 表示本次没有摘要任务：模型服务未配置而跳过了摘要调度。
+   * 配置恢复后再次幂等定稿会补齐。
+   */
+  readonly summaryTaskId: string | null;
+  /** `true` 表示本次新建了摘要任务（幂等复用 / 跳过时为 `false`）。 */
   readonly summaryTaskCreated: boolean;
 }
 
@@ -92,21 +100,25 @@ export async function finalizeChapter(input: FinalizeChapterInput): Promise<Fina
       // ---- 已定稿：同版本幂等；不同版本 / 无版本一律状态不允许 ----
       if (chapter.status === FINALIZED_CHAPTER_STATUS) {
         if (latest !== null && versionId === latest.id) {
-          // 幂等重试也要补齐缺失的摘要任务（崩溃恢复），但绝不重复创建。
-          const summaryTask = await ensureSummaryTask(tx, {
-            workId,
-            chapterId,
-            sourceVersionId: latest.id,
-            spec: input.summary,
-          });
+          // 幂等重试也要补齐缺失的摘要任务（崩溃恢复 / 配置恢复），但绝不重复创建。
+          // 配置不可用时（summary === null）只跳过摘要调度，不阻断幂等返回。
+          const summaryTask =
+            input.summary === null
+              ? null
+              : await ensureSummaryTask(tx, {
+                  workId,
+                  chapterId,
+                  sourceVersionId: latest.id,
+                  spec: input.summary,
+                });
           return {
             chapterId,
             status: 'finalized' as const,
             versionId,
             versionNo: latest.versionNo,
             deduplicated: true,
-            summaryTaskId: summaryTask.taskId,
-            summaryTaskCreated: summaryTask.created,
+            summaryTaskId: summaryTask?.taskId ?? null,
+            summaryTaskCreated: summaryTask?.created ?? false,
           };
         }
         throw new AuthError('CHAPTER_STATE_INVALID_FOR_FINALIZE');
@@ -145,13 +157,16 @@ export async function finalizeChapter(input: FinalizeChapterInput): Promise<Fina
         },
       });
 
-      // ---- 摘要在同一事务内入队：定稿提交即一定有对应摘要任务 ----
-      const summaryTask = await ensureSummaryTask(tx, {
-        workId,
-        chapterId,
-        sourceVersionId: latest.id,
-        spec: input.summary,
-      });
+      // ---- 摘要在同一事务内入队：定稿提交即一定有对应摘要任务（配置可用时） ----
+      const summaryTask =
+        input.summary === null
+          ? null
+          : await ensureSummaryTask(tx, {
+              workId,
+              chapterId,
+              sourceVersionId: latest.id,
+              spec: input.summary,
+            });
 
       return {
         chapterId,
@@ -159,8 +174,8 @@ export async function finalizeChapter(input: FinalizeChapterInput): Promise<Fina
         versionId: latest.id,
         versionNo: latest.versionNo,
         deduplicated: false,
-        summaryTaskId: summaryTask.taskId,
-        summaryTaskCreated: summaryTask.created,
+        summaryTaskId: summaryTask?.taskId ?? null,
+        summaryTaskCreated: summaryTask?.created ?? false,
       };
     });
   } catch (error) {

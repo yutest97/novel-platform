@@ -101,6 +101,16 @@
 - 失败 / 取消不修改章节、版本、候选、合同或采纳权，不写 audit_logs；
 - 仍**没有**摘要读取 API / UI，Reviewer `priorSummaries` 仍固定为空。
 
+### A2-D-B-REV-01 定稿不被摘要配置阻断（本地完成，待复审）
+
+- finalize 路由对 summary spec 做 best-effort 解析：`MODEL_NOT_CONFIGURED` →
+  `summary = null`，**定稿照常成功**，只跳过摘要任务；
+- 不伪造 provider / model 占位值，不构造模型请求，不联网，错误不进响应 / 日志 / 审计；
+- 配置恢复后，同版本**再次幂等 finalize** 才补齐任务（无手动重建接口）；
+- 确定性内部任务按 requestId + taskType + chapterId + inputSnapshot 判同一逻辑任务，
+  **不再比较 input_hash**：配置漂移时复用既有 task 且不覆盖其 provider / model；
+  旧 task 是否可执行仍由 Worker 预检决定（`TASK_MODEL_CONFIG_MISMATCH`）。
+
 ---
 
 ## 2. 当前冻结决策
@@ -161,7 +171,7 @@ Agent 产出候选
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
 | A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B 本地完成待复审 |
-| A2-D | Summarizer Agent | A2-D-A 契约 + A2-D-B 工作流 / 落库均本地完成待复审；`priorSummaries` 接线下一步 |
+| A2-D | Summarizer Agent | A2-D-A 契约 + A2-D-B 工作流 / 落库 + REV-01 定稿弹性均本地完成待复审；`priorSummaries` 接线下一步 |
 | A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
@@ -182,6 +192,7 @@ A2-C-B（含 REV-01）、A2-D-A、A2-D-B 均已在本地完成，等待负责人
 - `docs/tasks/A2-C-B-REV-01-review-integrity.md`（已完成修复的追溯记录，不再派发）
 - `docs/tasks/A2-D-A-summarizer-agent.md`（契约层）
 - `docs/tasks/A2-D-B-summarizer-workflow.md`（工作流与落库）
+- `docs/tasks/A2-D-B-REV-01-finalize-resilience.md`（定稿不被摘要配置阻断）
 
 A2-D-B 复审发现一个阻塞项：finalize 路由在模型配置缺失时会被 Provider 构造阻断。
 修复卡：`docs/tasks/A2-D-B-REV-01-finalize-resilience.md`。
@@ -242,7 +253,7 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **949**（web 310 / workflow 324 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **956**（web 315 / workflow 326 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | 浏览器 E2E | **118** |
 | migrations | **13** |
 | 数据表 | **23** |
@@ -252,7 +263,8 @@ A2-C-B（本地，未推送）后的当前数字：
 另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review）；
 A2-D-A 再新增 17 个纯单测（`chapter-summarizer-agent.test.ts`）；
 A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`）
-与 1 个定稿 API 用例，因此 workflow **324**、web **310**、全量 **949**。
+与 1 个定稿 API 用例；A2-D-B-REV-01 再补 5 个定稿 API 用例与 2 个 workflow 用例，
+因此 workflow **326**、web **315**、全量 **956**。
 
 最近新增质量门禁：
 
@@ -289,7 +301,9 @@ A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`�
 13. 定稿后再人工 revision 会让已排队的旧摘要任务以
     `SUMMARY_CHAPTER_NOT_FINALIZED` / `SOURCE_VERSION_STALE` 失败（预期行为，
     但会在任务列表里留下失败记录，后续需要只读 UI 时要注意展示口径）；
-14. 真实模型下每次定稿都会额外产生一次摘要调用，成本与延迟尚未评估。
+14. 真实模型下每次定稿都会额外产生一次摘要调用，成本与延迟尚未评估；
+15. 模型配置不可用期间定稿的章节**不会自动补摘要任务**：必须由作者再次幂等定稿，
+    当前没有手动重建入口，也没有提示；配置长期不可用会让摘要长期缺失。
 
 ---
 
@@ -313,6 +327,10 @@ D-012 Reviewer 结论只落 run / issues，不写 audit_logs；成功是终态�
 D-013 A2-D 之前 `priorSummaries` 固定为空，不得用候选正文或正式正文冒充前章摘要。
 D-014 Summarizer 只处理正式定稿版本；本卡只交付契约，落库 / 幂等 / 租约属于 A2-D-B。
 D-015 摘要是派生数据：按 sourceVersionId 幂等、append-only、不写审计、不改章节与版本。
+D-016 摘要调度是 best-effort：模型配置不可用时只跳过摘要任务，绝不阻断定稿；
+      配置恢复需作者再次幂等定稿才补任务。
+D-017 确定性内部任务按逻辑输入判等，不按 input_hash：配置漂移必须复用既有 task，
+      可执行性交给 Worker 预检，不允许 finalize 静默改写任务元数据。
 ```
 
 ---

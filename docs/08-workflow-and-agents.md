@@ -1872,7 +1872,35 @@ load_summary_input → summarize_chapter → persist_summary
 - 摘要行只有 `summary` 文本与 agent / provider / model 元数据；
 - 表定义与约束见 `docs/03-data-model.md` §3.13。
 
-### 26.5 未做
+### 26.5 模型配置不可用时不阻断定稿（A2-D-B-REV-01）
+
+摘要只是派生数据，**不得让模型配置问题阻断作者定稿**。
+
+- finalize 路由对 summary spec 做 **best-effort 解析**：`readProviderConfig()` +
+  Provider 构造成功 → `{ provider, model }`；抛 `MODEL_NOT_CONFIGURED`
+  （缺 Base URL / Key / 模型名、地址非法）→ 返回 `null`；
+  其它异常照常向上抛；
+- `summary === null` 时：首次定稿照常写章节状态与审计，只是**跳过**摘要任务；
+  已定稿幂等返回不创建任务；`summaryTaskId` 为 `null`；
+- **不伪造 provider / model 占位值**（那会生成永远无法执行的脏任务），
+  不构造模型请求、不联网、不读取 Key，错误不进响应、日志或审计；
+- HTTP 请求 / 响应字段完全不变，不暴露配置错误；
+- 配置恢复后，作者对同一版本再次调用**幂等 finalize** 才会补任务
+  （本轮不提供手动重建接口）。
+
+**配置漂移下的幂等**：确定性内部任务按「requestId + taskType + chapterId +
+inputSnapshot」判断是否同一逻辑任务，**不再比较 `input_hash`**
+（`input_hash` 覆盖 provider / model，配置一变就不同）。因此：
+
+- 已有 task 时，即使当前 provider / model 与旧 task 不同，也复用既有 task；
+- 不覆盖旧 provider / model、不新建第二行、不让 finalize 失败；
+- 旧 task 是否可执行仍由 **Worker 的 provider / model 预检**决定
+  （`TASK_MODEL_CONFIG_MISMATCH`），finalize 不会静默改写 task；
+- 只有逻辑输入（sourceVersionId / chapter / taskType）不一致才按内部错误拒绝；
+- 该规则只用于确定性内部任务，作者显式生成的 `chapter.draft` 仍走
+  `TASK_REQUEST_CONFLICT` 语义。
+
+### 26.6 未做
 
 Reviewer `priorSummaries` 接线、摘要读取 API / UI、摘要回写章节或正文、
 high severity 采纳门禁、自动重写、RAG / embedding / 图谱。

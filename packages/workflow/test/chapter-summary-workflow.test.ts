@@ -121,6 +121,9 @@ async function finalizedVersion(
 ): Promise<{ versionId: string; versionNo: number; taskId: string }> {
   const saved = await saveVersion(fixture, content);
   const result = await finalize(fixture, saved.versionId);
+  if (result.summaryTaskId === null) {
+    throw new Error('测试期望配置可用时创建摘要任务');
+  }
   return { versionId: saved.versionId, versionNo: saved.versionNo, taskId: result.summaryTaskId };
 }
 
@@ -208,6 +211,77 @@ describe('定稿与摘要任务同事务入队', () => {
     });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.inputSnapshot).toEqual({ sourceVersionId: versionId });
+  });
+
+  it('模型配置漂移时复用既有任务，不覆盖 provider / model', async () => {
+    const fixture = await newFixture();
+    const { versionId, taskId } = await finalizedVersion(fixture);
+
+    // 同一 sourceVersion 的幂等定稿：即使当前配置与旧 task 不同，也必须复用
+    const drifted = await finalizeChapter({
+      db,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      authorId: fixture.authorId,
+      versionId,
+      summary: { provider: 'openai-compatible', model: 'gpt-4o-mini' },
+    });
+    expect(drifted).toMatchObject({
+      deduplicated: true,
+      summaryTaskId: taskId,
+      summaryTaskCreated: false,
+    });
+
+    const task = await summaryTaskRow(taskId);
+    expect(task).toMatchObject({ provider: 'mock', model: 'mock-model' });
+    expect(
+      await db.generationTask.count({
+        where: { chapterId: fixture.chapterId, taskType: CHAPTER_SUMMARY_TASK_TYPE },
+      }),
+    ).toBe(1);
+  });
+
+  it('模型配置不可用时定稿照常成功，配置恢复后幂等定稿补齐任务', async () => {
+    const fixture = await newFixture();
+    const saved = await saveVersion(fixture);
+
+    // summary: null 表示服务端解析不到可用模型配置：只跳过摘要调度
+    const skipped = await finalizeChapter({
+      db,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      authorId: fixture.authorId,
+      versionId: saved.versionId,
+      summary: null,
+    });
+    expect(skipped).toMatchObject({
+      status: 'finalized',
+      versionId: saved.versionId,
+      deduplicated: false,
+      summaryTaskId: null,
+      summaryTaskCreated: false,
+    });
+    expect((await db.chapter.findUniqueOrThrow({ where: { id: fixture.chapterId } })).status).toBe(
+      'finalized',
+    );
+    expect(
+      await db.generationTask.count({
+        where: { chapterId: fixture.chapterId, taskType: CHAPTER_SUMMARY_TASK_TYPE },
+      }),
+    ).toBe(0);
+
+    // 配置恢复后同版本幂等定稿补齐任务
+    const recovered = await finalize(fixture, saved.versionId);
+    expect(recovered).toMatchObject({
+      deduplicated: true,
+      summaryTaskCreated: true,
+    });
+    expect(recovered.summaryTaskId).not.toBeNull();
+    expect(
+      await db.generationTask.count({
+        where: { chapterId: fixture.chapterId, taskType: CHAPTER_SUMMARY_TASK_TYPE },
+      }),
+    ).toBe(1);
   });
 
   it('定稿被拒绝时不创建摘要任务', async () => {

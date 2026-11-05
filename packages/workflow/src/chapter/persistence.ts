@@ -15,7 +15,7 @@ import { runWorkWrite } from '@novel/works';
 
 import { NonRetryableTaskError, TaskLeaseLostError } from '../errors.js';
 import { DEFAULT_MAX_ATTEMPTS } from '../queue.js';
-import { hashTaskRequest } from '../request-hash.js';
+import { canonicalJsonStringify, hashTaskRequest } from '../request-hash.js';
 import {
   CHAPTER_REVIEW_TASK_TYPE,
   isChapterOpenForGeneration,
@@ -344,8 +344,16 @@ interface DeterministicTaskInput {
  * 幂等确保确定性内部任务存在。
  *
  * - 不存在 → 创建；
- * - 已存在且 input_hash 相同 → 不重复创建；
- * - 已存在但指纹 / 类型 / 章节不一致 → 内部错误（绝不覆盖已有任务）。
+ * - 已存在且**逻辑输入相同**（taskType / chapterId / inputSnapshot）→ 返回既有任务，
+ *   不重复创建；
+ * - 已存在但逻辑输入不一致 → 内部错误（绝不覆盖已有任务）。
+ *
+ * 为什么比较逻辑输入而不是 `input_hash`：`input_hash` 覆盖 provider / model /
+ * maxAttempts，模型配置一旦变化（换模型、切换 mock ↔ openai-compatible），
+ * 同一逻辑任务会得到不同的指纹。此时应当复用既有 task，并由 Worker 的
+ * provider / model 预检决定它是否还能执行——不能让作者的业务操作（定稿、
+ * 保存候选）因为配置漂移而失败。**这条规则只用于确定性内部任务**，
+ * 作者显式提交的生成任务仍走 `createGenerationTask` 的 request-conflict 语义。
  *
  * 为什么不用 `createGenerationTask`：它在唯一键冲突后会重新查询，
  * 而 PostgreSQL 事务一旦有语句失败就进入 aborted 状态，后续查询全部失败。
@@ -363,17 +371,24 @@ export async function ensureDeterministicTask(
     model: input.spec.model,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
   });
+  const snapshotJson = canonicalJsonStringify(input.inputSnapshot);
 
   const existing = await tx.generationTask.findUnique({
     where: { workId_requestId: { workId: input.workId, requestId: input.requestId } },
-    select: { id: true, inputHash: true, taskType: true, chapterId: true },
+    select: { id: true, taskType: true, chapterId: true, inputSnapshot: true },
   });
   if (existing !== null) {
-    if (
-      existing.inputHash !== inputHash ||
-      existing.taskType !== input.taskType ||
-      existing.chapterId !== input.chapterId
-    ) {
+    if (existing.taskType !== input.taskType || existing.chapterId !== input.chapterId) {
+      throw new NonRetryableTaskError('WORKFLOW_INTERNAL_ERROR', '内部任务归属不一致');
+    }
+    // jsonb 会重排 key，因此用 canonical JSON 比较而不是直接比较对象。
+    let sameInput = false;
+    try {
+      sameInput = canonicalJsonStringify(existing.inputSnapshot) === snapshotJson;
+    } catch {
+      sameInput = false;
+    }
+    if (!sameInput) {
       throw new NonRetryableTaskError('WORKFLOW_INTERNAL_ERROR', '内部任务归属不一致');
     }
     return { taskId: existing.id, created: false };
