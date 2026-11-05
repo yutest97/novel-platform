@@ -13,6 +13,7 @@ import {
   createChapterDraftWorkflow,
   createChapterMockProvider,
   createChapterReviewWorkflow,
+  createChapterSummaryWorkflow,
   createModelProvider,
   readProviderConfig,
   WorkflowKernel,
@@ -63,6 +64,8 @@ export function createWorkerRuntime(
   registry.register(createChapterDraftWorkflow({ db, provider }));
   // A2-C-B：候选审阅是独立任务，与正文生成共用同一个 Provider 实例。
   registry.register(createChapterReviewWorkflow({ db, provider }));
+  // A2-D-B：定稿章节摘要是独立任务，同样复用同一个 Provider 实例。
+  registry.register(createChapterSummaryWorkflow({ db, provider }));
 
   const runner = new WorkerRunner(db, new WorkflowKernel(registry), {
     provider,

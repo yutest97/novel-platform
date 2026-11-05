@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v1.8
+- 版本：v1.9
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -1805,3 +1805,74 @@ load_review_input → run_reviewer → persist_review_result
 `chapter_summaries` 表 / migration、定稿版本查询与幂等、租约 / attempt fencing、
 `chapter.summarize` 任务与 Worker 注册、Reviewer `priorSummaries` 接线、API / UI、
 RAG / embedding / 图谱、摘要回写章节或正式版本。
+
+## 26. A2-D-B：定稿章节摘要任务与持久化
+
+> 把 `summarizer.chapter@1.0.0` 接入受工作流约束的后端：定稿同事务入队
+> `chapter.summarize`、按 `sourceVersionId` 幂等落库。**不接** Reviewer
+> `priorSummaries`，不做 API / UI。
+
+### 26.1 任务与自动入队
+
+```
+finalizeChapter（作品锁 + 章节行锁，同一事务）
+  ├─ chapters.status → finalized
+  ├─ audit chapter.finalized
+  └─ ensureSummaryTask：request_id = summary:<sourceVersionId>
+       input_snapshot = { sourceVersionId }
+```
+
+- `chapter.summarize` 任务输入只允许 `sourceVersionId`（UUID）；
+  未知字段 / 非 UUID / 缺字段一律 `TASK_INPUT_INVALID`；
+- `provider / model` 由 **finalize API 在服务端**按 `readProviderConfig()` 与
+  Provider 构造结果解析后传入 `finalizeChapter`；请求体仍不得提交，
+  事务内不读环境；HTTP 响应字段不变；
+- `maxAttempts` 用默认值；`input_hash` 复用现有 canonical JSON / request hash；
+- 幂等：首次定稿创建；已定稿同版本重复定稿不重复创建；任务缺失时（崩溃恢复）
+  由幂等定稿补齐；不使用"先 INSERT 再处理唯一冲突"的写法；
+- 作者侧章节详情 / 列表仍只展示 `chapter.draft`，`chapter.summarize` 不会成为
+  "最新正文任务"。
+
+### 26.2 固定三步
+
+```
+load_summary_input → summarize_chapter → persist_summary
+```
+
+| 步骤 | 职责 |
+| --- | --- |
+| `load_summary_input` | 锁任务行 + fence；解析 `sourceVersionId`；校验章节 `finalized` 且该版本是最新正式版本；已有同版本摘要 → 标记 skip；写 `task_contexts`（章节 / 版本 id、版本号、字数） |
+| `summarize_chapter` | 调 `summarizer.chapter@1.0.0`；运行 `assertSummarizerInput` + `validateSummarizerOutput`；每次实际调用写一条 `llm_call_logs` |
+| `persist_summary` | `runWorkWrite` + 任务行锁 / fence；同一事务内**再次**校验定稿与最新版本；写 `chapter_summaries` |
+
+- skip 分支：已有同版本摘要时不调用模型、不写日志、不重复插入；
+- 失败 / 取消：不修改章节、正式版本、候选、合同或采纳权；不写 `audit_logs`；
+- 控制层错误（`TASK_LEASE_LOST`、取消检查）原样向上抛。
+
+### 26.3 幂等与 stale 规则
+
+| 场景 | 结果 |
+| --- | --- |
+| 同一 `sourceVersionId` 重复定稿 | 复用同一 task，不重复摘要 |
+| 已定稿但任务缺失 | 幂等定稿补齐任务 |
+| 章节已不是 `finalized`（人工 revision / 放弃） | `SUMMARY_CHAPTER_NOT_FINALIZED`（不可重试） |
+| `sourceVersionId` 已不是最新版本 | `SUMMARY_SOURCE_VERSION_STALE`（不可重试） |
+| 模型调用期间发生 revision | 提交阶段重新校验 → stale，**不写摘要** |
+| 旧 Worker 晚返回 / 丢租约 | 任务行 fence 拒绝，摘要不被写入或覆盖 |
+| 已有同版本摘要的新任务 | skip，模型调用数为 0 |
+
+- 先判版本、再判定稿：新 revision 会同时造成两者，此时"版本过期"是更具体、
+  更可操作的错误；
+- 任务重试复用同一个 task（`attempt_count` 递增），成功只写一条摘要。
+
+### 26.4 数据边界
+
+- 正文只来自 `chapter_versions.content`，只进入模型请求；
+  不进入任务快照、`task_contexts`、`llm_call_logs` 或摘要行；
+- 摘要行只有 `summary` 文本与 agent / provider / model 元数据；
+- 表定义与约束见 `docs/03-data-model.md` §3.13。
+
+### 26.5 未做
+
+Reviewer `priorSummaries` 接线、摘要读取 API / UI、摘要回写章节或正文、
+high severity 采纳门禁、自动重写、RAG / embedding / 图谱。

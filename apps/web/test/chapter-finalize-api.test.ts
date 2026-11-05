@@ -294,6 +294,38 @@ describe('定稿语义', () => {
     expect(v2).not.toBe(v1);
   });
 
+  it('响应字段不变：provider / model 不在请求契约，也不出现在响应里', async () => {
+    const fixture = await createFixture();
+    const { v2 } = await seedTwoVersions(fixture);
+
+    // 请求体提交 provider / model 属于未知字段 → 400，且不产生任务
+    const rejected = await finalize(fixture, {
+      versionId: v2,
+      provider: 'openai-compatible',
+      model: 'not-allowed',
+    });
+    expect(rejected.status).toBe(400);
+    expect(await chapterStatus(fixture.chapterId)).toBe('in_review');
+    expect(await db.generationTask.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+
+    const ok = await finalize(fixture, { versionId: v2 });
+    expect(ok.status).toBe(200);
+    // 响应仍只有 chapter 的 5 个字段
+    expect(Object.keys(ok.json).sort()).toEqual(['chapter']);
+    expect(Object.keys(ok.json.chapter as Record<string, unknown>).sort()).toEqual(
+      ['chapterId', 'deduplicated', 'status', 'versionId', 'versionNo'].sort(),
+    );
+    expect(ok.text).not.toContain('mock-model');
+    expect(ok.text).not.toContain('provider');
+
+    // 摘要任务由服务端装配（provider / model 来自配置），但不出现在响应里
+    const task = await db.generationTask.findFirstOrThrow({
+      where: { chapterId: fixture.chapterId, taskType: 'chapter.summarize' },
+    });
+    expect(task).toMatchObject({ provider: 'mock', model: 'mock-model' });
+    expect(task.inputSnapshot).toEqual({ sourceVersionId: v2 });
+  });
+
   it('无正式版本 → 409 CHAPTER_STATE_INVALID_FOR_FINALIZE', async () => {
     const fixture = await createFixture();
 
@@ -334,7 +366,18 @@ describe('定稿后的写操作边界', () => {
     const body = (await response.json()) as { error?: { code: string } };
     expect(response.status).toBe(409);
     expect(body.error?.code).toBe('CHAPTER_STATE_INVALID_FOR_GENERATION');
-    expect(await db.generationTask.count({ where: { chapterId: fixture.chapterId } })).toBe(0);
+    // A2-D-B 起，定稿会在同一事务内入队 `chapter.summarize`：
+    // 这里只要求没有"正文任务"，摘要任务的存在是预期行为。
+    expect(
+      await db.generationTask.count({
+        where: { chapterId: fixture.chapterId, taskType: 'chapter.draft' },
+      }),
+    ).toBe(0);
+    expect(
+      await db.generationTask.count({
+        where: { chapterId: fixture.chapterId, taskType: 'chapter.summarize' },
+      }),
+    ).toBe(1);
   });
 
   it('定稿后恢复历史版本 → 409，且不新增版本', async () => {

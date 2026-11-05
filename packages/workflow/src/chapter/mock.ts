@@ -13,6 +13,7 @@
 import type { ModelJsonInput, ModelProvider } from '../model-types.js';
 import { MockProvider, type MockJsonValue } from '../providers/mock.js';
 import { CHAPTER_REVIEWER_MOCK_OUTPUT } from './reviewer-mock.js';
+import { CHAPTER_SUMMARIZER_MOCK_OUTPUT } from './summarizer-mock.js';
 
 const DEFAULT_TARGET_WORDS = 3_000;
 
@@ -88,6 +89,10 @@ function chapterJsonResponder(input: ModelJsonInput): MockJsonValue {
     // A2-C-B：审阅默认无问题；需要注入问题的测试直接用
     // `createChapterReviewerMockProvider({ issues })`。
     return CHAPTER_REVIEWER_MOCK_OUTPUT;
+  }
+  if (system.includes('summarizer.chapter')) {
+    // A2-D-B：摘要默认返回确定性、合法、非空的摘要。
+    return CHAPTER_SUMMARIZER_MOCK_OUTPUT;
   }
   return { text: DRAFT };
 }

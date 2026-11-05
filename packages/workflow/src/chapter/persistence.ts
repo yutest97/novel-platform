@@ -315,15 +315,85 @@ export async function markChapterDrafting(input: {
   });
 }
 
-/** 审阅任务的 provider / model（与创建 `chapter.draft` 时同一套服务端配置）。 */
-export interface ReviewTaskSpec {
+/** 内部任务记录的 provider / model（来自服务端配置，客户端不可提交）。 */
+export interface ModelTaskSpec {
   readonly provider: string;
   readonly model: string;
 }
 
+/** 审阅任务的 provider / model（与创建 `chapter.draft` 时同一套服务端配置）。 */
+export type ReviewTaskSpec = ModelTaskSpec;
+
 /** 审阅任务 requestId（确定性、总长 ≤128）。 */
 export function reviewTaskRequestId(candidateId: string): string {
   return `review:${candidateId}`;
+}
+
+/** 在**当前事务内**幂等确保一条确定性内部任务存在（review / summary 共用）。 */
+interface DeterministicTaskInput {
+  readonly workId: string;
+  readonly chapterId: string;
+  readonly taskType: string;
+  readonly requestId: string;
+  /** 结构化输入；必须是可稳定序列化的纯 JSON。 */
+  readonly inputSnapshot: unknown;
+  readonly spec: ModelTaskSpec;
+}
+
+/**
+ * 幂等确保确定性内部任务存在。
+ *
+ * - 不存在 → 创建；
+ * - 已存在且 input_hash 相同 → 不重复创建；
+ * - 已存在但指纹 / 类型 / 章节不一致 → 内部错误（绝不覆盖已有任务）。
+ *
+ * 为什么不用 `createGenerationTask`：它在唯一键冲突后会重新查询，
+ * 而 PostgreSQL 事务一旦有语句失败就进入 aborted 状态，后续查询全部失败。
+ * 这里改为先查后插；调用方持有作品级 advisory lock，不会出现并发插入。
+ */
+export async function ensureDeterministicTask(
+  tx: Prisma.TransactionClient,
+  input: DeterministicTaskInput,
+): Promise<{ readonly taskId: string; readonly created: boolean }> {
+  const inputHash = hashTaskRequest({
+    chapterId: input.chapterId,
+    taskType: input.taskType,
+    inputSnapshot: input.inputSnapshot,
+    provider: input.spec.provider,
+    model: input.spec.model,
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+  });
+
+  const existing = await tx.generationTask.findUnique({
+    where: { workId_requestId: { workId: input.workId, requestId: input.requestId } },
+    select: { id: true, inputHash: true, taskType: true, chapterId: true },
+  });
+  if (existing !== null) {
+    if (
+      existing.inputHash !== inputHash ||
+      existing.taskType !== input.taskType ||
+      existing.chapterId !== input.chapterId
+    ) {
+      throw new NonRetryableTaskError('WORKFLOW_INTERNAL_ERROR', '内部任务归属不一致');
+    }
+    return { taskId: existing.id, created: false };
+  }
+
+  const created = await tx.generationTask.create({
+    data: {
+      workId: input.workId,
+      chapterId: input.chapterId,
+      requestId: input.requestId,
+      inputHash,
+      taskType: input.taskType,
+      inputSnapshot: input.inputSnapshot as Prisma.InputJsonValue,
+      provider: input.spec.provider,
+      model: input.spec.model,
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    },
+    select: { id: true },
+  });
+  return { taskId: created.id, created: true };
 }
 
 /**
@@ -333,10 +403,6 @@ export function reviewTaskRequestId(candidateId: string): string {
  * - 候选已存在但任务缺失（崩溃恢复：候选已落库、任务行未写）→ 补齐；
  * - 任务已存在且 input_hash 相同 → 不重复创建；
  * - 已存在但指纹 / 归属不一致 → 内部错误（绝不覆盖已有任务）。
- *
- * 为什么不用 `createGenerationTask`：它在唯一键冲突后会重新查询，
- * 而 PostgreSQL 事务一旦有语句失败就进入 aborted 状态，后续查询全部失败。
- * 这里改为先查后插；调用方持有作品级 advisory lock，不会出现并发插入。
  */
 export async function ensureReviewTask(
   tx: Prisma.TransactionClient,
@@ -347,47 +413,14 @@ export async function ensureReviewTask(
     readonly spec: ReviewTaskSpec;
   },
 ): Promise<{ readonly taskId: string; readonly created: boolean }> {
-  const requestId = reviewTaskRequestId(input.candidateId);
-  const inputSnapshot = { candidateId: input.candidateId };
-  const inputHash = hashTaskRequest({
+  return ensureDeterministicTask(tx, {
+    workId: input.workId,
     chapterId: input.chapterId,
     taskType: CHAPTER_REVIEW_TASK_TYPE,
-    inputSnapshot,
-    provider: input.spec.provider,
-    model: input.spec.model,
-    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    requestId: reviewTaskRequestId(input.candidateId),
+    inputSnapshot: { candidateId: input.candidateId },
+    spec: input.spec,
   });
-
-  const existing = await tx.generationTask.findUnique({
-    where: { workId_requestId: { workId: input.workId, requestId } },
-    select: { id: true, inputHash: true, taskType: true, chapterId: true },
-  });
-  if (existing !== null) {
-    if (
-      existing.inputHash !== inputHash ||
-      existing.taskType !== CHAPTER_REVIEW_TASK_TYPE ||
-      existing.chapterId !== input.chapterId
-    ) {
-      throw new NonRetryableTaskError('WORKFLOW_INTERNAL_ERROR', '审阅任务归属不一致');
-    }
-    return { taskId: existing.id, created: false };
-  }
-
-  const created = await tx.generationTask.create({
-    data: {
-      workId: input.workId,
-      chapterId: input.chapterId,
-      requestId,
-      inputHash,
-      taskType: CHAPTER_REVIEW_TASK_TYPE,
-      inputSnapshot,
-      provider: input.spec.provider,
-      model: input.spec.model,
-      maxAttempts: DEFAULT_MAX_ATTEMPTS,
-    },
-    select: { id: true },
-  });
-  return { taskId: created.id, created: true };
 }
 
 /**

@@ -139,6 +139,7 @@ export {
 export {
   CHAPTER_DRAFT_TASK_TYPE,
   CHAPTER_REVIEW_TASK_TYPE,
+  CHAPTER_SUMMARY_TASK_TYPE,
   MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,
   MAX_DRAFT_CHARS,
@@ -180,6 +181,23 @@ export {
   createChapterReviewWorkflow,
   type ChapterReviewWorkflowOptions,
 } from './review-workflow.js';
+export {
+  createChapterSummaryWorkflow,
+  type ChapterSummaryWorkflowOptions,
+} from './summary-workflow.js';
+export {
+  ensureSummaryTask,
+  findExistingSummary,
+  loadChapterSummaryContext,
+  parseChapterSummaryTaskInput,
+  persistChapterSummary,
+  summaryTaskRequestId,
+  type ChapterSummaryContext,
+  type ChapterSummaryTaskInput,
+  type PersistChapterSummaryInput,
+  type SummaryTaskFence,
+} from './summary.js';
+export { ensureDeterministicTask, type ModelTaskSpec } from './persistence.js';
 export {
   ensureReviewTask,
   reviewTaskRequestId,

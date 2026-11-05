@@ -557,6 +557,37 @@ run 进入 `succeeded / failed` 终态后不能再追加问题，避免 `issue_c
 > 归属组合（例如把 issue 挂在 run A 上却把 work / chapter / candidate 指向另一个合法组合）
 > 由 `chapter_review_issues_run_fkey` 直接拒绝，不只靠服务层校验。
 
+### 3.13 chapter_summaries（A2-D-B 实现口径）
+
+> 以迁移 `20261106094000_a2d_chapter_summaries` 与
+> `packages/workflow/src/chapter/summary.ts` 为准。摘要是**派生数据**：
+> 不修改章节 / 版本 / 候选 / 采纳权，也不回写正文。
+
+**chapter_summaries**：一个正式定稿版本的章节摘要。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| work_id / chapter_id / source_version_id | uuid | 归属三件套 |
+| agent_name / agent_version | text | `summarizer.chapter` / `1.0.0` |
+| provider / model | text | 本次实际调用的 Provider / 模型（以 Provider 返回值为准） |
+| summary | text | 纯文本摘要，1..1000 字符，`btrim` 后非空 |
+| created_at | timestamptz | 数据库时钟 |
+
+约束：
+
+- `UNIQUE(source_version_id)`：每个正式版本最多一条摘要（幂等 / 并发兜底）；
+- 复合外键：`(chapter_id, work_id) → chapters(id, work_id)`、
+  `(source_version_id, chapter_id, work_id) → chapter_versions(id, chapter_id, work_id)`；
+  跨作品的版本组合由数据库直接拒绝；
+- `CHECK (char_length(summary) BETWEEN 1 AND 1000 AND btrim(summary) <> '')`；
+- **append-only**：UPDATE / DELETE 一律由触发器拒绝；修订摘要必须由新的正式版本
+  重新生成（新 `source_version_id` → 新行）；
+- 不保存正文、prompt、模型原始响应或密钥；不新增 `final_version_id`。
+
+> 任务侧沿用 `generation_tasks`（`chapter.summarize`）+ `llm_call_logs`，
+> 不另造运行状态机；摘要成功 / 失败都不写 `audit_logs`。
+
 ---
 
 ## 4. 通用核心 vs 玄幻规则包（边界）

@@ -11,6 +11,7 @@ import { parseRuleFieldSchema } from '@novel/works';
 
 import type { ModelJsonInput } from '../../src/model-types.js';
 import { MockProvider, type MockJsonValue } from '../../src/providers/mock.js';
+import { CHAPTER_SUMMARIZER_MOCK_OUTPUT } from '../../src/chapter/summarizer-mock.js';
 import { createTestUser, createTestWork } from './db.js';
 
 export interface FixtureEntity {
@@ -259,6 +260,8 @@ export interface ChapterProviderHandlers {
   readonly writer?: (input: ModelJsonInput) => unknown;
   /** A2-C-B：Reviewer 输出；缺省为无问题。 */
   readonly reviewer?: (input: ModelJsonInput) => unknown;
+  /** A2-D-B：Summarizer 输出；缺省为确定性摘要。 */
+  readonly summarizer?: (input: ModelJsonInput) => unknown;
 }
 
 export interface ChapterProvider {
@@ -267,11 +270,12 @@ export interface ChapterProvider {
     readonly planner: ModelJsonInput[];
     readonly writer: ModelJsonInput[];
     readonly reviewer: ModelJsonInput[];
+    readonly summarizer: ModelJsonInput[];
   };
 }
 
 /**
- * 用 MockProvider 按 system prompt 分派 Planner / Writer / Reviewer，
+ * 用 MockProvider 按 system prompt 分派 Planner / Writer / Reviewer / Summarizer，
  * 并记录实际模型输入（只用于测试断言"模型看到了什么"，不写日志、不落库）。
  */
 export function createChapterProvider(
@@ -281,6 +285,7 @@ export function createChapterProvider(
   const planner: ModelJsonInput[] = [];
   const writer: ModelJsonInput[] = [];
   const reviewer: ModelJsonInput[] = [];
+  const summarizer: ModelJsonInput[] = [];
   const provider = new MockProvider({
     json: (input) => {
       const system = input.messages[0]?.content ?? '';
@@ -296,13 +301,19 @@ export function createChapterProvider(
           ? { passed: true, issues: [] }
           : (handlers.reviewer(input) as MockJsonValue);
       }
+      if (system.includes('summarizer.chapter')) {
+        summarizer.push(input);
+        return handlers.summarizer === undefined
+          ? CHAPTER_SUMMARIZER_MOCK_OUTPUT
+          : (handlers.summarizer(input) as MockJsonValue);
+      }
       writer.push(input);
       return handlers.writer === undefined
         ? { text: defaults.text }
         : (handlers.writer(input) as MockJsonValue);
     },
   });
-  return { provider, calls: { planner, writer, reviewer } };
+  return { provider, calls: { planner, writer, reviewer, summarizer } };
 }
 
 /** 从模型输入里取出 user 消息（结构化 JSON）。 */

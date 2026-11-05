@@ -14,6 +14,9 @@
  *
  * 事务与并发：与人工保存 / 恢复共用作品级 advisory lock + 章节行锁，
  * 因此并发定稿会串行化：一个首次写入，另一个幂等返回，审计最多一条。
+ *
+ * A2-D-B 起，定稿与 `chapter.summarize` 任务入队在**同一个事务**内完成：
+ * 定稿提交即一定有摘要任务；幂等重复定稿只补齐缺失任务，不重复创建。
  */
 
 import { AUDIT_ACTIONS, AuthError, writeAuditLog } from '@novel/auth';
@@ -21,6 +24,8 @@ import type { PrismaClient } from '@novel/db';
 import { normalizeUuid, requireOwnedWork, runWorkWrite } from '@novel/works';
 
 import { lockChapter, translateChapterWriteError } from './human.js';
+import { ensureSummaryTask } from './summary.js';
+import type { ModelTaskSpec } from './persistence.js';
 import { FINALIZED_CHAPTER_STATUS, isChapterFinalizable } from './types.js';
 
 /** 定稿输入。 */
@@ -32,6 +37,13 @@ export interface FinalizeChapterInput {
   readonly chapterId: string;
   /** 必须等于当前最新正式版本 id。 */
   readonly versionId: string;
+  /**
+   * 摘要任务的 provider / model。
+   *
+   * 由 API 层在**服务端**按 `readProviderConfig()` / Provider 构造结果解析后传入；
+   * 请求体永远不能提交这两个值，事务内也不读取环境。
+   */
+  readonly summary: ModelTaskSpec;
 }
 
 /** 定稿结果（**不含正文**）。 */
@@ -42,6 +54,10 @@ export interface FinalizedChapter {
   readonly versionNo: number;
   /** `true` 表示本次是幂等重试，没有新增审计。 */
   readonly deduplicated: boolean;
+  /** 同事务入队的 `chapter.summarize` 任务（内部字段，不进入 HTTP 响应）。 */
+  readonly summaryTaskId: string;
+  /** `true` 表示本次新建了摘要任务（幂等重复定稿 / 恢复补齐时为 `false`）。 */
+  readonly summaryTaskCreated: boolean;
 }
 
 /**
@@ -76,12 +92,21 @@ export async function finalizeChapter(input: FinalizeChapterInput): Promise<Fina
       // ---- 已定稿：同版本幂等；不同版本 / 无版本一律状态不允许 ----
       if (chapter.status === FINALIZED_CHAPTER_STATUS) {
         if (latest !== null && versionId === latest.id) {
+          // 幂等重试也要补齐缺失的摘要任务（崩溃恢复），但绝不重复创建。
+          const summaryTask = await ensureSummaryTask(tx, {
+            workId,
+            chapterId,
+            sourceVersionId: latest.id,
+            spec: input.summary,
+          });
           return {
             chapterId,
             status: 'finalized' as const,
             versionId,
             versionNo: latest.versionNo,
             deduplicated: true,
+            summaryTaskId: summaryTask.taskId,
+            summaryTaskCreated: summaryTask.created,
           };
         }
         throw new AuthError('CHAPTER_STATE_INVALID_FOR_FINALIZE');
@@ -120,12 +145,22 @@ export async function finalizeChapter(input: FinalizeChapterInput): Promise<Fina
         },
       });
 
+      // ---- 摘要在同一事务内入队：定稿提交即一定有对应摘要任务 ----
+      const summaryTask = await ensureSummaryTask(tx, {
+        workId,
+        chapterId,
+        sourceVersionId: latest.id,
+        spec: input.summary,
+      });
+
       return {
         chapterId,
         status: 'finalized' as const,
         versionId: latest.id,
         versionNo: latest.versionNo,
         deduplicated: false,
+        summaryTaskId: summaryTask.taskId,
+        summaryTaskCreated: summaryTask.created,
       };
     });
   } catch (error) {

@@ -148,6 +148,7 @@ model Work {
   chapterCandidates ChapterCandidate[]
   chapterVersions ChapterVersion[]
   chapterReviewRuns ChapterReviewRun[] @relation("WorkChapterReviewRuns")
+  chapterSummaries ChapterSummary[] @relation("WorkChapterSummaries")
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -311,6 +312,7 @@ model Chapter {
   candidates      ChapterCandidate[]
   versions        ChapterVersion[]
   reviewRuns      ChapterReviewRun[] @relation("ChapterChapterReviewRuns")
+  summaries       ChapterSummary[] @relation("ChapterChapterSummaries")
 
   @@unique([workId, chapterNo])
   /// 供 chapter_contracts / chapter_candidates 的复合外键引用
@@ -513,6 +515,9 @@ model ChapterVersion {
   sourceCandidate ChapterCandidate? @relation("ChapterVersionSource", fields: [sourceCandidateId], references: [id], onDelete: Restrict)
   parent          ChapterVersion?   @relation("ChapterVersionParent", fields: [parentVersionId], references: [id], onDelete: Restrict)
   children        ChapterVersion[]  @relation("ChapterVersionParent")
+  /// 该正式版本生成的摘要（数据库 UNIQUE(source_version_id) 保证最多一条；
+  /// Prisma 侧只能用数组表达复合外键，不额外造重复唯一索引）
+  summaries       ChapterSummary[]
 
   @@unique([chapterId, versionNo])
   @@unique([sourceCandidateId])
@@ -653,4 +658,33 @@ model ChapterReviewIssue {
   @@unique([runId, ordinal])
   @@index([candidateId, ordinal])
   @@map("chapter_review_issues")
+}
+
+/// 定稿章节摘要（A2-D-B）。
+///
+/// - **派生数据**：只由正式定稿版本产生，不修改章节 / 版本 / 候选 / 采纳权，
+///   也不回写正文；表里没有正文、prompt、模型原始响应或密钥列；
+/// - `UNIQUE(sourceVersionId)`：每个正式版本最多一条摘要（幂等 / 并发兜底）；
+/// - 复合外键保证摘要与版本属于同一作品、同一章节；
+/// - `summary` 1..1000 字符且 btrim 后非空（数据库 CHECK 兜底）；
+/// - append-only：UPDATE / DELETE 由触发器拒绝，修订摘要必须由新版本重新生成。
+model ChapterSummary {
+  id              String   @id @default(uuid()) @db.Uuid
+  workId          String   @map("work_id") @db.Uuid
+  chapterId       String   @map("chapter_id") @db.Uuid
+  sourceVersionId String   @map("source_version_id") @db.Uuid
+  agentName       String   @map("agent_name")
+  agentVersion    String   @map("agent_version")
+  provider        String
+  model           String
+  summary         String
+  createdAt       DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  work          Work           @relation("WorkChapterSummaries", fields: [workId], references: [id], onDelete: Restrict)
+  chapter       Chapter        @relation("ChapterChapterSummaries", fields: [chapterId, workId], references: [id, workId], onDelete: Restrict)
+  sourceVersion ChapterVersion @relation(fields: [sourceVersionId, chapterId, workId], references: [id, chapterId, workId], onDelete: Restrict)
+
+  @@unique([sourceVersionId])
+  @@index([chapterId, createdAt])
+  @@map("chapter_summaries")
 }

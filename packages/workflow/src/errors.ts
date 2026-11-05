@@ -26,7 +26,11 @@ export type WorkflowErrorCode =
   | 'MODEL_ABORTED'
   | 'MODEL_HTTP_ERROR'
   | 'MODEL_INVALID_RESPONSE'
-  | 'TASK_MODEL_CONFIG_MISMATCH';
+  | 'TASK_MODEL_CONFIG_MISMATCH'
+  /** 摘要任务：章节当前不是定稿状态（含提交阶段被人工 revision 拉回 in_review）。 */
+  | 'SUMMARY_CHAPTER_NOT_FINALIZED'
+  /** 摘要任务：sourceVersion 已不是当前最新正式版本。 */
+  | 'SUMMARY_SOURCE_VERSION_STALE';
 
 /** 任务记录的 provider/model 与 Worker 当前配置不一致时的安全文案。 */
 export const TASK_MODEL_CONFIG_MISMATCH_MESSAGE = '任务模型配置已变化，请重新提交生成任务';

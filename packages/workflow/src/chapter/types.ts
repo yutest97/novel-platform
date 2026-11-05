@@ -17,6 +17,14 @@ export const CHAPTER_DRAFT_TASK_TYPE = 'chapter.draft';
  */
 export const CHAPTER_REVIEW_TASK_TYPE = 'chapter.review';
 
+/**
+ * 定稿章节摘要任务类型（A2-D-B）。
+ *
+ * 与定稿同一事务入队；只处理"当前仍 finalized 且 sourceVersion 是最新正式版本"
+ * 的章节，摘要按 sourceVersionId 幂等落库。
+ */
+export const CHAPTER_SUMMARY_TASK_TYPE = 'chapter.summarize';
+
 /** 正文候选的最少字数（非空白字符数）。 */
 export const MIN_DRAFT_WORDS = 1200;
 
