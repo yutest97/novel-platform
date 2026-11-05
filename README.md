@@ -881,8 +881,9 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **A1-4B-C-A** 再补 31 个（diff 纯函数 17、diff API 14）；
 **A1-4B-C-B** 再补 33 个（恢复服务 / API 18、diff 视图纯逻辑 15）；
 **A1-4B-C-C** 再补 16 个（定稿服务 / API）；**REV-01** 再补 5 个浏览器用例（编辑器 / 加载竞态）；
-**A2-A** 再补 37 个（事实校验 22、事实服务 15），
-全量单测 **842** 个（web 293 / workflow 234 / worker 63 / shared 15 / db 10 /
+**A2-A** 再补 37 个（事实校验 22、事实服务 15）；**A2-A-REV-01** 再补 7 个
+（提交竞态 / 复合归属 / 租约 / 重试元数据 / 截断），
+全量单测 **849** 个（web 293 / workflow 241 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **118**（96 + 版本对比与恢复 7 +
 REV-01 并发隔离 4 + 定稿 6 + 定稿入口前置条件 5）。
 
@@ -1141,10 +1142,26 @@ const result = await extractChapterFacts({
 - 未知 `factType` / 未知字段 / 越界字段（例如 `character_state.name`）一律拒绝。
 
 **前置**：章节必须 `finalized`；指定版本必须是当前最新正式版本。
+**提交阶段二次校验**：模型调用可能持续数十秒，提交事务内会重新校验章节归属 / 定稿状态 /
+当前最大版本 / run 归属。期间作者保存了新 revision（章节回 `in_review` + 新版本）时，
+本次提取以 `CONTINUITY_SOURCE_VERSION_STALE` 失败——**不写任何候选、不写成功审计**，
+run 标为 `failed`；新版本重新定稿后再次提取会创建新的 run。
 **幂等**：同一版本重复提取返回既有 run（`created=false`），不新增候选与审计；
 并发同版本只产生一个 run（`UNIQUE(source_version_id)`）。
+**running 租约**：`started_at` 记录本次尝试开始时间，租约 10 分钟。未到期 → 409
+`CONTINUITY_EXTRACTION_IN_PROGRESS`；到期（进程崩溃）→ 后到的请求用 CAS 接管同一条 run
+（先标 `failed` 再复用同一行），两个并发接管只有一个成功。
 **失败**：Provider 失败 → run `failed`，不写候选，可重试（复用同一 run）；
 模型输出不合法 → `CONTINUITY_FACTS_INVALID`（不可重试）。
+**重试元数据**：每次尝试记录当次的 provider / model，成功后以 `AgentRunResult` 的
+实际 `provider` / `model` 落库并写入审计（不是第一次失败 attempt 的配置）。
+
+**上下文截断**：人物 / 物品 / 境界 / 势力**分别查询**，每类最多 100 条，
+顺序固定 `orderIndex asc → createdAt asc → id asc`；避免大量人物把物品 / 势力整类挤掉。
+
+**数据库归属**：候选的 run 外键是复合外键
+`(run_id, source_version_id, chapter_id, work_id) → chapter_fact_runs(id, source_version_id, chapter_id, work_id)`，
+跨 run 拼装 work / chapter / version 会被数据库直接拒绝（23503）。
 
 **数据边界**：正文只进入模型请求，不写 run / 候选 / 审计；`secret` / `secretKnownBy`
 永不进入模型摘要；提取前后不修改任何人物 / 物品 / 势力 / 关系 / 境界。

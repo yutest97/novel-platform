@@ -519,6 +519,9 @@ model ChapterVersion {
 /// 章节连续性事实提取运行（A2-A）。
 ///
 /// - `UNIQUE(source_version_id)`：一个正式版本最多一次提取（幂等 / 并发兜底）；
+/// - `(id, sourceVersionId, chapterId, workId)` 唯一：让候选的 run 外键可以是
+///   复合外键，从而在数据库层保证「候选与 run 属于同一作品 / 章节 / 版本」；
+/// - `startedAt` 是本次尝试的开始时间，同时充当 running 租约的起点；
 /// - 只允许受控状态更新（running → succeeded / failed，failed → running），
 ///   成功后不可再改；DELETE 由触发器拒绝；
 /// - 正文不进入本表：只记录 agent / provider / model 与状态。
@@ -534,11 +537,13 @@ model ChapterFactRun {
   status          String
   errorCode       String?   @map("error_code")
   createdAt       DateTime  @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  startedAt       DateTime  @default(dbgenerated("clock_timestamp()")) @map("started_at") @db.Timestamptz(3)
   finishedAt      DateTime? @map("finished_at") @db.Timestamptz(3)
 
   candidates ChapterFactCandidate[]
 
   @@unique([sourceVersionId])
+  @@unique([id, sourceVersionId, chapterId, workId])
   @@index([chapterId, createdAt])
   @@map("chapter_fact_runs")
 }
@@ -547,6 +552,7 @@ model ChapterFactRun {
 ///
 /// append-only：UPDATE / DELETE 由触发器拒绝；`status` 只允许 `candidate`。
 /// `payload` 是结构化事实（不含正文、prompt、模型原始响应）。
+/// run 外键是**复合外键**：候选的 work / chapter / version 必须与 run 一致。
 model ChapterFactCandidate {
   id              String   @id @default(uuid()) @db.Uuid
   runId           String   @map("run_id") @db.Uuid
@@ -558,7 +564,7 @@ model ChapterFactCandidate {
   status          String   @default("candidate")
   createdAt       DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
 
-  run ChapterFactRun @relation(fields: [runId], references: [id], onDelete: Restrict)
+  run ChapterFactRun @relation(fields: [runId, sourceVersionId, chapterId, workId], references: [id, sourceVersionId, chapterId, workId], onDelete: Restrict)
 
   @@index([runId])
   @@index([chapterId, factType])

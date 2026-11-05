@@ -44,10 +44,18 @@ export const MAX_CHAPTER_FACTS = 50;
 export const MAX_FACT_TEXT_LENGTH = 500;
 /** 地点名最大长度（未登记地点允许保存规范化名称）。 */
 export const MAX_LOCATION_NAME_LENGTH = 120;
-/** 进入模型上下文的实体上限（每类）。 */
+/** 进入模型上下文的实体上限（**每类**）。 */
 export const MAX_FACT_CONTEXT_ENTITIES = 100;
 /** 摘要最大长度（每个实体）。 */
 export const MAX_ENTITY_SUMMARY_LENGTH = 300;
+/**
+ * running 租约（毫秒）。
+ *
+ * 进程在模型调用期间崩溃时，run 会停在 `running`。超过租约后允许后续请求
+ * **接管同一条 run**（先原子标为 failed，再复用同一行重新 running），
+ * 避免该版本永远无法再提取。10 分钟远大于正常模型调用耗时。
+ */
+export const FACT_RUN_LEASE_MS = 10 * 60 * 1000;
 
 /** 一条已校验的连续性事实候选（落库 payload 与它同构）。 */
 export interface ChapterFact {
@@ -406,16 +414,21 @@ export interface ExtractChapterFactsInput {
  * 流程：
  * 1. 作品锁内：校验归属 / 定稿 / 最新版本，命中既有 succeeded run 直接返回（幂等）；
  * 2. 锁外调用 Agent（不持锁、不占事务）；
- * 3. 作品锁内：写候选 + run 终态 + 审计（原子提交）。
+ * 3. 作品锁内：**重新校验定稿与最新版本**，再写候选 + run 终态 + 审计（原子提交）。
+ *
+ * 为什么提交阶段要二次校验：模型调用可能耗时数十秒，期间作者完全可以保存
+ * 新 revision（章节回到 `in_review` 并产生更新的版本）。如果直接提交，
+ * 旧版本的正文会被当成"当前定稿"写进候选。
  *
  * 并发：`UNIQUE(source_version_id)` 保证同一版本只有一个 run；
- * 第二个请求读到 running 时返回 `CONTINUITY_EXTRACTION_IN_PROGRESS`。
+ * `running` 未超出租约时第二个请求得到 `CONTINUITY_EXTRACTION_IN_PROGRESS`，
+ * 超过租约（进程崩溃）则由后到的请求原子接管同一条 run。
  *
  * @throws AuthError
  * - `NOT_FOUND`：作品 / 章节不属于当前作者；
- * - `CONTINUITY_CHAPTER_NOT_FINALIZED`：章节未定稿；
- * - `CONTINUITY_SOURCE_VERSION_STALE`：章节最新版本已变化（调用方传了旧版本）；
- * - `CONTINUITY_EXTRACTION_IN_PROGRESS`：同一版本已有进行中的提取；
+ * - `CONTINUITY_CHAPTER_NOT_FINALIZED`：章节未定稿（含提交时已不再是定稿）；
+ * - `CONTINUITY_SOURCE_VERSION_STALE`：章节最新版本已变化（含模型调用期间的新 revision）；
+ * - `CONTINUITY_EXTRACTION_IN_PROGRESS`：同一版本已有进行中的提取（租约未到期）；
  * - `CONTINUITY_FACTS_INVALID`：模型输出不合法（不可重试，不写候选）；
  * - `CONTINUITY_EXTRACTION_FAILED`：Provider / 内部失败（可重试）。
  */
@@ -425,8 +438,10 @@ export async function extractChapterFacts(
   const workId = normalizeUuid(input.workId, '作品 id');
   const chapterId = normalizeUuid(input.chapterId, '章节 id');
   const runner = new AgentRunner(input.provider);
+  // 本次尝试的**配置**模型；成功后会被 Provider 实际返回的 provider / model 覆盖
+  const configuredModel = runner.resolveModel(CONTINUITY_EXTRACTOR_AGENT);
 
-  // ---- 1. 准备：校验 + 幂等命中 + 组装上下文 ----
+  // ---- 1. 准备：校验 + 幂等命中 + 租约接管 + 组装上下文 ----
   const prepared = await runWorkWrite(input.db, workId, async (tx) => {
     await requireOwnedWork(tx, workId, input.authorId);
 
@@ -466,7 +481,11 @@ export async function extractChapterFacts(
       return { kind: 'existing' as const, run: existing, sourceVersionNo: latest.versionNo };
     }
     if (existing !== null && existing.status === 'running') {
-      throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+      // 租约未到期 → 仍在提取中；到期（进程崩溃）→ 原子接管同一条 run
+      const takenOver = await takeOverExpiredRun(tx, existing);
+      if (!takenOver) {
+        throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+      }
     }
 
     const work = await tx.work.findUniqueOrThrow({
@@ -480,7 +499,6 @@ export async function extractChapterFacts(
       chapterText: latest.content,
     });
 
-    const model = runner.resolveModel(CONTINUITY_EXTRACTOR_AGENT);
     const run =
       existing === null
         ? await tx.chapterFactRun.create({
@@ -491,15 +509,12 @@ export async function extractChapterFacts(
               agentName: CONTINUITY_EXTRACTOR_AGENT.name,
               agentVersion: CONTINUITY_EXTRACTOR_AGENT.promptVersion,
               provider: input.provider.name,
-              model,
+              model: configuredModel,
               status: 'running',
             },
           })
-        : await tx.chapterFactRun.update({
-            // failed → running：重试复用同一 run，不产生第二行
-            where: { id: existing.id },
-            data: { status: 'running', errorCode: null, finishedAt: null },
-          });
+        : // failed → running（含刚被租约接管的那条）：复用同一 run，不产生第二行
+          await restartRun(tx, existing.id, input.provider.name, configuredModel);
 
     return {
       kind: 'new' as const,
@@ -530,21 +545,62 @@ export async function extractChapterFacts(
 
   // ---- 2. 调用 Agent（事务外：不持锁、不占连接） ----
   let facts: ChapterFact[];
+  let actualProvider: string;
+  let actualModel: string;
   try {
     const result = await runner.run<{ facts: RawFact[] }>(CONTINUITY_EXTRACTOR_AGENT, context);
     facts = validateFactsOutput(result.output, context);
+    // 以 Provider 实际返回为准：可能是路由 / 降级后的模型
+    actualProvider = result.provider;
+    actualModel = result.model;
   } catch (error) {
     const code = mapExtractionError(error);
     await markRunFailed(input.db, run.id, code);
     throw error instanceof AuthError ? error : new AuthError(code);
   }
 
-  // ---- 3. 提交：候选 + run 终态 + 审计（同一事务） ----
+  // ---- 3. 提交：二次校验 + 候选 + run 终态 + 审计（同一事务） ----
   try {
     const saved = await runWorkWrite(input.db, workId, async (tx) => {
-      const current = await tx.chapterFactRun.findUniqueOrThrow({ where: { id: run.id } });
+      const current = await tx.chapterFactRun.findUnique({ where: { id: run.id } });
+      if (current === null) {
+        throw new AuthError('CONTINUITY_EXTRACTION_FAILED');
+      }
+      // run 的归属必须与本次调用一致（数据库复合外键之外的防御）
+      if (
+        current.workId !== workId ||
+        current.chapterId !== chapterId ||
+        current.sourceVersionId !== run.sourceVersionId
+      ) {
+        throw new AuthError('CONTINUITY_SOURCE_VERSION_STALE');
+      }
       if (current.status !== 'running') {
         throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+      }
+
+      // ---- 提交阶段二次校验：模型调用期间的写入必须被看到 ----
+      // 先看版本：新 revision 会同时把章节拉回 in_review 并产生更新的版本，
+      // 此时「版本过期」是更具体、更可操作的错误。
+      const chapter = await tx.chapter.findFirst({
+        where: { id: chapterId, workId },
+        select: { id: true, status: true },
+      });
+      if (chapter === null) {
+        throw new AuthError('NOT_FOUND', '章节不存在');
+      }
+      const latest = await tx.chapterVersion.findFirst({
+        where: { workId, chapterId },
+        orderBy: { versionNo: 'desc' },
+        select: { id: true },
+      });
+      if (latest !== null && latest.id !== run.sourceVersionId) {
+        throw new AuthError('CONTINUITY_SOURCE_VERSION_STALE');
+      }
+      if (chapter.status !== 'finalized') {
+        throw new AuthError('CONTINUITY_CHAPTER_NOT_FINALIZED');
+      }
+      if (latest === null) {
+        throw new AuthError('CONTINUITY_CHAPTER_NOT_FINALIZED');
       }
 
       const created: (ChapterFact & { readonly id: string })[] = [];
@@ -563,10 +619,19 @@ export async function extractChapterFacts(
         created.push({ ...fact, id: row.id });
       }
 
-      await tx.chapterFactRun.update({
-        where: { id: run.id },
-        data: { status: 'succeeded', finishedAt: new Date() },
-      });
+      // 终态 + 本次实际 provider / model；时间戳统一走数据库时钟
+      const updated = await tx.$executeRaw`
+        UPDATE "chapter_fact_runs"
+        SET "status" = 'succeeded',
+            "error_code" = NULL,
+            "finished_at" = clock_timestamp(),
+            "provider" = ${actualProvider},
+            "model" = ${actualModel}
+        WHERE "id" = ${run.id}::uuid AND "status" = 'running'
+      `;
+      if (updated !== 1) {
+        throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+      }
 
       const factTypeCounts = countFactTypes(created);
       await writeAuditLog(tx, {
@@ -581,8 +646,9 @@ export async function extractChapterFacts(
           runId: run.id,
           agentName: CONTINUITY_EXTRACTOR_AGENT.name,
           agentVersion: CONTINUITY_EXTRACTOR_AGENT.promptVersion,
-          provider: run.provider,
-          model: run.model,
+          // 与 run 落库一致：本次实际成功的 provider / model
+          provider: actualProvider,
+          model: actualModel,
           factCount: created.length,
           factTypeCounts,
         },
@@ -598,8 +664,8 @@ export async function extractChapterFacts(
       sourceVersionNo,
       agentName: CONTINUITY_EXTRACTOR_AGENT.name,
       agentVersion: CONTINUITY_EXTRACTOR_AGENT.promptVersion,
-      provider: run.provider,
-      model: run.model,
+      provider: actualProvider,
+      model: actualModel,
       created: true,
       facts: saved.facts,
       factTypeCounts: saved.factTypeCounts,
@@ -618,22 +684,26 @@ interface LoadFactContextInput {
   readonly chapterText: string;
 }
 
-/** 读取当前设定摘要（人物 / 物品 / 境界 / 势力），过滤 secret 字段。 */
+/**
+ * 读取当前设定摘要（人物 / 物品 / 境界 / 势力），过滤 secret 字段。
+ *
+ * 截断规则（确定性）：
+ * - **按类型分别查询**，每类最多 `MAX_FACT_CONTEXT_ENTITIES` 条；
+ *   不用「一次全局 take 再按类型切」——那样大量人物会把物品 / 势力整类挤掉；
+ * - 顺序固定为 `orderIndex asc → createdAt asc → id asc`，同样的数据每次结果一致。
+ */
 async function loadFactContext(
   db: Prisma.TransactionClient,
   workId: string,
   base: LoadFactContextInput,
 ): Promise<ChapterFactInput> {
-  const entities = await db.entity.findMany({
-    where: {
-      workId,
-      deletedAt: null,
-      entityType: { in: ['character', 'item', 'realm_level', 'faction'] },
-    },
-    orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    take: MAX_FACT_CONTEXT_ENTITIES * 4,
-    select: { id: true, entityType: true, name: true, orderIndex: true },
-  });
+  const [characters, items, realms, factions] = await Promise.all([
+    loadEntitiesOfType(db, workId, 'character'),
+    loadEntitiesOfType(db, workId, 'item'),
+    loadEntitiesOfType(db, workId, 'realm_level'),
+    loadEntitiesOfType(db, workId, 'faction'),
+  ]);
+  const entities = [...characters, ...items, ...realms, ...factions];
 
   const attributes =
     entities.length === 0
@@ -658,31 +728,14 @@ async function loadFactContext(
     attributesByEntity.set(row.entityId, bucket);
   }
 
-  const build = (entityType: string, limit: number): FactEntityRef[] =>
-    entities
-      .filter((entity) => entity.entityType === entityType)
-      .slice(0, limit)
-      .map((entity) => ({
-        id: entity.id,
-        name: entity.name,
-        summary: truncate(
-          (attributesByEntity.get(entity.id) ?? []).join('；'),
-          MAX_ENTITY_SUMMARY_LENGTH,
-        ),
-      }));
-
-  const realms: (FactEntityRef & { orderIndex: number | null })[] = entities
-    .filter((entity) => entity.entityType === 'realm_level')
-    .slice(0, MAX_FACT_CONTEXT_ENTITIES)
-    .map((entity) => ({
-      id: entity.id,
-      name: entity.name,
-      summary: truncate(
-        (attributesByEntity.get(entity.id) ?? []).join('；'),
-        MAX_ENTITY_SUMMARY_LENGTH,
-      ),
-      orderIndex: entity.orderIndex,
-    }));
+  const toRef = (entity: EntityRow): FactEntityRef => ({
+    id: entity.id,
+    name: entity.name,
+    summary: truncate(
+      (attributesByEntity.get(entity.id) ?? []).join('；'),
+      MAX_ENTITY_SUMMARY_LENGTH,
+    ),
+  });
 
   return {
     work: { id: base.work.id, title: base.work.title },
@@ -692,12 +745,32 @@ async function loadFactContext(
       title: base.chapter.title,
     },
     sourceVersion: base.sourceVersion,
-    characters: build('character', MAX_FACT_CONTEXT_ENTITIES),
-    items: build('item', MAX_FACT_CONTEXT_ENTITIES),
-    realms,
-    factions: build('faction', MAX_FACT_CONTEXT_ENTITIES),
+    characters: characters.map(toRef),
+    items: items.map(toRef),
+    realms: realms.map((entity) => ({ ...toRef(entity), orderIndex: entity.orderIndex })),
+    factions: factions.map(toRef),
     chapterText: base.chapterText,
   };
+}
+
+interface EntityRow {
+  readonly id: string;
+  readonly name: string;
+  readonly orderIndex: number | null;
+}
+
+/** 单一类型的实体：每类独立上限，顺序固定，不会被其它类型挤占。 */
+async function loadEntitiesOfType(
+  db: Prisma.TransactionClient,
+  workId: string,
+  entityType: 'character' | 'item' | 'realm_level' | 'faction',
+): Promise<EntityRow[]> {
+  return db.entity.findMany({
+    where: { workId, deletedAt: null, entityType },
+    orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+    take: MAX_FACT_CONTEXT_ENTITIES,
+    select: { id: true, name: true, orderIndex: true },
+  });
 }
 
 /** 属性值转成稳定的一句话摘要（数组用「、」连接，对象只取标量键）。 */
@@ -755,13 +828,88 @@ function mapExtractionError(error: unknown): AuthErrorCode {
 /** 把 run 标记为失败（best-effort；失败不掩盖原始错误）。 */
 async function markRunFailed(db: PrismaClient, runId: string, errorCode: string): Promise<void> {
   try {
-    await db.chapterFactRun.updateMany({
-      where: { id: runId, status: 'running' },
-      data: { status: 'failed', errorCode, finishedAt: new Date() },
-    });
+    // 时间戳走数据库时钟，避免应用 / 数据库时区或时钟偏移
+    await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "status" = 'failed',
+          "error_code" = ${errorCode},
+          "finished_at" = clock_timestamp()
+      WHERE "id" = ${runId}::uuid AND "status" = 'running'
+    `;
   } catch {
-    // 忽略：原始错误更重要；run 会停在 running，由后续重试覆盖
+    // 忽略：原始错误更重要；run 会停在 running，租约到期后可被后续请求接管
   }
+}
+
+/**
+ * 接管**租约已到期**的 running run：原子标为 failed，返回是否接管成功。
+ *
+ * CAS 条件同时包含 `status`、`started_at` 与数据库时钟租约判断，
+ * 因此两个请求即使同时判断"已过期"，也只有一个能真正接管。
+ * `succeeded` 永远不会被接管（`status = 'running'` 条件已排除）。
+ */
+async function takeOverExpiredRun(
+  tx: Prisma.TransactionClient,
+  run: { readonly id: string; readonly startedAt: Date },
+): Promise<boolean> {
+  const updated = await tx.$executeRaw`
+    UPDATE "chapter_fact_runs"
+    SET "status" = 'failed',
+        "error_code" = 'CONTINUITY_EXTRACTION_FAILED',
+        "finished_at" = clock_timestamp()
+    WHERE "id" = ${run.id}::uuid
+      AND "status" = 'running'
+      AND "started_at" = ${run.startedAt}::timestamptz
+      AND "started_at" <= clock_timestamp() - (${FACT_RUN_LEASE_MS}::int * interval '1 millisecond')
+  `;
+  return updated === 1;
+}
+
+/**
+ * failed → running：复用**同一条 run** 开始新一次尝试。
+ *
+ * - 刷新 `started_at`（新租约起点）；
+ * - 清空 `error_code` / `finished_at`；
+ * - 记录本次尝试的 provider / model（成功后会被实际返回值覆盖）。
+ */
+async function restartRun(
+  tx: Prisma.TransactionClient,
+  runId: string,
+  provider: string,
+  model: string,
+): Promise<ChapterFactRunRow> {
+  const updated = await tx.$executeRaw`
+    UPDATE "chapter_fact_runs"
+    SET "status" = 'running',
+        "error_code" = NULL,
+        "finished_at" = NULL,
+        "started_at" = clock_timestamp(),
+        "provider" = ${provider},
+        "model" = ${model}
+    WHERE "id" = ${runId}::uuid AND "status" = 'failed'
+  `;
+  if (updated !== 1) {
+    // 正常情况下不会发生（准备阶段持有作品锁）；保守返回进行中
+    throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+  }
+  return tx.chapterFactRun.findUniqueOrThrow({ where: { id: runId } });
+}
+
+/** run 行的结构视图（只声明服务层用到的字段）。 */
+interface ChapterFactRunRow {
+  readonly id: string;
+  readonly workId: string;
+  readonly chapterId: string;
+  readonly sourceVersionId: string;
+  readonly agentName: string;
+  readonly agentVersion: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly status: string;
+  readonly errorCode: string | null;
+  readonly createdAt: Date;
+  readonly startedAt: Date;
+  readonly finishedAt: Date | null;
 }
 
 function toFactView(candidate: {

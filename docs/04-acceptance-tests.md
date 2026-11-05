@@ -765,3 +765,25 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-166 | 数据库约束 | `UNIQUE(source_version_id)`；run 只允许受控状态更新、成功后不可改、不可删除；候选 append-only（UPDATE / DELETE 均被拒绝） | 同上 |
 | AT-WF-167 | 迁移 | 空库：**11** 个迁移 / **20** 张表 / **10** 个触发器 | `pnpm db:deploy` + 直连计数 |
 | AT-WF-168 | 测试数 | 全量单测 **842**（805 + 事实校验 22 + 事实服务 15）；浏览器 E2E 仍 **118**（本轮无 UI） | 全量 `pnpm test` |
+
+### A2-A-REV-01 追加：提交竞态、复合归属与失败恢复
+
+> **三个缺口**：
+> 1. 提交阶段只检查 `run.status === 'running'`。模型调用期间作者保存 revision（章节回到
+>    `in_review` + 新最新版本）后，旧版本正文仍会被当成"当前定稿"提交为 succeeded；
+> 2. 候选的 run 外键只有 `run_id` 单列，候选可以挂在 run A 上却把 work / chapter / version
+>    指向另一个合法组合，数据库无法拒绝；
+> 3. 进程崩溃留下的 `running` 没有恢复路径（该版本永远 409）；重试时也没有记录本次
+>    attempt 的 provider / model。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-169 | 提交阶段二次校验 | 提交事务内重新读取 chapter 归属 / 状态、当前最大版本、run 归属；版本已变化 → `CONTINUITY_SOURCE_VERSION_STALE`；不再定稿 → `CONTINUITY_CHAPTER_NOT_FINALIZED`；事务内不插入候选、不写成功审计，回滚后 run 标为 `failed` | `packages/workflow/test/chapter-facts-service.test.ts` |
+| AT-WF-170 | 模型调用期间的 revision | Provider 受控挂起 → 已创建 running run → 作者保存新 revision（版本 2、章节 `in_review`）→ 放行：抛 `STALE`，候选 0 / 成功 run 0 / 成功审计 0，run 为 failed；新版本重新定稿后再次提取走**新 run**（run 数 2） | 同上 |
+| AT-WF-171 | 候选与 run 的复合归属 | `chapter_fact_candidates_run_fkey` 为 `(run_id, source_version_id, chapter_id, work_id) → chapter_fact_runs(id, source_version_id, chapter_id, work_id)`；raw SQL 插入"run 指向 v1、候选写 v2（合法组合）"被数据库以 23503 拒绝；改为与 run 一致时插入成功 | 同上 |
+| AT-WF-172 | running 租约 | `started_at` 为本次尝试起点，租约 10 分钟（`FACT_RUN_LEASE_MS`）；未到期 → 409 `IN_PROGRESS` 且不改写 run；已到期 → 一条带 `status/started_at/数据库时钟` 条件的 CAS 接管为 failed 再复用同一行 running，`run` 数不变、`started_at` 刷新 | 同上 |
+| AT-WF-173 | 并发接管 | 崩溃留下的过期 running 上并发两次提取：恰好 1 个成功、1 个 `IN_PROGRESS`；run 仍只有 1 条，候选 3 条，审计 1 条 | 同上 |
+| AT-WF-174 | 重试元数据 | 第一次 `provider-a / model-a` 失败；第二次 `provider-b / default-b` 成功且 Provider 实际返回 `model-b-actual`：run 与审计均为 `provider-b / model-b-actual`，`started_at` 刷新，`id` 不变（不产生第二条 run） | 同上 |
+| AT-WF-175 | 上下文截断 | 420 个人物（orderIndex 小）+ 物品 / 势力（orderIndex 大）：`characters` 恰为 100 条，物品与势力仍完整出现（按类型独立查询，每类 ≤100，顺序 `orderIndex → createdAt → id`） | 同上 |
+| AT-WF-176 | 迁移 | 空库仍为 **11** 个迁移 / **20** 张表 / **10** 个触发器（同一未推送迁移内升级，不新增第 12 个迁移） | `pnpm db:deploy` + 直连计数 |
+| AT-WF-177 | 测试数 | 全量单测 **849**（842 + 7）；浏览器 E2E 仍 **118**（本轮无 UI / API 变更） | 全量 `pnpm test` |

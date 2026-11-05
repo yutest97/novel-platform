@@ -166,6 +166,7 @@ export {
   createChapterDraftWorkflow,
   createChapterMockProvider,
   CONTINUITY_EXTRACTOR_AGENT,
+  FACT_RUN_LEASE_MS,
   extractChapterFacts,
   validateFactsOutput,
   diffChapterVersions,

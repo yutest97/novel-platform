@@ -1,13 +1,18 @@
 /**
- * 连续性事实提取服务（A2-A）。
+ * 连续性事实提取服务（A2-A / A2-A-REV-01）。
  *
  * 覆盖：
  * - 只允许定稿章节与当前最新版本；
  * - 成功时 run / 候选 / 审计的数量与字段；
  * - 同一版本幂等复用、并发只产生一个 run；
+ * - **提交阶段二次校验**（模型调用期间的新 revision 必须被拒绝）；
+ * - **候选与 run 的复合归属**（数据库层拒绝跨 run 组合）；
+ * - **running 租约**（崩溃恢复、并发接管、只允许一个成功）；
+ * - **重试元数据**（provider / model 以本次实际成功为准）；
  * - 失败不写半成品、可重试；
  * - 审计失败整体回滚；
  * - 正文与 secret 不进入数据库 / 模型输出摘要；
+ * - 上下文按类型截断；
  * - 候选 append-only；不自动修改任何实体。
  */
 
@@ -17,9 +22,14 @@ import { AUDIT_ACTIONS, type AuthError } from '@novel/auth';
 import type { PrismaClient } from '@novel/db';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { extractChapterFacts } from '../src/chapter/facts.js';
+import {
+  FACT_RUN_LEASE_MS,
+  MAX_FACT_CONTEXT_ENTITIES,
+  extractChapterFacts,
+} from '../src/chapter/facts.js';
+import { saveHumanChapterVersion } from '../src/chapter/human.js';
 import type { ModelJsonInput, ModelProvider } from '../src/model-types.js';
-import { createChapterFixture, type ChapterFixture } from './helpers/chapter.js';
+import { createChapterFixture, lastUserContent, type ChapterFixture } from './helpers/chapter.js';
 import { cleanupWork, closeTestDb, testDb } from './helpers/db.js';
 
 let db: PrismaClient;
@@ -537,5 +547,435 @@ describe('数据库约束', () => {
       db.chapterFactRun.update({ where: { id: run.id }, data: { status: 'failed' } }),
     ).rejects.toThrow();
     await expect(db.chapterFactRun.delete({ where: { id: run.id } })).rejects.toThrow();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* A2-A-REV-01：提交阶段二次校验、复合归属、running 租约、重试元数据、上下文截断      */
+/* -------------------------------------------------------------------------- */
+
+/** 可挂起的 Provider：第一次调用进入后停住，由测试决定何时放行。 */
+function gatedProvider(facts: unknown): {
+  readonly provider: ModelProvider;
+  readonly calls: ModelJsonInput[];
+  /** 第一次 `generateJson` 已进入（此时 run 必定已是 running）。 */
+  readonly entered: Promise<void>;
+  release: () => void;
+} {
+  const calls: ModelJsonInput[] = [];
+  let notifyEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    notifyEntered = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = false;
+
+  const provider: ModelProvider = {
+    name: 'gated',
+    defaultModel: 'gated-model',
+    async generateJson(input) {
+      calls.push(input);
+      if (!started) {
+        started = true;
+        notifyEntered();
+        await gate;
+      }
+      return {
+        json: { facts },
+        provider: 'gated',
+        model: 'gated-model',
+        usage: { promptTokens: 1, completionTokens: 1 },
+        latencyMs: 1,
+      };
+    },
+    async generateText() {
+      throw new Error('未使用');
+    },
+  };
+
+  return { provider, calls, entered, release };
+}
+
+/** 带身份与失败模式的 Provider（用于验证重试元数据）。 */
+function identityProvider(input: {
+  name: string;
+  defaultModel: string;
+  /** Provider 实际返回的 model（可以不同于 defaultModel）。 */
+  actualModel: string;
+  facts: unknown;
+  mode: 'ok' | 'throw';
+}): ModelProvider {
+  return {
+    name: input.name,
+    defaultModel: input.defaultModel,
+    async generateJson() {
+      if (input.mode === 'throw') {
+        throw new Error('stub provider failure');
+      }
+      return {
+        json: { facts: input.facts },
+        provider: input.name,
+        model: input.actualModel,
+        usage: { promptTokens: 1, completionTokens: 1 },
+        latencyMs: 1,
+      };
+    },
+    async generateText() {
+      throw new Error('未使用');
+    },
+  };
+}
+
+/**
+ * 直接插入一条 run（绕过服务层）。
+ *
+ * 用来模拟「进程崩溃留下的 running」：INSERT 不触发 run 的状态触发器，
+ * 因此可以指定过去的 `started_at`。
+ */
+async function insertRun(input: {
+  workId: string;
+  chapterId: string;
+  sourceVersionId: string;
+  provider?: string;
+  model?: string;
+  /** 相对当前时间的偏移（负数表示过去）。 */
+  startedAtOffsetMs?: number;
+}): Promise<string> {
+  const id = randomUUID();
+  const offset = input.startedAtOffsetMs ?? 0;
+  await db.$executeRaw`
+    INSERT INTO "chapter_fact_runs"
+      ("id", "work_id", "chapter_id", "source_version_id",
+       "agent_name", "agent_version", "provider", "model", "status", "started_at")
+    VALUES (
+      ${id}::uuid, ${input.workId}::uuid, ${input.chapterId}::uuid, ${input.sourceVersionId}::uuid,
+      'continuity.extractor', '1.0.0',
+      ${input.provider ?? 'crashed'}, ${input.model ?? 'crashed-model'}, 'running',
+      clock_timestamp() + (${offset}::int * interval '1 millisecond')
+    )
+  `;
+  return id;
+}
+
+/** 直接用 raw SQL 插候选（绕过服务层与 Prisma 模型，验证数据库约束）。 */
+async function rawInsertCandidate(input: {
+  runId: string;
+  workId: string;
+  chapterId: string;
+  sourceVersionId: string;
+}): Promise<number> {
+  return db.$executeRawUnsafe(
+    `INSERT INTO "chapter_fact_candidates"
+       ("id", "run_id", "work_id", "chapter_id", "source_version_id", "fact_type", "payload")
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, 'plot_thread', $6::jsonb)`,
+    randomUUID(),
+    input.runId,
+    input.workId,
+    input.chapterId,
+    input.sourceVersionId,
+    JSON.stringify({ factType: 'plot_thread', summary: '线索', reason: '依据' }),
+  );
+}
+
+describe('提交阶段二次校验（A2-A-REV-01）', () => {
+  it('模型调用期间保存新 revision → STALE，且无候选 / 无成功审计', async () => {
+    const fixture = await newFixture();
+    const { versionId } = await seedFinalizedVersion(fixture);
+    const gated = gatedProvider(sampleFacts(fixture));
+
+    const pending = extract(fixture, gated.provider);
+    await gated.entered;
+
+    const running = await db.chapterFactRun.findFirstOrThrow({
+      where: { workId: fixture.workId },
+    });
+    expect(running.status).toBe('running');
+
+    // 作者在模型调用期间保存 revision：章节回到 in_review，并产生新的最新版本
+    const saved = await saveHumanChapterVersion({
+      db,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      authorId: fixture.authorId,
+      content: `${MARKER}-修订，${'雪落在剑鞘上。'.repeat(200)}`,
+      baseVersionId: versionId,
+    });
+    expect(saved.versionNo).toBe(2);
+
+    gated.release();
+    await expect(pending).rejects.toMatchObject({ code: 'CONTINUITY_SOURCE_VERSION_STALE' });
+
+    // 事务回滚：没有候选、没有成功 run、没有成功审计
+    expect(await candidateCount(fixture.workId)).toBe(0);
+    expect(
+      await db.chapterFactRun.count({ where: { workId: fixture.workId, status: 'succeeded' } }),
+    ).toBe(0);
+    expect(await factsAuditCount(fixture.chapterId)).toBe(0);
+
+    const failed = await db.chapterFactRun.findFirstOrThrow({ where: { workId: fixture.workId } });
+    expect(failed.id).toBe(running.id);
+    expect(failed.status).toBe('failed');
+    expect(failed.errorCode).toBe('CONTINUITY_SOURCE_VERSION_STALE');
+
+    // 新版本重新定稿后再次提取：走**新的 run**
+    await db.chapter.update({ where: { id: fixture.chapterId }, data: { status: 'finalized' } });
+    const retried = await extract(fixture, stubProvider(sampleFacts(fixture)));
+    expect(retried.created).toBe(true);
+    expect(retried.runId).not.toBe(failed.id);
+    expect(retried.sourceVersionId).toBe(saved.versionId);
+    expect(await candidateCount(fixture.workId)).toBe(3);
+    expect(await runCount(fixture.workId)).toBe(2);
+  });
+});
+
+describe('候选与 run 的复合归属（A2-A-REV-01）', () => {
+  it('run 与 work / chapter / version 不一致的候选被数据库拒绝', async () => {
+    const fixture = await newFixture();
+    const first = await seedFinalizedVersion(fixture, 1);
+    const content2 = `${MARKER}-版本2，${'风穿过廊下。'.repeat(220)}`;
+    const second = await db.chapterVersion.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        versionNo: 2,
+        content: content2,
+        wordCount: content2.length,
+        source: 'human',
+        createdBy: fixture.authorId,
+      },
+      select: { id: true },
+    });
+
+    // run 指向版本 1
+    const runId = await insertRun({
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: first.versionId,
+    });
+
+    // 候选挂在 run 上，却把 version 指向版本 2（本身是合法的章节 / 作品 / 版本组合，
+    // 因此只有复合 run 外键能拒绝它 —— 证明不是服务层拦截）。
+    const error = await rawInsertCandidate({
+      runId,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: second.id,
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(String((error as Error).message)).toMatch(/chapter_fact_candidates_run_fkey|23503/);
+    expect(await candidateCount(fixture.workId)).toBe(0);
+
+    // 与 run 完全一致时正常插入
+    const inserted = await rawInsertCandidate({
+      runId,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: first.versionId,
+    });
+    expect(inserted).toBe(1);
+    expect(await candidateCount(fixture.workId)).toBe(1);
+  });
+});
+
+describe('running 租约与恢复（A2-A-REV-01）', () => {
+  it('租约未到期 → 409 CONTINUITY_EXTRACTION_IN_PROGRESS', async () => {
+    const fixture = await newFixture();
+    const { versionId } = await seedFinalizedVersion(fixture);
+    await insertRun({
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: versionId,
+      startedAtOffsetMs: 0,
+    });
+
+    await expect(extract(fixture, stubProvider([]))).rejects.toMatchObject({
+      code: 'CONTINUITY_EXTRACTION_IN_PROGRESS',
+    });
+    expect(await candidateCount(fixture.workId)).toBe(0);
+    // 未到期的 running 不会被改写
+    const run = await db.chapterFactRun.findFirstOrThrow({ where: { workId: fixture.workId } });
+    expect(run.status).toBe('running');
+  });
+
+  it('租约已到期 → 接管同一条 run（不产生第二条）并成功', async () => {
+    const fixture = await newFixture();
+    const { versionId } = await seedFinalizedVersion(fixture);
+    const runId = await insertRun({
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: versionId,
+      provider: 'crashed',
+      model: 'crashed-model',
+      startedAtOffsetMs: -(FACT_RUN_LEASE_MS + 60_000),
+    });
+
+    const result = await extract(fixture, stubProvider(sampleFacts(fixture)));
+    expect(result.created).toBe(true);
+    expect(result.runId).toBe(runId);
+    expect(await runCount(fixture.workId)).toBe(1);
+    expect(await candidateCount(fixture.workId)).toBe(3);
+
+    const run = await db.chapterFactRun.findUniqueOrThrow({ where: { id: runId } });
+    expect(run.status).toBe('succeeded');
+    expect(run.errorCode).toBeNull();
+    // started_at 被刷新为本次尝试的开始时间
+    expect(run.startedAt.getTime()).toBeGreaterThan(Date.now() - 60_000);
+  });
+
+  it('两个并发接管只允许一个成功', async () => {
+    const fixture = await newFixture();
+    const { versionId } = await seedFinalizedVersion(fixture);
+    const runId = await insertRun({
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: versionId,
+      startedAtOffsetMs: -(FACT_RUN_LEASE_MS + 60_000),
+    });
+
+    const gated = gatedProvider(sampleFacts(fixture));
+    const outcomes: string[] = [];
+    const track = (promise: Promise<unknown>): Promise<void> =>
+      promise.then(
+        () => {
+          outcomes.push('ok');
+        },
+        (error: unknown) => {
+          outcomes.push((error as AuthError).code);
+        },
+      );
+
+    const first = track(extract(fixture, gated.provider));
+    const second = track(extract(fixture, gated.provider));
+
+    // 一个请求已接管并进入模型；另一个必然在准备阶段被拒
+    await gated.entered;
+    await expect.poll(() => outcomes.length, { timeout: 10_000 }).toBe(1);
+    gated.release();
+    await Promise.all([first, second]);
+
+    expect(outcomes.filter((item) => item === 'ok')).toHaveLength(1);
+    expect(outcomes.filter((item) => item === 'CONTINUITY_EXTRACTION_IN_PROGRESS')).toHaveLength(1);
+    // 租约接管复用同一行，不产生第二个 run
+    expect(await runCount(fixture.workId)).toBe(1);
+    expect(await db.chapterFactRun.count({ where: { workId: fixture.workId, id: runId } })).toBe(1);
+    expect(await candidateCount(fixture.workId)).toBe(3);
+    expect(await factsAuditCount(fixture.chapterId)).toBe(1);
+  });
+});
+
+describe('重试元数据（A2-A-REV-01）', () => {
+  it('第二次尝试成功后，run 与审计记录第二次的 provider / model', async () => {
+    const fixture = await newFixture();
+    await seedFinalizedVersion(fixture);
+
+    await expect(
+      extract(
+        fixture,
+        identityProvider({
+          name: 'provider-a',
+          defaultModel: 'model-a',
+          actualModel: 'model-a',
+          facts: sampleFacts(fixture),
+          mode: 'throw',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'CONTINUITY_EXTRACTION_FAILED' });
+
+    const afterFirst = await db.chapterFactRun.findFirstOrThrow({
+      where: { workId: fixture.workId },
+    });
+    expect(afterFirst).toMatchObject({
+      status: 'failed',
+      provider: 'provider-a',
+      model: 'model-a',
+    });
+    const firstStartedAt = afterFirst.startedAt.getTime();
+
+    // 第二次：provider / 默认 model 都换了，且 Provider 实际返回的 model 又不同
+    const result = await extract(
+      fixture,
+      identityProvider({
+        name: 'provider-b',
+        defaultModel: 'default-b',
+        actualModel: 'model-b-actual',
+        facts: sampleFacts(fixture),
+        mode: 'ok',
+      }),
+    );
+    expect(result.created).toBe(true);
+    expect(result.provider).toBe('provider-b');
+    expect(result.model).toBe('model-b-actual');
+
+    const afterSecond = await db.chapterFactRun.findFirstOrThrow({
+      where: { workId: fixture.workId },
+    });
+    expect(afterSecond.id).toBe(afterFirst.id);
+    expect(afterSecond.status).toBe('succeeded');
+    // 以实际返回的 model 落库，不沿用第一次失败 attempt 的配置
+    expect(afterSecond.provider).toBe('provider-b');
+    expect(afterSecond.model).toBe('model-b-actual');
+    // 重试刷新了本次尝试的开始时间
+    expect(afterSecond.startedAt.getTime()).toBeGreaterThanOrEqual(firstStartedAt);
+
+    const audit = await db.auditLog.findFirstOrThrow({
+      where: { action: AUDIT_ACTIONS.CONTINUITY_FACTS_EXTRACTED, targetId: fixture.chapterId },
+    });
+    expect(audit.detail).toMatchObject({ provider: 'provider-b', model: 'model-b-actual' });
+  });
+});
+
+describe('上下文截断（A2-A-REV-01）', () => {
+  it('每类实体独立上限：人物过多也不会挤掉物品与势力', async () => {
+    const fixture = await newFixture();
+    await seedFinalizedVersion(fixture);
+
+    // 420 个人物（orderIndex 很小），物品 / 势力 orderIndex 很大：
+    // 旧的「全局 take 后按类型切」会在这里把物品与势力整类丢掉。
+    await db.entity.createMany({
+      data: Array.from({ length: 420 }, (_, index) => ({
+        workId: fixture.workId,
+        entityType: 'character',
+        name: `群演-${fixture.tag}-${String(index).padStart(3, '0')}`,
+        orderIndex: 10 + index,
+      })),
+    });
+    const item = await db.entity.create({
+      data: {
+        workId: fixture.workId,
+        entityType: 'item',
+        name: `玄铁剑-${fixture.tag}`,
+        orderIndex: 9000,
+      },
+      select: { id: true, name: true },
+    });
+    const faction = await db.entity.create({
+      data: {
+        workId: fixture.workId,
+        entityType: 'faction',
+        name: `血月教-${fixture.tag}`,
+        orderIndex: 9001,
+      },
+      select: { id: true, name: true },
+    });
+
+    const provider = stubProvider([]);
+    await extract(fixture, provider);
+    expect(provider.calls).toHaveLength(1);
+    const sent = JSON.parse(lastUserContent(provider.calls[0] as ModelJsonInput)) as {
+      characters: { id: string; name: string }[];
+      items: { id: string; name: string }[];
+      realms: { id: string; name: string }[];
+      factions: { id: string; name: string }[];
+    };
+
+    // 人物被截断到上限，物品 / 势力仍然完整出现
+    expect(sent.characters).toHaveLength(MAX_FACT_CONTEXT_ENTITIES);
+    expect(sent.items.map((entity) => entity.name)).toContain(item.name);
+    expect(sent.factions.map((entity) => entity.name)).toContain(faction.name);
+    expect(sent.realms.length).toBe(fixture.realms.length);
+    expect(sent.characters.every((entity) => entity.id !== item.id)).toBe(true);
   });
 });

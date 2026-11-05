@@ -1312,57 +1312,111 @@ detail.chapter.status === 'in_review'
 chapter_fact_runs
   id, work_id, chapter_id, source_version_id,
   agent_name, agent_version, provider, model,
-  status(running|succeeded|failed), error_code, created_at, finished_at
+  status(running|succeeded|failed), error_code,
+  created_at, started_at, finished_at
   UNIQUE(source_version_id)
+  UNIQUE(id, source_version_id, chapter_id, work_id)
 
 chapter_fact_candidates
   id, run_id, work_id, chapter_id, source_version_id,
   fact_type(白名单), payload(jsonb), status='candidate', created_at
+  FK (run_id, source_version_id, chapter_id, work_id)
+     → chapter_fact_runs(id, source_version_id, chapter_id, work_id)
 ```
 
-- 归属：`(chapter_id, work_id)` 与 `(source_version_id, chapter_id, work_id)` 复合外键，
-  再加上 `(run_id)`；作品 / 章节 / 版本三者一致由数据库保证；
+- 归属：候选的 run 外键是**复合外键**，候选的 work / chapter / version 必须与它引用的
+  run 完全一致。只用 `run_id` 单列外键时，候选可以挂在 run A 上却把三者指向另一个
+  合法组合，数据库无法拒绝；现在这种组合直接被 `chapter_fact_candidates_run_fkey` 拒绝。
+  另有独立的 `(chapter_id, work_id)` 与 `(source_version_id, chapter_id, work_id)`
+  外键，保证三者本身也是有效组合；
+- `started_at` 是**本次尝试**的开始时间，同时充当 running 租约的起点；
 - `runs` 只允许受控更新（`running → succeeded/failed`、`failed → running`），
+  归属 / Agent 身份 / `created_at` 不可变；`provider` / `model` 只允许在 `running`
+  期间（记录本次实际模型）或重试开始时更新；`started_at` 只允许在重试开始时刷新；
   成功后不可再改、不可删除；
 - `candidates` append-only（UPDATE / DELETE 一律拒绝）；
 - 测试清理沿用 `DISABLE TRIGGER USER` 受控策略。
 
-### 21.4 幂等与并发
+### 21.4 幂等、并发与 running 租约
 
 ```
 runWorkWrite（作品锁）
   → 归属 / 定稿 / 最新版本校验
   → 已有 succeeded run？→ 返回既有 run + 候选（created=false，不写审计）
-  → 已有 running run？→ 409 CONTINUITY_EXTRACTION_IN_PROGRESS
-  → 已有 failed run？→ 复用同一行置回 running
+  → 已有 running run？
+      · started_at 未超出租约（10 分钟）→ 409 CONTINUITY_EXTRACTION_IN_PROGRESS
+      · 已超出租约（进程崩溃）→ CAS 接管：标 failed 再复用同一行 running
+  → 已有 failed run？→ 复用同一行置回 running（刷新 started_at 与本次 provider/model）
   → 否则插入 running
 （锁外调用模型）
 runWorkWrite（作品锁）
+  → 提交阶段二次校验（见 21.5）
   → 写候选 + run succeeded + 审计（同一事务）
 ```
 
 - `UNIQUE(source_version_id)` 兜底"同一版本只有一个 run"；
+- **租约接管**用一条带 `status = 'running'`、旧 `started_at` 与数据库时钟租约条件的
+  `UPDATE` 做 CAS：两个请求即使同时判断"已过期"，也只有一个能真正接管；
+  `succeeded` 永远不会被接管；
 - 失败不写候选；失败 run 可重试（复用同一行，不产生第二条）；
 - 正文不落库，候选 `payload` 只含结构化字段。
 
-### 21.5 审计
+### 21.5 提交阶段二次校验
+
+模型调用可能耗时数十秒，期间作者完全可以保存新 revision（章节回到 `in_review`
+并产生更新的版本）。因此**提交事务内必须重新读取并校验**：
+
+```
+chapter 属于当前 work
+run.workId / chapterId / sourceVersionId 与本次调用一致
+当前最大 chapterVersion.id === run.sourceVersionId   → 否则 CONTINUITY_SOURCE_VERSION_STALE
+chapter.status === 'finalized'                      → 否则 CONTINUITY_CHAPTER_NOT_FINALIZED
+```
+
+- 先判版本、再判定稿：新 revision 会同时造成两者，此时"版本过期"是更具体、
+  更可操作的错误；
+- 任一校验失败 → **事务内不插入任何候选、不写成功审计**，整体回滚；
+- 回滚后把 run 标记为 `failed`（带对应 `error_code`），保留可重试语义；
+- 新版本重新定稿后再次提取会创建**新的 run**（`source_version_id` 不同），
+  旧 run 保持 failed，不会被覆盖。
+
+### 21.6 审计
 
 `continuity.facts_extracted`，detail 只允许 10 个字段：
 `workId / chapterId / sourceVersionId / runId / agentName / agentVersion /
 provider / model / factCount / factTypeCounts`。
 不含正文、prompt、模型原始响应、secret 或 Key。
 
-### 21.6 错误码
+- `provider` / `model` 记录的是**本次实际成功**的值（`AgentRunResult.provider/model`），
+  不是第一次失败 attempt 的配置，也不一定是 `defaultModel`（Provider 可能路由 / 降级）；
+- `finished_at` / `started_at` 全部使用数据库 `clock_timestamp()`，
+  避免应用与数据库的时钟 / 时区偏移。
+
+### 21.7 上下文截断规则
+
+`loadFactContext` **按类型分别查询**，而不是"一次全局 take 再按类型切"：
+
+| 类型 | 上限 | 顺序 |
+| --- | --- | --- |
+| `character` | 100 | `orderIndex asc → createdAt asc → id asc` |
+| `item` | 100 | 同上 |
+| `realm_level` | 100 | 同上 |
+| `faction` | 100 | 同上 |
+
+全局 take 会让大量人物把物品 / 势力整类挤掉；按类型查询后每类都有独立预算，
+整体上限仍是 400 条（不会无界），且同一份数据每次得到完全相同的上下文。
+
+### 21.8 错误码
 
 | 错误码 | HTTP | 含义 |
 | --- | --- | --- |
-| `CONTINUITY_CHAPTER_NOT_FINALIZED` | 409 | 章节未定稿（或无正式版本） |
-| `CONTINUITY_SOURCE_VERSION_STALE` | 409 | 指定版本不是当前最新 |
-| `CONTINUITY_EXTRACTION_IN_PROGRESS` | 409 | 同版本已有进行中的提取 |
+| `CONTINUITY_CHAPTER_NOT_FINALIZED` | 409 | 章节未定稿（或无正式版本，含提交时已不再是定稿） |
+| `CONTINUITY_SOURCE_VERSION_STALE` | 409 | 指定版本不是当前最新（含模型调用期间产生的 new revision） |
+| `CONTINUITY_EXTRACTION_IN_PROGRESS` | 409 | 同版本已有进行中的提取（租约未到期） |
 | `CONTINUITY_FACTS_INVALID` | 422 | 模型输出不合法（**不可重试**，不写候选） |
 | `CONTINUITY_EXTRACTION_FAILED` | 502 | Provider / 内部失败（可重试） |
 
-### 21.7 未做
+### 21.9 未做
 
 HTTP API、候选审阅 / 采纳 UI、Worker 常驻注册、事实写回人物/物品/势力/关系/境界、
 冲突检测、RAG / embedding / 图谱、自动修改任何实体。
