@@ -213,8 +213,9 @@ A2-D-B-REV-01、A2-D-C、A2-C-D 的本地实现已通过代码复审；当前等
 
 复审通过前不推送。复审通过后的候选顺序：
 
-1. Reviewer 结果**展示 UI**（读接口已就绪：
-   `GET /candidates/:candidateId/review`，可直接轮询 `run=null → succeeded`）；
+1. Reviewer 结果**展示 UI**（卡已备：
+   `docs/tasks/A2-C-E-review-ui.md`；读接口已就绪，可轮询
+   `run=null → succeeded`）；
 2. 摘要读取 API / UI（摘要已落库但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
 4. 是否给 high severity 加采纳门禁——仍需产品确认。
