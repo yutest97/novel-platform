@@ -744,3 +744,24 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-154 | 版本加载竞态 | `page.route` 挂起单版本 GET：读取期间入口与历史提示都不出现；放行后选中的是历史版本 → 只显示提示；切回最新 → 入口出现 | 用例 50 |
 | AT-WF-155 | 定稿后仍可修订 | 定稿成功 → 入口关闭、生成入口关闭；编辑器仍可保存 revision → 回到「待定稿」、入口重新出现 | 用例 51 |
 | AT-WF-156 | 测试数 | 全量单测仍 **805**（未改服务 / API）；浏览器 E2E **118**（113 + 5） | 全量 `pnpm test`、`playwright test` |
+
+## 27. 连续性事实提取与候选存储验收（A2-A）
+
+> 对应 `docs/07` A2-A、`docs/08` 第 21 节、`README`「连续性事实候选」。
+> 本轮**只产生候选**：不提供 HTTP API / UI / Worker 注册 / RAG，
+> 不自动修改人物 / 物品 / 势力 / 关系 / 境界，不新增 `final_version_id`。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-157 | 六类事实 Schema | `character_state / relationship_change / item_change / realm_progress / plot_thread / location_change` 都有稳定字段；未知 `factType`、未知字段、超长 summary / reason、超过 50 条一律拒绝；空数组合法 | `packages/workflow/test/chapter-facts.test.ts` |
+| AT-WF-158 | 引用语义 | 人物 / 物品必须使用上下文 id；关系双方必须是两个不同人物；`location_change` 允许未登记地点名（≤120）但必须有 `subjectId`；`plot_thread` 必须有 `new/advanced/resolved`；越界字段（如 `character_state.name`）拒绝 | 同上 |
+| AT-WF-159 | 文本与编码 | 纯空白 summary / reason 拒绝；emoji / Unicode 原样保留；两端空白规范化；错误只带路径与原因，不回显正文 | 同上 |
+| AT-WF-160 | 前置校验 | 非定稿章节 → 409 `CONTINUITY_CHAPTER_NOT_FINALIZED`；指定旧版本 → 409 `CONTINUITY_SOURCE_VERSION_STALE`；他人作品 / 跨作品章节 → 404；均不建 run | `packages/workflow/test/chapter-facts-service.test.ts` |
+| AT-WF-161 | 成功与审计 | 生成 1 个 run + N 条候选（`status=candidate`）；审计 `continuity.facts_extracted` 只含 10 个字段（`workId / chapterId / sourceVersionId / runId / agentName / agentVersion / provider / model / factCount / factTypeCounts`）；正文不进入 run / 候选 / 审计 | 同上 |
+| AT-WF-162 | 幂等与并发 | 同版本重复提取返回既有 run（`created=false`），不新增候选与审计；并发同版本只产生 1 个 run、候选不重复 | 同上 |
+| AT-WF-163 | 失败与重试 | Provider 失败 → run `failed` + `errorCode`，无候选；模型输出不合法 / 未知实体 id → `CONTINUITY_FACTS_INVALID`（不可重试）且无候选；失败 run 可重试并复用同一行 | 同上 |
+| AT-WF-164 | 审计回滚 | 审计写入失败 → 候选与 run 终态整体回滚，重试后成功且审计仅一条 | 同上 |
+| AT-WF-165 | 数据边界 | `secret` / `secretKnownBy` 不进入模型输入；提取前后实体 / 实体版本 / 物品事件数量不变（不自动写回） | 同上 |
+| AT-WF-166 | 数据库约束 | `UNIQUE(source_version_id)`；run 只允许受控状态更新、成功后不可改、不可删除；候选 append-only（UPDATE / DELETE 均被拒绝） | 同上 |
+| AT-WF-167 | 迁移 | 空库：**11** 个迁移 / **20** 张表 / **10** 个触发器 | `pnpm db:deploy` + 直连计数 |
+| AT-WF-168 | 测试数 | 全量单测 **842**（805 + 事实校验 22 + 事实服务 15）；浏览器 E2E 仍 **118**（本轮无 UI） | 全量 `pnpm test` |

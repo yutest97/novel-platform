@@ -85,7 +85,8 @@ export async function cleanupWork(db: PrismaClient, workId: string): Promise<voi
   const immutable =
     (await db.chapterVersion.count({ where: { workId } })) +
     (await db.chapterContract.count({ where: { workId } })) +
-    (await db.chapterCandidate.count({ where: { workId } }));
+    (await db.chapterCandidate.count({ where: { workId } })) +
+    (await db.chapterFactRun.count({ where: { workId } }));
   if (immutable === 0) {
     await db.generationTask.deleteMany({ where: { workId } });
     await db.chapter.deleteMany({ where: { workId } });
@@ -101,12 +102,19 @@ export async function cleanupWork(db: PrismaClient, workId: string): Promise<voi
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_versions" DISABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_candidates" DISABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_contracts" DISABLE TRIGGER USER');
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_candidates" DISABLE TRIGGER USER');
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_runs" DISABLE TRIGGER USER');
+      // 顺序：事实候选 → 事实 run → 版本（版本被 run 引用）
+      await tx.chapterFactCandidate.deleteMany({ where: { workId } });
+      await tx.chapterFactRun.deleteMany({ where: { workId } });
       await tx.chapterVersion.deleteMany({ where: { workId } });
       await tx.chapterCandidate.deleteMany({ where: { workId } });
       await tx.chapterContract.deleteMany({ where: { workId } });
       await tx.generationTask.deleteMany({ where: { workId } });
       await tx.chapter.deleteMany({ where: { workId } });
       await tx.work.deleteMany({ where: { id: workId } });
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_runs" ENABLE TRIGGER USER');
+      await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_candidates" ENABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_contracts" ENABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_candidates" ENABLE TRIGGER USER');
       await tx.$executeRawUnsafe('ALTER TABLE "chapter_versions" ENABLE TRIGGER USER');

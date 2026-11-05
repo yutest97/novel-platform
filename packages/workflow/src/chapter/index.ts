@@ -33,6 +33,23 @@ export {
 } from './adoption.js';
 export { finalizeChapter, type FinalizeChapterInput, type FinalizedChapter } from './finalize.js';
 export {
+  CHAPTER_FACT_TYPES,
+  CONTINUITY_EXTRACTOR_AGENT,
+  ChapterFactsInvalidError,
+  MAX_CHAPTER_FACTS,
+  MAX_FACT_TEXT_LENGTH,
+  MAX_LOCATION_NAME_LENGTH,
+  PLOT_THREAD_STATUSES,
+  extractChapterFacts,
+  validateFactsOutput,
+  type ChapterFact,
+  type ChapterFactInput,
+  type ChapterFactType,
+  type ChapterFactsResult,
+  type ExtractChapterFactsInput,
+  type FactEntityRef,
+} from './facts.js';
+export {
   normalizeHumanContent,
   restoreChapterVersion,
   saveHumanChapterVersion,

@@ -515,3 +515,52 @@ model ChapterVersion {
   @@index([chapterId, versionNo])
   @@map("chapter_versions")
 }
+
+/// 章节连续性事实提取运行（A2-A）。
+///
+/// - `UNIQUE(source_version_id)`：一个正式版本最多一次提取（幂等 / 并发兜底）；
+/// - 只允许受控状态更新（running → succeeded / failed，failed → running），
+///   成功后不可再改；DELETE 由触发器拒绝；
+/// - 正文不进入本表：只记录 agent / provider / model 与状态。
+model ChapterFactRun {
+  id              String    @id @default(uuid()) @db.Uuid
+  workId          String    @map("work_id") @db.Uuid
+  chapterId       String    @map("chapter_id") @db.Uuid
+  sourceVersionId String    @map("source_version_id") @db.Uuid
+  agentName       String    @map("agent_name")
+  agentVersion    String    @map("agent_version")
+  provider        String
+  model           String
+  status          String
+  errorCode       String?   @map("error_code")
+  createdAt       DateTime  @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  finishedAt      DateTime? @map("finished_at") @db.Timestamptz(3)
+
+  candidates ChapterFactCandidate[]
+
+  @@unique([sourceVersionId])
+  @@index([chapterId, createdAt])
+  @@map("chapter_fact_runs")
+}
+
+/// 章节连续性事实候选（A2-A）。
+///
+/// append-only：UPDATE / DELETE 由触发器拒绝；`status` 只允许 `candidate`。
+/// `payload` 是结构化事实（不含正文、prompt、模型原始响应）。
+model ChapterFactCandidate {
+  id              String   @id @default(uuid()) @db.Uuid
+  runId           String   @map("run_id") @db.Uuid
+  workId          String   @map("work_id") @db.Uuid
+  chapterId       String   @map("chapter_id") @db.Uuid
+  sourceVersionId String   @map("source_version_id") @db.Uuid
+  factType        String   @map("fact_type")
+  payload         Json
+  status          String   @default("candidate")
+  createdAt       DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  run ChapterFactRun @relation(fields: [runId], references: [id], onDelete: Restrict)
+
+  @@index([runId])
+  @@index([chapterId, factType])
+  @@map("chapter_fact_candidates")
+}

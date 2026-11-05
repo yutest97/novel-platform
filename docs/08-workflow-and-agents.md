@@ -1270,3 +1270,99 @@ detail.chapter.status === 'in_review'
 - `requestFinalize` 内部重复以上全部判断（函数层防御，UI 之外无法绕过）；
 - 保存编辑器成功后编辑器关闭、章节回到 `in_review`，入口按新版本重新出现；
 - 放弃编辑器（无修改直接关闭 / 有修改确认放弃）后入口重新出现。
+
+## 21. A2-A：章节连续性事实候选
+
+> 定位：把「**已定稿**章节正文 + 当前设定摘要」变成**结构化候选**。
+> 不自动写回人物 / 物品 / 势力 / 关系 / 境界，不创建实体；
+> 不提供 HTTP API / UI / Worker 注册 / RAG / embedding。
+
+### 21.1 事实类型（稳定白名单）
+
+| factType | 必要字段 | 语义 |
+| --- | --- | --- |
+| `character_state` | `subjectId`（人物 id）、`summary`、`reason` | 人物状态变化 |
+| `relationship_change` | `subjectId` + `objectId`（两个不同人物 id） | 关系变化 |
+| `item_change` | `subjectId`（物品 id） | 持有人 / 状态变化 |
+| `realm_progress` | `subjectId`（人物 id） | 境界变化 |
+| `plot_thread` | `threadStatus`（`new` / `advanced` / `resolved`） | 线索 / 伏笔 / 未解决问题 |
+| `location_change` | `subjectId`（人物 id）+ `name`（地点名） | 地点变化 |
+
+约束：
+- 所有引用必须来自上下文；**未知 id 直接拒绝**（不静默丢弃）；
+- 地点允许未登记名称（规范化后 ≤120 字），但不得把地点名塞进 `subjectId`；
+- `summary` / `reason` 必须非空（去空白后）且 ≤500 字；单次最多 50 条；
+- 越界字段（例如 `character_state.name`）视为模型越界，直接拒绝；
+- `{"facts": []}` 合法，表示本章没有可提取变化。
+
+### 21.2 Agent
+
+`continuity.extractor@1.0.0`（`packages/workflow/src/chapter/facts.ts`）：
+
+- 输入：`work{id,title}` / `chapter{id,chapterNo,title}` / `sourceVersion{versionId,versionNo}`
+  / `characters[]` / `items[]` / `realms[]` / `factions[]`（各含 `id,name,summary`）/ `chapterText`；
+- 输出：严格 JSON `{ facts: [...] }`，先过 JSON Schema，再走代码语义校验；
+- **正文只进入模型请求**：不写 run / 候选 / 审计 / 日志；
+- `secret*` 属性永不进入摘要（`loadFactContext` 显式过滤）；
+- 不调用 RAG、不生成 embedding；模型由 Provider 决定（`agent.model` 为空）。
+
+### 21.3 数据表
+
+```
+chapter_fact_runs
+  id, work_id, chapter_id, source_version_id,
+  agent_name, agent_version, provider, model,
+  status(running|succeeded|failed), error_code, created_at, finished_at
+  UNIQUE(source_version_id)
+
+chapter_fact_candidates
+  id, run_id, work_id, chapter_id, source_version_id,
+  fact_type(白名单), payload(jsonb), status='candidate', created_at
+```
+
+- 归属：`(chapter_id, work_id)` 与 `(source_version_id, chapter_id, work_id)` 复合外键，
+  再加上 `(run_id)`；作品 / 章节 / 版本三者一致由数据库保证；
+- `runs` 只允许受控更新（`running → succeeded/failed`、`failed → running`），
+  成功后不可再改、不可删除；
+- `candidates` append-only（UPDATE / DELETE 一律拒绝）；
+- 测试清理沿用 `DISABLE TRIGGER USER` 受控策略。
+
+### 21.4 幂等与并发
+
+```
+runWorkWrite（作品锁）
+  → 归属 / 定稿 / 最新版本校验
+  → 已有 succeeded run？→ 返回既有 run + 候选（created=false，不写审计）
+  → 已有 running run？→ 409 CONTINUITY_EXTRACTION_IN_PROGRESS
+  → 已有 failed run？→ 复用同一行置回 running
+  → 否则插入 running
+（锁外调用模型）
+runWorkWrite（作品锁）
+  → 写候选 + run succeeded + 审计（同一事务）
+```
+
+- `UNIQUE(source_version_id)` 兜底"同一版本只有一个 run"；
+- 失败不写候选；失败 run 可重试（复用同一行，不产生第二条）；
+- 正文不落库，候选 `payload` 只含结构化字段。
+
+### 21.5 审计
+
+`continuity.facts_extracted`，detail 只允许 10 个字段：
+`workId / chapterId / sourceVersionId / runId / agentName / agentVersion /
+provider / model / factCount / factTypeCounts`。
+不含正文、prompt、模型原始响应、secret 或 Key。
+
+### 21.6 错误码
+
+| 错误码 | HTTP | 含义 |
+| --- | --- | --- |
+| `CONTINUITY_CHAPTER_NOT_FINALIZED` | 409 | 章节未定稿（或无正式版本） |
+| `CONTINUITY_SOURCE_VERSION_STALE` | 409 | 指定版本不是当前最新 |
+| `CONTINUITY_EXTRACTION_IN_PROGRESS` | 409 | 同版本已有进行中的提取 |
+| `CONTINUITY_FACTS_INVALID` | 422 | 模型输出不合法（**不可重试**，不写候选） |
+| `CONTINUITY_EXTRACTION_FAILED` | 502 | Provider / 内部失败（可重试） |
+
+### 21.7 未做
+
+HTTP API、候选审阅 / 采纳 UI、Worker 常驻注册、事实写回人物/物品/势力/关系/境界、
+冲突检测、RAG / embedding / 图谱、自动修改任何实体。

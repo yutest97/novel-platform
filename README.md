@@ -1,14 +1,14 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-4B-C-C（章节定稿流程）**。
+> 当前阶段：**A2-A（连续性事实提取契约与候选存储）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
 A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
 A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器、A1-4B-C-A 版本 diff API、
-A1-4B-C-B 版本对比 UI 与历史版本恢复、A1-4B-C-C 章节定稿
-（**无撤销定稿 / 版本删除**）。
+A1-4B-C-B 版本对比 UI 与历史版本恢复、A1-4B-C-C 章节定稿、
+A2-A 连续性事实候选（**只产生候选，不自动写回实体；无 API / UI**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -880,8 +880,9 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **REV-01** 再补 5 个（离开保护 / 冲突重载确认）；**REV-02** 再补 4 个（哨兵生命周期）；
 **A1-4B-C-A** 再补 31 个（diff 纯函数 17、diff API 14）；
 **A1-4B-C-B** 再补 33 个（恢复服务 / API 18、diff 视图纯逻辑 15）；
-**A1-4B-C-C** 再补 16 个（定稿服务 / API）；**REV-01** 再补 5 个浏览器用例（编辑器 / 加载竞态），
-全量单测 **805** 个（web 293 / workflow 197 / worker 63 / shared 15 / db 10 /
+**A1-4B-C-C** 再补 16 个（定稿服务 / API）；**REV-01** 再补 5 个浏览器用例（编辑器 / 加载竞态）；
+**A2-A** 再补 37 个（事实校验 22、事实服务 15），
+全量单测 **842** 个（web 293 / workflow 234 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **118**（96 + 版本对比与恢复 7 +
 REV-01 并发隔离 4 + 定稿 6 + 定稿入口前置条件 5）。
 
@@ -1105,6 +1106,53 @@ wordCount`），不含正文；审计失败整体回滚。
 保存 revision 或放弃编辑器后入口按新状态恢复。
 
 **仍不提供**：撤销定稿、版本删除 / 覆盖。
+
+### 连续性事实候选（A2-A）
+
+把**已定稿**章节正文 + 当前设定摘要，变成结构化**候选事实**（不自动写回）。
+
+```ts
+const result = await extractChapterFacts({
+  db,
+  provider,
+  authorId,
+  workId,
+  chapterId,
+  // 可选：显式指定版本，必须等于当前最新正式版本
+  sourceVersionId,
+});
+// { runId, created, sourceVersionNo, facts: [...], factTypeCounts: {...} }
+```
+
+**六类事实**（`factType`）：
+
+| 类型                  | 必要字段                                          |
+| --------------------- | ------------------------------------------------- |
+| `character_state`     | `subjectId`（人物 id）                            |
+| `relationship_change` | `subjectId` + `objectId`（两个不同人物）          |
+| `item_change`         | `subjectId`（物品 id）                            |
+| `realm_progress`      | `subjectId`（人物 id）                            |
+| `plot_thread`         | `threadStatus`（`new` / `advanced` / `resolved`） |
+| `location_change`     | `subjectId`（人物 id）+ `name`（地点名）          |
+
+- 每条事实必须有 `summary` 与 `reason`（非空、≤500 字）；单次 ≤50 条；空数组合法；
+- 引用必须是上下文里出现过的 id（未知 id 直接拒绝）；地点允许未登记名称（≤120 字），
+  但不会创建实体；
+- 未知 `factType` / 未知字段 / 越界字段（例如 `character_state.name`）一律拒绝。
+
+**前置**：章节必须 `finalized`；指定版本必须是当前最新正式版本。
+**幂等**：同一版本重复提取返回既有 run（`created=false`），不新增候选与审计；
+并发同版本只产生一个 run（`UNIQUE(source_version_id)`）。
+**失败**：Provider 失败 → run `failed`，不写候选，可重试（复用同一 run）；
+模型输出不合法 → `CONTINUITY_FACTS_INVALID`（不可重试）。
+
+**数据边界**：正文只进入模型请求，不写 run / 候选 / 审计；`secret` / `secretKnownBy`
+永不进入模型摘要；提取前后不修改任何人物 / 物品 / 势力 / 关系 / 境界。
+
+**审计**：`continuity.facts_extracted`，只记 `workId / chapterId / sourceVersionId /
+runId / agentName / agentVersion / provider / model / factCount / factTypeCounts`。
+
+**未提供**：HTTP API、候选审阅 UI、Worker 常驻注册、事实写回、RAG / embedding / 图谱。
 
 ### 浏览器 E2E（Playwright Chromium）
 

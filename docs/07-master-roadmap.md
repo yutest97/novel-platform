@@ -1,8 +1,8 @@
 # 07 总路线（个人可用版优先）
 
-- 版本：v1.4
+- 版本：v1.5
 - 日期：2026-11-05
-- 当前基线：`4a41927`（A1-4B-C-B-REV-02 已验收）+ A1-4B-C-C（本地提交）
+- 当前基线：`408cb05`（A1-4B-C-C-REV-01 已验收）+ A2-A（本地提交）
 - 状态：执行中
 
 ---
@@ -49,7 +49,8 @@
 | **A1-4B-C-A** | 章节版本 diff（服务 + 只读 API） | `GET /chapters/:chapterId/versions/diff?fromVersionId=&toVersionId=`、`diffChapterVersions`（归属校验 + 行级 LCS diff）、`equal/added/removed` + 双侧行号 + `stats`、换行归一化、`CHAPTER_DIFF_TOO_LARGE`（20 万字符 / 行数 / 编辑距离上限，超编辑距离退化为整段替换）、只读不写审计；**无 UI、无恢复、无迁移** | 已完成（本地提交） |
 | **A1-4B-C-B** | 版本对比 UI 与历史版本恢复 | 正式版本区按需展开的对比面板（双选择器、双列行号、added/removed 中文标签、空 diff / 超大 / 冲突提示、移动端不撑破）、`GET /versions/diff` 前端严格解析、`POST /versions/:versionId/restore`、新错误码 `CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`；**不含定稿流程** | **本轮完成** |
 | **A1-4B-C-C** | 章节定稿流程 | `POST /chapters/:chapterId/finalize`、`finalizeChapter`（作品锁 + 章节行锁、只锁当前最新版本、同版本幂等）、`in_review → finalized`、`CHAPTER_STATE_INVALID_FOR_FINALIZE`、审计 `chapter.finalized`；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到 `in_review`；**无撤销定稿、无 migration** | **本轮完成** |
-| **A2** | 连续性与事实（个人版） | 章节事实提取、人物/资源状态回写、跨章一致性提示 | 待开始 |
+| **A2-A** | 连续性事实提取契约与候选存储 | `continuity.extractor@1.0.0`（六类事实、严格 Schema + 语义校验）、`extractChapterFacts`（定稿 + 最新版本前置、同版本幂等、失败可重试、审计 `continuity.facts_extracted`）、`chapter_fact_runs` / `chapter_fact_candidates`（复合外键 + 受控更新 + append-only）；**无 API / UI / Worker 注册 / RAG** | **本轮完成** |
+| **A2-B** | 事实候选审阅与状态写回 | 候选列表 / 采纳 UI、人物/物品/势力状态写回、冲突提示；`A2-A` 的候选是唯一数据来源 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
 | **多人/运营** | 多作者、管理员运营、配额 | 既有账号体系扩展 | **后置** |
@@ -119,3 +120,4 @@
 | 2026-11-05 | A1-4B-C-B-REV-01：diff 请求身份改为单调序号（选择器组合无法区分相同组合的旧请求），收起 / 切换 / 展开均使在途请求失效，旧请求不得写结果 / 错误 / loading |
 | 2026-11-05 | A1-4B-C-C：章节定稿（只锁当前最新版本、同版本幂等、审计 chapter.finalized）；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到待定稿；不新增 final_version_id / migration |
 | 2026-11-05 | A1-4B-C-C-REV-01：定稿入口增加编辑器 / 版本读取 / 恢复 / 保存 / 提交中的前置条件（编辑器打开时改提示），requestFinalize 同步防御；不改服务与 API |
+| 2026-11-05 | A2-A：连续性事实候选（六类事实契约、`continuity.extractor@1.0.0`、`extractChapterFacts`、`chapter_fact_runs` / `chapter_fact_candidates`）；只产生候选，不写回任何实体 |
