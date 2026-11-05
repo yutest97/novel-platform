@@ -4,7 +4,7 @@
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
 - 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B 均本地完成，待复审**
+  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -111,6 +111,18 @@
   **不再比较 input_hash**：配置漂移时复用既有 task 且不覆盖其 provider / model；
   旧 task 是否可执行仍由 Worker 预检决定（`TASK_MODEL_CONFIG_MISMATCH`）。
 
+### A2-D-C Reviewer 前章摘要接线（本地完成，待复审）
+
+- `buildChapterReviewContext` 新增 `loadPriorSummaries()`：一条 SQL 选出
+  「同作品 + `chapter_no <` 当前章 + 前章 `finalized` + 摘要对应该章当前最新正式版本」
+  的摘要，按 `chapter_no DESC` 取 20 条再反转为升序；
+- 当前章 / 未来章 / 跨作品 / 已 revision 的旧摘要都不会进入；
+  重新定稿后使用新版本摘要；同一章节只一条；
+- 无摘要时为 `[]`（不猜测、不用正文补）；
+- `task_contexts` 新增 `chapter_summary` 来源：只记 summary id 与 `第N章摘要`，
+  不复制摘要正文；
+- 无 migration、无 API / UI。
+
 ---
 
 ## 2. 当前冻结决策
@@ -171,7 +183,7 @@ Agent 产出候选
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
 | A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B 本地完成待复审 |
-| A2-D | Summarizer Agent | A2-D-A 契约 + A2-D-B 工作流 / 落库 + REV-01 定稿弹性均本地完成待复审；`priorSummaries` 接线下一步 |
+| A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）本地完成；**A2-D-C `priorSummaries` 接线本地完成待复审** |
 | A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
@@ -253,7 +265,7 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **956**（web 315 / workflow 326 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **968**（web 315 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | 浏览器 E2E | **118** |
 | migrations | **13** |
 | 数据表 | **23** |
@@ -263,8 +275,9 @@ A2-C-B（本地，未推送）后的当前数字：
 另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review）；
 A2-D-A 再新增 17 个纯单测（`chapter-summarizer-agent.test.ts`）；
 A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`）
-与 1 个定稿 API 用例；A2-D-B-REV-01 再补 5 个定稿 API 用例与 2 个 workflow 用例，
-因此 workflow **326**、web **315**、全量 **956**。
+与 1 个定稿 API 用例；A2-D-B-REV-01 再补 5 个定稿 API 用例与 2 个 workflow 用例；
+A2-D-C 新增 12 个 workflow 用例（前章摘要选择规则），因此 workflow **338**、
+web **315**、全量 **968**。
 
 最近新增质量门禁：
 
@@ -303,7 +316,9 @@ A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`�
     但会在任务列表里留下失败记录，后续需要只读 UI 时要注意展示口径）；
 14. 真实模型下每次定稿都会额外产生一次摘要调用，成本与延迟尚未评估；
 15. 模型配置不可用期间定稿的章节**不会自动补摘要任务**：必须由作者再次幂等定稿，
-    当前没有手动重建入口，也没有提示；配置长期不可用会让摘要长期缺失。
+    当前没有手动重建入口，也没有提示；配置长期不可用会让摘要长期缺失；
+16. `priorSummaries` 只覆盖「已定稿且有摘要」的前 20 章：未定稿章节、摘要失败或
+    配置长期不可用期间定稿的章节会静默缺失，Reviewer 无法感知"这里本该有摘要"。
 
 ---
 
@@ -331,6 +346,8 @@ D-016 摘要调度是 best-effort：模型配置不可用时只跳过摘要任�
       配置恢复需作者再次幂等定稿才补任务。
 D-017 确定性内部任务按逻辑输入判等，不按 input_hash：配置漂移必须复用既有 task，
       可执行性交给 Worker 预检，不允许 finalize 静默改写任务元数据。
+D-018 前章摘要只取「同作品 + 前序 + 已定稿 + 对应当前最新正式版本」的最近 20 章；
+      缺失即空，不猜测、不用正文补、不跨作品补全。
 ```
 
 ---

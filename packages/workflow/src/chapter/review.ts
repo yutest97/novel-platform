@@ -19,7 +19,11 @@ import { runWorkWrite } from '@novel/works';
 
 import { NonRetryableTaskError } from '../errors.js';
 import { assertTaskFence, asScenes, asStringArray, type TaskFenceScope } from './persistence.js';
-import { MAX_REVIEW_ENTITIES_PER_TYPE, REVIEWER_CHAPTER_AGENT } from './reviewer.js';
+import {
+  MAX_REVIEW_ENTITIES_PER_TYPE,
+  MAX_REVIEW_PRIOR_SUMMARIES,
+  REVIEWER_CHAPTER_AGENT,
+} from './reviewer.js';
 import type { ChapterReviewerInput, ChapterReviewerOutput } from './reviewer.js';
 import { loadSafeEntityGroups, toSafeEntityRefs, type SafeEntityRow } from './safe-entities.js';
 import { CHAPTER_REVIEW_TASK_TYPE, type ContextSource } from './types.js';
@@ -35,6 +39,7 @@ const UUID_PATTERN =
 const RANK_CHAPTER = 1;
 const RANK_CONTRACT = 2;
 const RANK_CANDIDATE = 3;
+const RANK_PRIOR_SUMMARY_BASE = 10;
 const RANK_CHARACTER_BASE = 100;
 const RANK_ITEM_BASE = 200;
 const RANK_REALM_BASE = 300;
@@ -169,6 +174,12 @@ export async function buildChapterReviewContext(
     summaryMax: MAX_REVIEW_ENTITY_SUMMARY_CHARS,
   });
 
+  // A2-D-C：同作品、前序、当前仍定稿且摘要对应当前最新正式版本的前章摘要。
+  const priorRows = await loadPriorSummaries(db, {
+    workId,
+    chapterNo: chapter.chapterNo,
+  });
+
   const reviewerInput: ChapterReviewerInput = {
     chapter: {
       id: chapter.id,
@@ -186,8 +197,11 @@ export async function buildChapterReviewContext(
     items: toSafeEntityRefs(groups.items),
     realms: toSafeEntityRefs(groups.realms),
     factions: toSafeEntityRefs(groups.factions),
-    // A2-D Summarizer 未实现：不得拿草稿 / 候选正文 / 正式正文冒充前章摘要。
-    priorSummaries: [],
+    // 只用真实存在、仍对应当前最新正式版本的前章摘要；缺失时不猜测、不用正文补。
+    priorSummaries: priorRows.map((row) => ({
+      chapterNo: row.chapterNo,
+      summary: row.summary,
+    })),
   };
 
   return {
@@ -208,8 +222,69 @@ export async function buildChapterReviewContext(
       candidateId,
       candidateWordCount: candidate.wordCount,
       groups,
+      priorSummaries: priorRows,
     }),
   };
+}
+
+/** 前章摘要行（只含选择所需字段）。 */
+interface PriorSummaryRow {
+  readonly chapterNo: number;
+  readonly summaryId: string;
+  readonly summary: string;
+}
+
+interface LoadPriorSummariesInput {
+  readonly workId: string;
+  readonly chapterNo: number;
+}
+
+/**
+ * 读取可以进入 Reviewer 输入的前章摘要。
+ *
+ * 固定规则（与服务层文档一致）：
+ * - `chapter_no < 当前章`：不含当前章与未来章节；
+ * - 前序章节 `status = 'finalized'`：人工 revision 后（回到 `in_review`）旧摘要立即失效；
+ * - 摘要的 `source_version_id` 必须是该前序章节**当前最新**正式版本：
+ *   重新定稿后只有新版本摘要可见；
+ * - 同作品（显式 `work_id`），每个章节最多一条（`UNIQUE(source_version_id)` +
+ *   最新版本条件共同保证）；
+ * - 按 `chapter_no` 倒序取最近 20 条，再反转为升序，保持叙事时间顺序。
+ */
+async function loadPriorSummaries(
+  db: Prisma.TransactionClient,
+  input: LoadPriorSummariesInput,
+): Promise<PriorSummaryRow[]> {
+  const rows = await db.$queryRaw<{ chapter_no: number; summary_id: string; summary: string }[]>`
+    SELECT c."chapter_no" AS chapter_no,
+           s."id" AS summary_id,
+           s."summary" AS summary
+      FROM "chapters" c
+      JOIN "chapter_summaries" s
+        ON s."chapter_id" = c."id"
+       AND s."work_id" = c."work_id"
+     WHERE c."work_id" = ${input.workId}::uuid
+       AND c."chapter_no" < ${input.chapterNo}
+       AND c."status" = 'finalized'
+       AND s."source_version_id" = (
+             SELECT v."id"
+               FROM "chapter_versions" v
+              WHERE v."chapter_id" = c."id"
+                AND v."work_id" = c."work_id"
+              ORDER BY v."version_no" DESC
+              LIMIT 1
+           )
+     ORDER BY c."chapter_no" DESC
+     LIMIT ${MAX_REVIEW_PRIOR_SUMMARIES}
+  `;
+
+  return rows
+    .map((row) => ({
+      chapterNo: row.chapter_no,
+      summaryId: row.summary_id,
+      summary: row.summary,
+    }))
+    .reverse();
 }
 
 interface ContextSourceInput {
@@ -223,6 +298,7 @@ interface ContextSourceInput {
   readonly candidateId: string;
   readonly candidateWordCount: number;
   readonly groups: Awaited<ReturnType<typeof loadSafeEntityGroups>>;
+  readonly priorSummaries: readonly PriorSummaryRow[];
 }
 
 /**
@@ -279,6 +355,13 @@ function buildContextSources(input: ContextSourceInput): ContextSource[] {
     ...entitySources(input.groups.items, 'item', RANK_ITEM_BASE),
     ...entitySources(input.groups.realms, 'realm_level', RANK_REALM_BASE),
     ...entitySources(input.groups.factions, 'faction', RANK_FACTION_BASE),
+    // 前章摘要只记 summary id 与前章号，不复制摘要正文。
+    ...input.priorSummaries.map((row, index) => ({
+      contextType: 'chapter_summary',
+      refId: row.summaryId,
+      snippet: `第${row.chapterNo}章摘要`,
+      rank: RANK_PRIOR_SUMMARY_BASE + index,
+    })),
   ];
 }
 

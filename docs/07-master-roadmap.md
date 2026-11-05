@@ -55,7 +55,7 @@
 | **A2-A** | 连续性事实提取契约与候选存储 | `continuity.extractor@1.0.0`（六类事实、严格 Schema + 语义校验）、`extractChapterFacts`（定稿 + 最新版本前置、同版本幂等、失败可重试、审计 `continuity.facts_extracted`）、`chapter_fact_runs` / `chapter_fact_candidates`（复合外键 + 受控更新 + append-only）；**提交阶段二次校验**（模型调用期间的新 revision 一律拒绝）、候选 run 外键为**复合外键**、running **租约**（10 分钟，CAS 接管）+ **attempt_token fencing**（旧 attempt 晚返回也不能提交）、重试记录本次实际 provider / model、上下文**按类型**截断；**无 API / UI / Worker 注册 / RAG** | **本轮完成** |
 | **A2-B** | 连续性事实 API 与候选读取模型 | `POST /chapters/:chapterId/facts/extract`（严格白名单 `sourceVersionId`、201/200 幂等、409 四态）、`GET /facts`（factType 过滤、排序、200 条上限 + `truncated`）、`GET /facts/:candidateId`、`GET /fact-runs/:runId`；`listChapterFacts` / `getChapterFactCandidate` / `getChapterFactRun` 显式 DTO、只读不写审计；**无 UI / 采纳 / 写回** | **本轮完成** |
 | **A2-C** | Reviewer Agent | Writer 后对正文、合同和前文进行结构化检查；默认以问题提示为主，不直接重写或替代作者；严格 JSON 输出 | A2-C-A 已验收（CI #24）；**A2-C-B 本地完成待复审**（独立 `chapter.review` 任务 + run / issue 持久化；无 API / UI） |
-| **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | **A2-D-A 契约 + A2-D-B 工作流 / 落库 + REV-01 定稿弹性均本地完成待复审**（配置不可用只跳过摘要、配置漂移复用既有 task；`priorSummaries` 未接线） |
+| **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | **A2-D-A / A2-D-B（含 REV-01）/ A2-D-C 均本地完成待复审**（契约 + 工作流落库 + 定稿弹性 + `priorSummaries` 接线；无摘要读取 API / UI） |
 | **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 待开始 |
 | **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | 待评估 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
@@ -138,3 +138,4 @@
 | 2026-11-06 | A2-D-A（本地，未推送）：`summarizer.chapter@1.0.0` 契约（输入 = 章节标识 + 正式版本追溯标识 + 正文，输出 = 单一 `summary`）、`assertSummarizerInput` / `validateSummarizerOutput`（标题 trim、摘要 1000 字、拒绝 Markdown 结构）、专用 Mock 与 `runChapterSummarizer`；17 个纯单测；无表 / 任务 / API / `priorSummaries` 接线 |
 | 2026-11-06 | A2-D-B（本地，未推送）：定稿同事务入队 `chapter.summarize`、`chapter_summaries`（UNIQUE(source_version_id) + 复合外键 + 长度 / 空白 CHECK + append-only）、固定三步 `load_summary_input → summarize_chapter → persist_summary`、提交阶段定稿 / 最新版本二次校验、同版本 skip 与任务重试复用；新增 20 个 workflow 集成测试与 1 个定稿 API 用例，migrations / 表 / 触发器 13 / 23 / 15；仍无摘要读取 API / UI，`priorSummaries` 未接线 |
 | 2026-11-06 | A2-D-B-REV-01（本地，未推送）：finalize 对 summary spec 做 best-effort 解析，`MODEL_NOT_CONFIGURED` 时只跳过摘要任务、定稿照常成功；确定性内部任务改按 requestId + taskType + chapterId + inputSnapshot 判等，配置漂移复用既有 task 且不覆盖 provider / model，可执行性仍由 Worker 预检决定；新增 5 个定稿 API 用例与 2 个 workflow 用例，全量单测 956 |
+| 2026-11-06 | A2-D-C（本地，未推送）：Reviewer `priorSummaries` 接线 — 一条 SQL 选出「同作品 + 前序 chapterNo + 前章 finalized + 摘要对应该章当前最新正式版本」的最近 20 章并按升序放入输入；当前章 / 未来章 / 跨作品 / revision 旧摘要均排除，无摘要时为 []；`task_contexts` 只记 summary id 与前章号；新增 12 个 workflow 用例，全量单测 968 |

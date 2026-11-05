@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v1.9
+- 版本：v2.0
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -1732,7 +1732,8 @@ load_review_input → run_reviewer → persist_review_result
 - `draft`：`chapter_candidates.content`，只进入本次模型请求；
 - `characters / items / realms / factions`：同作品未删除实体，每类最多 100 条，
   顺序固定 `orderIndex asc → createdAt asc → id asc`，`secret*` 永不进入；
-- `priorSummaries`：A2-D 未实现，本轮固定 `[]`；
+- `priorSummaries`：由 A2-D-C 接线，只取「同作品 + 前序章节 + 当前 finalized +
+  摘要对应当前最新正式版本」的摘要；见 §27；
 - 候选即使已被采纳仍可读取与审阅；candidate / contract / chapter / work 必须全部匹配，
   跨作品直接拒绝；
 - `task_contexts` 只记章节 / 合同 / 候选的 id 与安全摘要（字数、场景数），
@@ -1904,3 +1905,36 @@ inputSnapshot」判断是否同一逻辑任务，**不再比较 `input_hash`**
 
 Reviewer `priorSummaries` 接线、摘要读取 API / UI、摘要回写章节或正文、
 high severity 采纳门禁、自动重写、RAG / embedding / 图谱。
+
+## 27. A2-D-C：Reviewer 前章摘要接线
+
+> 审阅当前章节候选时，为 Reviewer 提供**同作品、前序、当前仍定稿且摘要对应当前
+> 最新正式版本**的章节摘要。缺失时为空数组：不猜测、不用正文临时生成、不跨作品补全。
+
+### 27.1 选择规则（固定）
+
+| 条件 | 说明 |
+| --- | --- |
+| `chapter_no < 当前章 chapterNo` | 不含当前章自己的摘要，也不含未来章节 |
+| `chapters.status = 'finalized'` | 前章人工 revision 后（回到 `in_review`）旧摘要立即失效 |
+| `summary.source_version_id = 该章当前最新正式版本` | 重新定稿后只有新版本摘要可见 |
+| 同作品（显式 `work_id`） | 不跨作品 |
+| 每章最多一条 | `UNIQUE(source_version_id)` + 最新版本条件共同保证 |
+| 最近 20 章 | 按 `chapter_no DESC` 取 20 条，再反转为**升序**放入 `priorSummaries` |
+
+实现：`buildChapterReviewContext` 内的 `loadPriorSummaries()`，一条 SQL 完成
+「chapters JOIN chapter_summaries + 最新版本子查询」，不使用 N+1 查询。
+
+### 27.2 数据边界
+
+- `priorSummaries` 每条 `{ chapterNo, summary }`；summary 已由 A2-D-A / 数据库 CHECK
+  保证 1..1000 字，Reviewer 输入 Schema 上限 20 条；
+- `task_contexts` 新增 `chapter_summary` 来源：只记 `summary id` 与 `第N章摘要`，
+  **不复制摘要正文**；rank 10..29，不影响实体来源（100+）；
+- 不读取 `secret*`、不读取正文来填充缺失摘要；
+- 没有摘要时数组为 `[]`，Reviewer 照常运行。
+
+### 27.3 未做
+
+摘要读取 API / UI、事实 UI、RAG / embedding / 图谱、摘要回写正文、
+high severity 采纳门禁。

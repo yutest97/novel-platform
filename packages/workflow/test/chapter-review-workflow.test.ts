@@ -17,12 +17,14 @@ import { createChapterMockProvider } from '../src/chapter/mock.js';
 import { normalizePlannerOutput, prepareDraftText } from '../src/chapter/agents.js';
 import { freezeChapterContract, persistChapterCandidate } from '../src/chapter/persistence.js';
 import {
+  buildChapterReviewContext,
   getReviewRunByTaskId,
   parseChapterReviewTaskInput,
   persistReviewResult,
   prepareReviewRun,
   type ReviewTaskFence,
 } from '../src/chapter/review.js';
+import { saveHumanChapterVersion } from '../src/chapter/human.js';
 import { createChapterReviewWorkflow } from '../src/chapter/review-workflow.js';
 import {
   CHAPTER_REVIEW_ISSUE_TYPES,
@@ -1110,5 +1112,387 @@ describe('作者侧读接口与 Worker 编排', () => {
     // 正文任务与候选保持不变
     expect((await reviewTaskRow(drafted.draftTaskId)).status).toBe('succeeded');
     expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(1);
+  });
+});
+
+/**
+ * A2-D-C：Reviewer 前章摘要接线。
+ *
+ * 只选「同作品 + 前序章节 + 当前 finalized + 摘要对应当前最新正式版本」的摘要，
+ * 按 chapterNo 升序、最多 20 条；缺失时为 []，不用正文补。
+ */
+async function reviewedChapter(
+  fixture: ChapterFixture,
+  chapterNo = 10,
+): Promise<{ chapterId: string; candidateId: string; reviewTaskId: string }> {
+  const chapter = await db.chapter.create({
+    data: { workId: fixture.workId, chapterNo, title: `第${chapterNo}章` },
+    select: { id: true },
+  });
+  const { provider } = createChapterProvider(
+    {},
+    { plan: defaultPlannerOutput(fixture), text: longDraft() },
+  );
+  const { task } = await createGenerationTask(db, {
+    authorId: fixture.authorId,
+    workId: fixture.workId,
+    chapterId: chapter.id,
+    requestId: `req-${randomUUID()}`,
+    taskType: CHAPTER_DRAFT_TASK_TYPE,
+    inputSnapshot: { targetWords: 3000 },
+    provider: 'mock',
+    model: 'mock-model',
+  });
+  await expect(runnerFor(provider).runOnce()).resolves.toBe('succeeded');
+
+  const candidate = await db.chapterCandidate.findUniqueOrThrow({
+    where: { generationTaskId: task.id },
+  });
+  const reviewTask = await db.generationTask.findUniqueOrThrow({
+    where: {
+      workId_requestId: { workId: fixture.workId, requestId: `review:${candidate.id}` },
+    },
+  });
+  return { chapterId: chapter.id, candidateId: candidate.id, reviewTaskId: reviewTask.id };
+}
+
+interface PriorChapterSeed {
+  readonly chapterId: string;
+  readonly versionId: string;
+  readonly summaryId: string | null;
+}
+
+/** 造一个前序章节：一版正式版本 +（可选）摘要 + 可选 finalized。 */
+async function priorChapter(
+  fixture: ChapterFixture,
+  chapterNo: number,
+  summaryText: string | null,
+  finalized = true,
+): Promise<PriorChapterSeed> {
+  const chapter = await db.chapter.create({
+    data: { workId: fixture.workId, chapterNo, title: `第${chapterNo}章` },
+    select: { id: true },
+  });
+  const version = await saveHumanChapterVersion({
+    db,
+    workId: fixture.workId,
+    chapterId: chapter.id,
+    authorId: fixture.authorId,
+    content: longDraft(`第${chapterNo}章`),
+    baseVersionId: null,
+  });
+  if (finalized) {
+    await db.chapter.update({ where: { id: chapter.id }, data: { status: 'finalized' } });
+  }
+  let summaryId: string | null = null;
+  if (summaryText !== null) {
+    const row = await db.chapterSummary.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: chapter.id,
+        sourceVersionId: version.versionId,
+        agentName: 'summarizer.chapter',
+        agentVersion: '1.0.0',
+        provider: 'mock',
+        model: 'mock-model',
+        summary: summaryText,
+      },
+      select: { id: true },
+    });
+    summaryId = row.id;
+  }
+  return { chapterId: chapter.id, versionId: version.versionId, summaryId };
+}
+
+/** 在事务内装配审阅上下文（与工作流同一入口）。 */
+async function readReviewContext(workId: string, chapterId: string, candidateId: string) {
+  return db.$transaction(async (tx) =>
+    buildChapterReviewContext({ db: tx, workId, chapterId, candidateId }),
+  );
+}
+
+describe('前章摘要接线（A2-D-C）', () => {
+  it('两个前序定稿章节摘要按 chapterNo 升序进入 Reviewer 输入', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    await priorChapter(fixture, 2, '第二章摘要：主角入门。');
+    await priorChapter(fixture, 3, '第三章摘要：初次比试。');
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+
+    expect(context.input.priorSummaries).toEqual([
+      { chapterNo: 2, summary: '第二章摘要：主角入门。' },
+      { chapterNo: 3, summary: '第三章摘要：初次比试。' },
+    ]);
+    // 当前章与实体照常装配
+    expect(context.input.chapter.chapterNo).toBe(10);
+    expect(context.input.characters.length).toBeGreaterThan(0);
+  });
+
+  it('当前章节自己的摘要不被选中', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    await priorChapter(fixture, 2, '第二章摘要。');
+
+    // 给当前章节也造一版 + 摘要：chapterNo 不小于自己，必须排除
+    const own = await saveHumanChapterVersion({
+      db,
+      workId: fixture.workId,
+      chapterId: reviewed.chapterId,
+      authorId: fixture.authorId,
+      content: longDraft('当前章'),
+      baseVersionId: null,
+    });
+    await db.chapterSummary.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: reviewed.chapterId,
+        sourceVersionId: own.versionId,
+        agentName: 'summarizer.chapter',
+        agentVersion: '1.0.0',
+        provider: 'mock',
+        model: 'mock-model',
+        summary: '当前章节自己的摘要',
+      },
+    });
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries.map((row) => row.chapterNo)).toEqual([2]);
+    expect(JSON.stringify(context.input.priorSummaries)).not.toContain('当前章节自己的摘要');
+  });
+
+  it('未来章节摘要不被选中', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    await priorChapter(fixture, 2, '第二章摘要。');
+    await priorChapter(fixture, 20, '第二十章摘要（未来）。');
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries.map((row) => row.chapterNo)).toEqual([2]);
+  });
+
+  it('其它作品的摘要不被选中', async () => {
+    const fixture = await newFixture();
+    const other = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    await priorChapter(fixture, 2, '本作第二章摘要。');
+    await priorChapter(other, 2, '别的作品第二章摘要。');
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries).toEqual([{ chapterNo: 2, summary: '本作第二章摘要。' }]);
+  });
+
+  it('前序章节 revision 后（非 finalized）旧摘要不进入', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    const prior = await priorChapter(fixture, 2, '第二章旧摘要。');
+
+    // 人工 revision：章节回到 in_review
+    await saveHumanChapterVersion({
+      db,
+      workId: fixture.workId,
+      chapterId: prior.chapterId,
+      authorId: fixture.authorId,
+      content: longDraft('第二章修订'),
+      baseVersionId: prior.versionId,
+    });
+    expect((await db.chapter.findUniqueOrThrow({ where: { id: prior.chapterId } })).status).toBe(
+      'in_review',
+    );
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries).toEqual([]);
+  });
+
+  it('前序章节状态不是 finalized 时（版本仍最新）旧摘要不进入', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    const prior = await priorChapter(fixture, 2, '第二章摘要。');
+
+    // 只改状态、不产生新版本：验证 finalized 条件是独立的一道闸门
+    await db.chapter.update({ where: { id: prior.chapterId }, data: { status: 'in_review' } });
+    const latest = await db.chapterVersion.findFirstOrThrow({
+      where: { chapterId: prior.chapterId },
+      orderBy: { versionNo: 'desc' },
+      select: { id: true },
+    });
+    expect(latest.id).toBe(prior.versionId);
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries).toEqual([]);
+  });
+
+  it('前序章节重新定稿并有新摘要后，使用新摘要', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    const prior = await priorChapter(fixture, 2, '第二章旧摘要。');
+
+    const revised = await saveHumanChapterVersion({
+      db,
+      workId: fixture.workId,
+      chapterId: prior.chapterId,
+      authorId: fixture.authorId,
+      content: longDraft('第二章修订'),
+      baseVersionId: prior.versionId,
+    });
+    await db.chapter.update({ where: { id: prior.chapterId }, data: { status: 'finalized' } });
+    await db.chapterSummary.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: prior.chapterId,
+        sourceVersionId: revised.versionId,
+        agentName: 'summarizer.chapter',
+        agentVersion: '1.0.0',
+        provider: 'mock',
+        model: 'mock-model',
+        summary: '第二章新摘要。',
+      },
+    });
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries).toEqual([{ chapterNo: 2, summary: '第二章新摘要。' }]);
+  });
+
+  it('同一章节的历史摘要只取对应当前最新版本的一条', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    const prior = await priorChapter(fixture, 2, '第二章 v1 摘要。');
+
+    const revised = await saveHumanChapterVersion({
+      db,
+      workId: fixture.workId,
+      chapterId: prior.chapterId,
+      authorId: fixture.authorId,
+      content: longDraft('第二章修订'),
+      baseVersionId: prior.versionId,
+    });
+    await db.chapter.update({ where: { id: prior.chapterId }, data: { status: 'finalized' } });
+    await db.chapterSummary.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: prior.chapterId,
+        sourceVersionId: revised.versionId,
+        agentName: 'summarizer.chapter',
+        agentVersion: '1.0.0',
+        provider: 'mock',
+        model: 'mock-model',
+        summary: '第二章 v2 摘要。',
+      },
+    });
+
+    // 两版摘要都在表里，但只应选中 v2
+    expect(await db.chapterSummary.count({ where: { chapterId: prior.chapterId } })).toBe(2);
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries).toHaveLength(1);
+    expect(context.input.priorSummaries[0]?.summary).toBe('第二章 v2 摘要。');
+  });
+
+  it('21 个前序摘要只取最近 20 章，并按 chapterNo 升序', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture, 30);
+    for (let chapterNo = 2; chapterNo <= 22; chapterNo += 1) {
+      await priorChapter(fixture, chapterNo, `第${chapterNo}章摘要。`);
+    }
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    const summaryRows = context.input.priorSummaries;
+    expect(summaryRows).toHaveLength(20);
+    // 最近 20 章 = 3..22（丢弃最早的第 2 章），仍按升序
+    expect(summaryRows[0]?.chapterNo).toBe(3);
+    expect(summaryRows[19]?.chapterNo).toBe(22);
+    expect(summaryRows.map((row) => row.chapterNo)).toEqual(
+      Array.from({ length: 20 }, (_, index) => index + 3),
+    );
+  });
+
+  it('没有前章摘要时 priorSummaries 为 []', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    await priorChapter(fixture, 2, null);
+
+    const context = await readReviewContext(
+      fixture.workId,
+      reviewed.chapterId,
+      reviewed.candidateId,
+    );
+    expect(context.input.priorSummaries).toEqual([]);
+  });
+
+  it('task_contexts 只记 summary id 与前章号，不含摘要正文', async () => {
+    const fixture = await newFixture();
+    const reviewed = await reviewedChapter(fixture);
+    const secretSummary = '前章摘要机密：主角其实是转世之身。';
+    const prior = await priorChapter(fixture, 2, secretSummary);
+
+    await expect(runnerFor(createChapterMockProvider()).runOnce()).resolves.toBe('succeeded');
+
+    const contexts = await listTaskContexts(db, reviewed.reviewTaskId);
+    const summaryContexts = contexts.filter((row) => row.contextType === 'chapter_summary');
+    expect(summaryContexts).toHaveLength(1);
+    expect(summaryContexts[0]?.refId).toBe(prior.summaryId);
+    expect(summaryContexts[0]?.snippet).toBe('第2章摘要');
+
+    const allText = contexts.map((row) => row.snippet ?? '').join('\n');
+    expect(allText).not.toContain('前章摘要机密');
+    // 其余来源仍在
+    expect(contexts.map((row) => row.contextType)).toEqual(
+      expect.arrayContaining(['chapter', 'chapter_contract', 'chapter_candidate']),
+    );
+  });
+
+  it('有前章摘要时，非法 Reviewer 输出仍按原语义失败且不回滚候选', async () => {
+    const fixture = await newFixture();
+    await priorChapter(fixture, 2, '第二章摘要。');
+    const reviewed = await reviewedChapter(fixture);
+
+    // reviewedChapter 已消费掉一次 draft 任务；这里直接换一个会返回非法输出的 provider
+    const { provider } = createChapterProvider(
+      { reviewer: () => ({ passed: false, issues: [] }) },
+      { plan: {}, text: longDraft() },
+    );
+    await expect(runnerFor(provider).runOnce()).resolves.toBe('failed');
+
+    const run = await getReviewRunByTaskId(db, reviewed.reviewTaskId);
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'AGENT_OUTPUT_INVALID' });
+    expect(
+      await db.chapterReviewIssue.count({ where: { candidateId: reviewed.candidateId } }),
+    ).toBe(0);
+    expect(await db.chapterCandidate.count({ where: { id: reviewed.candidateId } })).toBe(1);
   });
 });
