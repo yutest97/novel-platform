@@ -1,16 +1,20 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A2-A（连续性事实提取契约与候选存储）**。
+> 当前阶段：**A2-A / A2-B 已完成；下一步 A2-C Reviewer Agent**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
 A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
 A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器、A1-4B-C-A 版本 diff API、
 A1-4B-C-B 版本对比 UI 与历史版本恢复、A1-4B-C-C 章节定稿、
-A2-A 连续性事实候选（**只产生候选，不自动写回实体；无 API / UI**）。
-暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
-工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
+A2-A 连续性事实契约与候选存储、A2-B 事实提取与只读查询 API。
+暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。
+
+> 新会话或新 Agent 先读 [`docs/09-project-memory.md`](docs/09-project-memory.md)
+> 和根目录 [`AGENTS.md`](AGENTS.md)。路线见 `docs/07-master-roadmap.md`，
+> 工作流设计见 `docs/08-workflow-and-agents.md`，产品范围以
+> `docs/00-product-brief.md` 为准。
 
 ---
 
