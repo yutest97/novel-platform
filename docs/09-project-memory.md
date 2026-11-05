@@ -183,9 +183,13 @@ A2-C-B（含 REV-01）、A2-D-A、A2-D-B 均已在本地完成，等待负责人
 - `docs/tasks/A2-D-A-summarizer-agent.md`（契约层）
 - `docs/tasks/A2-D-B-summarizer-workflow.md`（工作流与落库）
 
+A2-D-B 复审发现一个阻塞项：finalize 路由在模型配置缺失时会被 Provider 构造阻断。
+修复卡：`docs/tasks/A2-D-B-REV-01-finalize-resilience.md`。
+
 复审通过前不推送。复审通过后的候选顺序：
 
-1. Reviewer `priorSummaries` 接线：只在有摘要的已定稿前序章节上填充，
+1. Reviewer `priorSummaries` 接线（卡已备：
+   `docs/tasks/A2-D-C-prior-summaries.md`）：只在有摘要的已定稿前序章节上填充，
    仍不跨作品、不猜测缺失摘要；
 2. 摘要 / Reviewer 结果的读取 API 与只读 UI（两者都已落库但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
