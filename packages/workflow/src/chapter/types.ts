@@ -9,6 +9,14 @@
 /** 工作流 taskType。 */
 export const CHAPTER_DRAFT_TASK_TYPE = 'chapter.draft';
 
+/**
+ * 候选审阅任务类型（A2-C-B）。
+ *
+ * 与正文生成是两个任务：Writer 候选保存成功后由同一事务入队，
+ * Reviewer 失败只影响 review task / run，不回滚候选。
+ */
+export const CHAPTER_REVIEW_TASK_TYPE = 'chapter.review';
+
 /** 正文候选的最少字数（非空白字符数）。 */
 export const MIN_DRAFT_WORDS = 1200;
 

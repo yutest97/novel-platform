@@ -54,7 +54,7 @@
 | **A1-4B-C-C** | 章节定稿流程 | `POST /chapters/:chapterId/finalize`、`finalizeChapter`（作品锁 + 章节行锁、只锁当前最新版本、同版本幂等）、`in_review → finalized`、`CHAPTER_STATE_INVALID_FOR_FINALIZE`、审计 `chapter.finalized`；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到 `in_review`；**无撤销定稿、无 migration** | **本轮完成** |
 | **A2-A** | 连续性事实提取契约与候选存储 | `continuity.extractor@1.0.0`（六类事实、严格 Schema + 语义校验）、`extractChapterFacts`（定稿 + 最新版本前置、同版本幂等、失败可重试、审计 `continuity.facts_extracted`）、`chapter_fact_runs` / `chapter_fact_candidates`（复合外键 + 受控更新 + append-only）；**提交阶段二次校验**（模型调用期间的新 revision 一律拒绝）、候选 run 外键为**复合外键**、running **租约**（10 分钟，CAS 接管）+ **attempt_token fencing**（旧 attempt 晚返回也不能提交）、重试记录本次实际 provider / model、上下文**按类型**截断；**无 API / UI / Worker 注册 / RAG** | **本轮完成** |
 | **A2-B** | 连续性事实 API 与候选读取模型 | `POST /chapters/:chapterId/facts/extract`（严格白名单 `sourceVersionId`、201/200 幂等、409 四态）、`GET /facts`（factType 过滤、排序、200 条上限 + `truncated`）、`GET /facts/:candidateId`、`GET /fact-runs/:runId`；`listChapterFacts` / `getChapterFactCandidate` / `getChapterFactRun` 显式 DTO、只读不写审计；**无 UI / 采纳 / 写回** | **本轮完成** |
-| **A2-C** | Reviewer Agent | Writer 后对正文、合同和前文进行结构化检查；默认以问题提示为主，不直接重写或替代作者；严格 JSON 输出 | A2-C-A 已完成（CI #24）；A2-C-B 下一步 |
+| **A2-C** | Reviewer Agent | Writer 后对正文、合同和前文进行结构化检查；默认以问题提示为主，不直接重写或替代作者；严格 JSON 输出 | A2-C-A 已验收（CI #24）；**A2-C-B 本地完成待复审**（独立 `chapter.review` 任务 + run / issue 持久化；无 API / UI） |
 | **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | 待开始 |
 | **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 待开始 |
 | **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | 待评估 |
@@ -134,3 +134,4 @@
 | 2026-11-05 | A2-B-REV-01：`MODEL_PROVIDER=mock` 改用事实专用 Mock（`{"facts": []}`）；Provider 配置错误稳定映射 502 `CONTINUITY_EXTRACTION_FAILED`；列表改为单条 SQL（`COUNT(*) OVER()`），统计与集合同快照 |
 | 2026-11-05 | A2-B-CI-FIX-01：`pnpm.overrides` 精确锁定 `caniuse-lite@1.0.30001822`（deploy --legacy 不读 lockfile 会漂移）；REVIEWED_PACKAGES 同步；`caniuse-lite` 加入 deploy 版本守卫并新增 22 项行为测试；全版本 CC-BY-4.0 仍不放行 |
 | 2026-11-06 | A2-C-A 通过 CI #24（提交 `1482573`）：Reviewer Agent 契约、语义校验、专用 Mock 与 18 个纯单测进入已验收基线；A2-C-B 进入下一步 |
+| 2026-11-06 | A2-C-B（本地，未推送）：独立 `chapter.review` 任务与同事务自动入队、`chapter_review_runs` / `chapter_review_issues`（复合外键 + 结论自洽 CHECK + append-only）、固定三步 `load_review_input → run_reviewer → persist_review_result`、失败隔离与 run 复用、取消兜底触发器；新增 22 个 workflow 集成测试，migrations / 表 / 触发器 12 / 22 / 13；仍无检查结果 API / UI |

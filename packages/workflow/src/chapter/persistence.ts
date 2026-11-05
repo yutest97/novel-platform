@@ -14,7 +14,10 @@ import type { Prisma, PrismaClient } from '@novel/db';
 import { runWorkWrite } from '@novel/works';
 
 import { NonRetryableTaskError, TaskLeaseLostError } from '../errors.js';
+import { DEFAULT_MAX_ATTEMPTS } from '../queue.js';
+import { hashTaskRequest } from '../request-hash.js';
 import {
+  CHAPTER_REVIEW_TASK_TYPE,
   isChapterOpenForGeneration,
   type FrozenContract,
   type PlannerOutput,
@@ -46,13 +49,14 @@ type ContractRow = {
   status: string;
 };
 
-function asStringArray(value: unknown): string[] {
+export function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
     : [];
 }
 
-function asScenes(value: unknown): PlannerScene[] {
+/** 把 `scene_beats.scenes` 解析为场景节拍（合同 / 审阅共用）。 */
+export function asScenes(value: unknown): PlannerScene[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -104,6 +108,14 @@ function toFrozenContract(row: ContractRow): FrozenContract {
   return contract;
 }
 
+/** `assertTaskFence` 需要的最小归属信息（不要求审计 actor）。 */
+export interface TaskFenceScope {
+  readonly taskId: string;
+  readonly workId: string;
+  readonly chapterId: string;
+  readonly workerId: string;
+}
+
 /**
  * 事务内确认任务仍归当前 Worker。
  *
@@ -111,7 +123,10 @@ function toFrozenContract(row: ContractRow): FrozenContract {
  * - 租约被抢走 / 任务被取消 → 立即抛错，不写任何业务数据；
  * - 与 Worker 的 finalize UPDATE 互斥，避免"旧 Worker 写一半、新 Worker 已完成"。
  */
-async function assertTaskFence(tx: Prisma.TransactionClient, fence: TaskFence): Promise<void> {
+export async function assertTaskFence(
+  tx: Prisma.TransactionClient,
+  fence: TaskFenceScope,
+): Promise<void> {
   const rows = await tx.$queryRaw<
     {
       status: string;
@@ -300,12 +315,89 @@ export async function markChapterDrafting(input: {
   });
 }
 
+/** 审阅任务的 provider / model（与创建 `chapter.draft` 时同一套服务端配置）。 */
+export interface ReviewTaskSpec {
+  readonly provider: string;
+  readonly model: string;
+}
+
+/** 审阅任务 requestId（确定性、总长 ≤128）。 */
+export function reviewTaskRequestId(candidateId: string): string {
+  return `review:${candidateId}`;
+}
+
+/**
+ * 在**当前事务内**幂等确保候选的 `chapter.review` 任务存在。
+ *
+ * - 新候选 → 创建；
+ * - 候选已存在但任务缺失（崩溃恢复：候选已落库、任务行未写）→ 补齐；
+ * - 任务已存在且 input_hash 相同 → 不重复创建；
+ * - 已存在但指纹 / 归属不一致 → 内部错误（绝不覆盖已有任务）。
+ *
+ * 为什么不用 `createGenerationTask`：它在唯一键冲突后会重新查询，
+ * 而 PostgreSQL 事务一旦有语句失败就进入 aborted 状态，后续查询全部失败。
+ * 这里改为先查后插；调用方持有作品级 advisory lock，不会出现并发插入。
+ */
+export async function ensureReviewTask(
+  tx: Prisma.TransactionClient,
+  input: {
+    readonly workId: string;
+    readonly chapterId: string;
+    readonly candidateId: string;
+    readonly spec: ReviewTaskSpec;
+  },
+): Promise<{ readonly taskId: string; readonly created: boolean }> {
+  const requestId = reviewTaskRequestId(input.candidateId);
+  const inputSnapshot = { candidateId: input.candidateId };
+  const inputHash = hashTaskRequest({
+    chapterId: input.chapterId,
+    taskType: CHAPTER_REVIEW_TASK_TYPE,
+    inputSnapshot,
+    provider: input.spec.provider,
+    model: input.spec.model,
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+  });
+
+  const existing = await tx.generationTask.findUnique({
+    where: { workId_requestId: { workId: input.workId, requestId } },
+    select: { id: true, inputHash: true, taskType: true, chapterId: true },
+  });
+  if (existing !== null) {
+    if (
+      existing.inputHash !== inputHash ||
+      existing.taskType !== CHAPTER_REVIEW_TASK_TYPE ||
+      existing.chapterId !== input.chapterId
+    ) {
+      throw new NonRetryableTaskError('WORKFLOW_INTERNAL_ERROR', '审阅任务归属不一致');
+    }
+    return { taskId: existing.id, created: false };
+  }
+
+  const created = await tx.generationTask.create({
+    data: {
+      workId: input.workId,
+      chapterId: input.chapterId,
+      requestId,
+      inputHash,
+      taskType: CHAPTER_REVIEW_TASK_TYPE,
+      inputSnapshot,
+      provider: input.spec.provider,
+      model: input.spec.model,
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    },
+    select: { id: true },
+  });
+  return { taskId: created.id, created: true };
+}
+
 /**
  * 写入正文候选。
  *
  * - 同任务已有候选 → 直接复用（不插入、不审计），章节状态兜底到 `in_review`；
  * - 否则插入候选，并把章节推进到 `in_review`；
- * - 候选、章节状态、审计同事务。
+ * - **候选 + 章节状态 + 审计 + `chapter.review` 任务入队在同一事务内提交**：
+ *   不允许"先提交候选、再另开事务入队"，否则崩溃会留下没有审阅任务的候选；
+ * - 候选已存在但审阅任务缺失（崩溃恢复）→ 同一事务内补齐。
  */
 export async function persistChapterCandidate(input: {
   readonly db: PrismaClient;
@@ -313,8 +405,9 @@ export async function persistChapterCandidate(input: {
   readonly contract: FrozenContract;
   readonly draft: ValidatedDraft;
   readonly plan: PlannerOutput;
+  readonly review: ReviewTaskSpec;
 }): Promise<{ readonly id: string; readonly wordCount: number }> {
-  const { db, fence, contract, draft, plan } = input;
+  const { db, fence, contract, draft, plan, review } = input;
   return runWorkWrite(db, fence.workId, async (tx) => {
     await assertTaskFence(tx, fence);
 
@@ -329,6 +422,12 @@ export async function persistChapterCandidate(input: {
         'drafting',
         'in_review',
       ]);
+      await ensureReviewTask(tx, {
+        workId: fence.workId,
+        chapterId: fence.chapterId,
+        candidateId: existing.id,
+        spec: review,
+      });
       return existing;
     }
 
@@ -378,6 +477,14 @@ export async function persistChapterCandidate(input: {
         contractId: contract.id,
         wordCount: draft.wordCount,
       },
+    });
+
+    // 与候选同一个事务入队：候选落库即一定有对应审阅任务。
+    await ensureReviewTask(tx, {
+      workId: fence.workId,
+      chapterId: fence.chapterId,
+      candidateId: created.id,
+      spec: review,
     });
     return { id: created.id, wordCount: created.wordCount };
   });

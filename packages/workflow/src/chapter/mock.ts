@@ -12,6 +12,7 @@
 
 import type { ModelJsonInput, ModelProvider } from '../model-types.js';
 import { MockProvider, type MockJsonValue } from '../providers/mock.js';
+import { CHAPTER_REVIEWER_MOCK_OUTPUT } from './reviewer-mock.js';
 
 const DEFAULT_TARGET_WORDS = 3_000;
 
@@ -82,6 +83,11 @@ function chapterJsonResponder(input: ModelJsonInput): MockJsonValue {
   const system = input.messages[0]?.content ?? '';
   if (system.includes('planner.chapter')) {
     return buildPlannerOutput(input);
+  }
+  if (system.includes('reviewer.chapter')) {
+    // A2-C-B：审阅默认无问题；需要注入问题的测试直接用
+    // `createChapterReviewerMockProvider({ issues })`。
+    return CHAPTER_REVIEWER_MOCK_OUTPUT;
   }
   return { text: DRAFT };
 }

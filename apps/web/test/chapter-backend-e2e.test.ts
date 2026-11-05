@@ -470,11 +470,23 @@ describe('API → Worker → 候选 → 采纳（全链路）', () => {
     expect(logs.every((log) => log.model === 'mock-model')).toBe(true);
     expect(JSON.stringify(logs)).not.toContain('风从演武场');
 
-    // ---- 10. 无 queued / processing 残留 ----
+    // ---- 10. 正文任务无 queued / processing 残留 ----
+    // A2-C-B 起，候选保存会在同一事务内入队独立的 `chapter.review` 任务：
+    // 它不影响正文任务的成功与采纳，因此这里只要求正文任务已终结。
     expect(
       await db.generationTask.count({
-        where: { workId, status: { in: ['queued', 'processing'] } },
+        where: {
+          workId,
+          taskType: 'chapter.draft',
+          status: { in: ['queued', 'processing'] },
+        },
       }),
     ).toBe(0);
+
+    const reviewTasks = await db.generationTask.findMany({
+      where: { workId, taskType: 'chapter.review' },
+    });
+    expect(reviewTasks).toHaveLength(1);
+    expect(reviewTasks[0]?.inputSnapshot).toEqual({ candidateId });
   }, 60_000);
 });

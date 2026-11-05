@@ -257,6 +257,8 @@ export function longDraft(tag = ''): string {
 export interface ChapterProviderHandlers {
   readonly planner?: (input: ModelJsonInput) => unknown;
   readonly writer?: (input: ModelJsonInput) => unknown;
+  /** A2-C-B：Reviewer 输出；缺省为无问题。 */
+  readonly reviewer?: (input: ModelJsonInput) => unknown;
 }
 
 export interface ChapterProvider {
@@ -264,13 +266,13 @@ export interface ChapterProvider {
   readonly calls: {
     readonly planner: ModelJsonInput[];
     readonly writer: ModelJsonInput[];
+    readonly reviewer: ModelJsonInput[];
   };
 }
 
 /**
- * 用 MockProvider 按 system prompt 分派 Planner / Writer，并记录实际模型输入。
- *
- * 记录只用于测试断言"模型看到了什么"，不写日志、不落库。
+ * 用 MockProvider 按 system prompt 分派 Planner / Writer / Reviewer，
+ * 并记录实际模型输入（只用于测试断言"模型看到了什么"，不写日志、不落库）。
  */
 export function createChapterProvider(
   handlers: ChapterProviderHandlers,
@@ -278,6 +280,7 @@ export function createChapterProvider(
 ): ChapterProvider {
   const planner: ModelJsonInput[] = [];
   const writer: ModelJsonInput[] = [];
+  const reviewer: ModelJsonInput[] = [];
   const provider = new MockProvider({
     json: (input) => {
       const system = input.messages[0]?.content ?? '';
@@ -287,13 +290,19 @@ export function createChapterProvider(
           ? (defaults.plan as MockJsonValue)
           : (handlers.planner(input) as MockJsonValue);
       }
+      if (system.includes('reviewer.chapter')) {
+        reviewer.push(input);
+        return handlers.reviewer === undefined
+          ? { passed: true, issues: [] }
+          : (handlers.reviewer(input) as MockJsonValue);
+      }
       writer.push(input);
       return handlers.writer === undefined
         ? { text: defaults.text }
         : (handlers.writer(input) as MockJsonValue);
     },
   });
-  return { provider, calls: { planner, writer } };
+  return { provider, calls: { planner, writer, reviewer } };
 }
 
 /** 从模型输入里取出 user 消息（结构化 JSON）。 */

@@ -268,7 +268,9 @@ export async function getChapterDetail(input: {
 
   const [latestTask, candidates] = await Promise.all([
     input.db.generationTask.findFirst({
-      where: { chapterId, workId },
+      // 只暴露正文生成任务：`chapter.review` 是内部任务，不能变成"最新正文任务"，
+      // 否则章节详情 / 列表的徽标会被审阅任务的步骤与状态覆盖。
+      where: { chapterId, workId, taskType: CHAPTER_DRAFT_TASK_TYPE },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     }),
     input.db.chapterCandidate.findMany({
@@ -319,7 +321,8 @@ export async function listChapters(input: {
       },
     }),
     input.db.generationTask.findMany({
-      where: { workId },
+      // 同上：列表徽标只反映正文生成，不受内部审阅任务影响。
+      where: { workId, taskType: CHAPTER_DRAFT_TASK_TYPE },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { chapterId: true, status: true, currentStep: true },
     }),

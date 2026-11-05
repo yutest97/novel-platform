@@ -1,10 +1,11 @@
-# 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4）
+# 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v1.6
-- 日期：2026-11-05
+- 版本：v1.7
+- 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
-  `20261104030000_a1_chapter_versions`（A1-3B / A1-3C / A1-4A / A1-4B-A 均无新增迁移）
+  `20261104030000_a1_chapter_versions`、`20261105090000_a2_continuity_facts`、
+  `20261106090000_a2c_review_runs`（A1-3B / A1-3C / A1-4A / A1-4B-A / A2-B 均无新增迁移）
 
 ---
 
@@ -1647,3 +1648,103 @@ LIMIT 200
 
 Writer 后自动运行、Reviewer run / issue 持久化、HTTP API、UI、采纳门禁、
 作者手动重检、失败回滚策略、RAG / embedding。
+
+## 24. A2-C-B：Reviewer 候选审阅执行与持久化
+
+> 把 `reviewer.chapter@1.0.0` 接入受工作流控制的候选审阅：
+> 独立 `chapter.review` 任务、候选保存后同事务入队、run / issue 落库。
+> **不提供**检查结果 API / UI / 自动重写 / 采纳门禁 / 人工重检。
+
+### 24.1 任务与自动入队
+
+```
+persist_candidate（chapter.draft 的最后一步）
+  └─ runWorkWrite（作品锁）内同一事务
+       ├─ 写入 chapter_candidates
+       ├─ chapter.status → in_review + 审计 chapter.candidate_created
+       └─ ensureReviewTask：request_id = review:<candidateId>，input = { candidateId }
+```
+
+- `chapter.draft` 与 `chapter.review` 是**两个任务**：Writer 候选保存成功后正文任务
+  正常 `succeeded`；Reviewer 失败只影响 review task / run；
+- `input_snapshot` 只有 `{ candidateId }`，requestId 确定性（总长 43 ≤ 128），
+  `input_hash` 复用现有 canonical JSON / request hash；
+- `provider / model` 取 Worker 当前配置与 `runner.resolveModel(REVIEWER_CHAPTER_AGENT)`
+  （`agent.model` 为空 → `defaultModel`）；
+- `maxAttempts` 用现有默认值（3），不另造重试机制；
+- 幂等：候选已存在但 review task 缺失（崩溃恢复）→ 同一事务补齐；
+  任务已存在且 `input_hash` 相同 → 不重复创建；
+- 不允许"先提交候选、再另开事务入队"。
+
+作者读接口（章节详情 / 列表）**只**展示 `chapter.draft` 任务：
+`chapter.review` 是内部任务，不能成为"最新正文任务"而改变既有页面。
+
+### 24.2 固定三步
+
+```
+load_review_input → run_reviewer → persist_review_result
+```
+
+| 步骤 | 职责 |
+| --- | --- |
+| `load_review_input` | 锁 review task 并确认 Worker 所有权；解析输入；读取候选 / 合同 / 安全上下文；创建或复用 run 并置 `running`；写 `task_contexts` |
+| `run_reviewer` | 调 `reviewer.chapter@1.0.0`；运行 `validateReviewerOutput`；每次实际调用写一条 `llm_call_logs` |
+| `persist_review_result` | `runWorkWrite` + 任务行锁 / fence；同一事务写 issues 与 run 终态（`passed / issue_count / finished_at`） |
+
+复用 semantics：
+
+- 已有 `succeeded` run → 记录"无需再调用模型"，后续两步跳过（不重复插 issue）；
+- 已有 `failed` run → 复用同一行置回 `running`（刷新 `started_at` 与本次 provider / model）；
+- 已有 `running` run 但任务被重新领取（上一 attempt 失去租约）→ 先标 `failed`
+  （`TASK_LEASE_LOST`）再复用同一行，不产生第二条。
+
+### 24.3 数据表
+
+`chapter_review_runs` / `chapter_review_issues`：字段、复合外键、CHECK 与触发器
+见 `docs/03-data-model.md` §3.12。要点：
+
+- `UNIQUE(candidate_id)` + `UNIQUE(generation_task_id)`；
+- issue 的 `(run_id, candidate_id, chapter_id, work_id)` 是**复合外键**；
+- issues append-only；run 成功后不可改、不可删；
+- 表里没有正文副本 / prompt / 模型原始响应 / 密钥列。
+
+### 24.4 失败隔离与重试
+
+- Provider / Agent / 语义失败：**仍持有任务 fence 时**把 run 标 `failed` 并保存稳定
+  `error_code`（`MODEL_*` / `AGENT_OUTPUT_INVALID` / `TASK_INPUT_INVALID`），
+  再按现有错误分类抛出（Provider 网络错误可重试）；
+- 失败**不修改**候选、合同、章节、采纳状态与 draft 任务；
+- `TASK_LEASE_LOST`、取消检查等控制层错误继续抛出，不被失败标记吞掉；
+- 任务重试复用同一个 run（`failed → running`），不新建第二行、不重复 issue；
+- 取消 / 重试用尽：任务进入 `cancelled / failed` 时，数据库触发器
+  `generation_tasks_close_review_run` 把仍在 `running` 的 run 标 `failed`，
+  不留下永久 running；
+- 旧 Worker、丢租约、取消后晚返回：写入前 `SELECT ... FOR UPDATE` 锁任务行并校验
+  `locked_by / status / cancel_requested_at`，任一不符抛 `TASK_LEASE_LOST`，
+  问题与 run 都不会被写入或覆盖；
+- review 成功 / 失败均**不写** `audit_logs`：run、issues 与 `llm_call_logs` 就是审阅记录。
+
+### 24.5 上下文与数据边界
+
+- `chapter`：候选所属章节（**定稿后仍可审阅**；review 不修改章节状态）；
+- `contract`：候选的不可变冻结合同（`goal / mustInclude / mustNotInclude / scenes`）；
+- `draft`：`chapter_candidates.content`，只进入本次模型请求；
+- `characters / items / realms / factions`：同作品未删除实体，每类最多 100 条，
+  顺序固定 `orderIndex asc → createdAt asc → id asc`，`secret*` 永不进入；
+- `priorSummaries`：A2-D 未实现，本轮固定 `[]`；
+- 候选即使已被采纳仍可读取与审阅；candidate / contract / chapter / work 必须全部匹配，
+  跨作品直接拒绝；
+- `task_contexts` 只记章节 / 合同 / 候选的 id 与安全摘要（字数、场景数），
+  **不记** draft、evidence、prompt 或模型响应。
+
+### 24.6 Worker 与 Mock
+
+- `apps/worker/src/runtime.ts` 注册 `chapter.review`，仍只构造一次 Provider；
+- `createChapterMockProvider()` 增加 `reviewer.chapter` 分派：默认
+  `{ "passed": true, "issues": [] }`；通用 `MockProvider` 未改动；
+- 测试夹具按 system prompt 分派 planner / writer / reviewer，并记录 Reviewer 实际输入。
+
+### 24.7 未做
+
+检查结果读取 API、前端展示、high severity 采纳门禁、自动重写 / 自动重试 Writer、
+人工重新检查、Summarizer（`priorSummaries` 仍为空）、RAG / embedding / 图谱。

@@ -1,9 +1,9 @@
 # 09 项目记忆（当前事实快照）
 
 - 更新日期：2026-11-06
-- 最后已验收产品基线：`1482573`
+- 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
-- 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已完成；下一阶段 A2-C-B
+- 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；**A2-C-B 本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -60,6 +60,19 @@
 - `createChapterReviewerMockProvider()` 默认无问题，可注入固定问题；
 - 尚未接入 `chapter.draft`、数据库、API、UI 或 Worker。
 - CI #24 绿色；提交 `1482573` 已进入远端 `main`。
+
+### A2-C-B Reviewer 候选审阅执行与持久化（本地完成，待复审）
+
+- 独立 `chapter.review` 任务：输入只有 `{ candidateId }`，requestId `review:<candidateId>`；
+- Writer 候选保存与审阅任务入队在**同一个作品锁事务**内提交，崩溃不会留下没有审阅任务的候选；
+- `chapter_review_runs` / `chapter_review_issues`：`UNIQUE(candidate_id)`、
+  `UNIQUE(generation_task_id)`、issue 复合外键、结论自洽 CHECK、append-only 触发器；
+- 固定三步 `load_review_input → run_reviewer → persist_review_result`；
+- run 复用：成功跳过、失败重试复用同一行、失去租约的 running 被接管；
+- 失败只影响 review task / run，不回滚候选、不改变章节状态与采纳权；
+- 取消 / 重试用尽由 `generation_tasks_close_review_run` 触发器兜底，不留永久 running；
+- 作者读接口只展示 `chapter.draft` 任务，审阅任务不会成为"最新正文任务"；
+- 仍**没有**检查结果 API / UI，`priorSummaries` 固定为空（A2-D 未实现）。
 
 ---
 
@@ -120,9 +133,9 @@ Agent 产出候选
 | --- | --- | --- |
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
-| A2-C | Reviewer Agent | A2-C-A 已完成；A2-C-B 下一步 |
+| A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B 本地完成待复审 |
 | A2-D | Summarizer Agent | 待开始 |
-| A2-E | 事实候选只读审阅 UI | 待开始 |
+| A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
 说明：
@@ -135,31 +148,25 @@ Agent 产出候选
 
 ---
 
-## 4. 当前下一步：A2-C-B Reviewer 候选执行与持久化
+## 4. 当前下一步
 
-A2-C-A 已完成并通过 CI #24：
+A2-C-B 已在本地完成并通过全量单测（详见 §6），等待负责人复审后再决定是否推送。
 
-- `reviewer.chapter@1.0.0` 严格输入 / 输出 Schema；
-- 专用代码语义校验与稳定 `AGENT_OUTPUT_INVALID`；
-- 确定性 `createChapterReviewerMockProvider()`；
-- 18 个纯单测，未连数据库、未联网。
+复审通过后的候选顺序：
 
-当前执行卡为 `docs/tasks/A2-C-B-reviewer-execution.md`：
-
-- 独立 `chapter.review` 任务；
-- 候选保存后同事务幂等入队；
-- review run / issues 持久化；
-- Reviewer 失败、重试和取消不回滚候选；
-- 仍不提供 API / UI，也不改变作者采纳权。
+1. A2-D Summarizer（正式定稿版本摘要），完成后 `priorSummaries` 才能真正非空；
+2. Reviewer 结果读取 API / UI（当前 run 与 issues 已落库，但作者看不到）；
+3. A2-E 事实候选只读审阅 UI；
+4. 是否给 high severity 加采纳门禁——仍需产品确认。
 
 尚待产品确认：
 
-- high severity 是否阻止候选展示/采纳，还是只警告；
-- Reviewer 是否每次 Writer 后自动运行；
-- Reviewer 失败是否影响正文候选保存；
-- 是否允许作者手动重新检查。
+- high severity 是否阻止候选展示/采纳，还是只警告（当前实现只落库、不阻断）；
+- Reviewer 是否每次 Writer 后自动运行（当前是自动入队，但没有开关）；
+- Reviewer 失败是否影响正文候选保存（当前明确不影响）；
+- 是否允许作者手动重新检查（当前没有入口）。
 
-建议默认：
+建议默认（已按此实现）：
 
 - Reviewer 问题只警告，不自动阻止作者；
 - Reviewer 自身失败不回滚已保存的 Writer 候选；
@@ -192,8 +199,21 @@ A2-C-A 已完成并通过 CI #24：
 | 数据库触发器 | 10 |
 | deploy 版本守卫行为测试 | 22 |
 
-A2-C-A 新增 18 个 workflow 纯单测，workflow 包当前 **262** 个测试。
+A2-C-A 新增 18 个 workflow 纯单测，workflow 包当时 **262** 个测试。
 migrations / 数据表 / 触发器保持 **11 / 20 / 10**。
+
+A2-C-B（本地，未推送）后的当前数字：
+
+| 项目 | 数量 |
+| --- | --- |
+| 全量单测 | **909**（web 309 / workflow 285 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| migrations | **12** |
+| 数据表 | **22** |
+| 数据库触发器 | **13** |
+
+新增 22 个 workflow 集成测试（`chapter-review-workflow.test.ts`）；
+另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review），
+因此 workflow 285、全量 909。
 
 最近新增质量门禁：
 
@@ -202,8 +222,12 @@ migrations / 数据表 / 触发器保持 **11 / 20 / 10**。
 - candidate/run 复合外键；
 - deploy `caniuse-lite` 精确版本守卫；
 - 默认 Mock 事实提取；
-- 单 SQL 列表快照。
-- Reviewer 输入字段封锁与 evidence 子串校验。
+- 单 SQL 列表快照；
+- Reviewer 输入字段封锁与 evidence 子串校验；
+- 审阅任务的**任务行锁 + `locked_by` fence**（旧 Worker 晚返回写不进 issue）；
+- review run 的结论自洽 CHECK 与 append-only 触发器；
+- review 任务终态时由触发器关闭 running run（取消不留下永久 running）；
+- 元数据摘要（实体摘要加载）在事实提取与 Reviewer 之间共用同一套 secret 过滤。
 
 ---
 
@@ -215,7 +239,10 @@ migrations / 数据表 / 触发器保持 **11 / 20 / 10**。
 4. Reviewer / Summarizer 的产品门禁尚未确认；
 5. 事实候选质量尚未经过真实章节批量审阅；
 6. 本地 PostgreSQL 可能被后台进程回收，测试前必须确认连接；
-7. Prisma/应用时间写库与数据库时钟在部分环境可能有偏移，关键租约和时间戳优先使用数据库时钟。
+7. Prisma/应用时间写库与数据库时钟在部分环境可能有偏移，关键租约和时间戳优先使用数据库时钟；
+8. Reviewer run / issues 已落库但**没有读取接口**，作者目前看不到任何审阅结论；
+9. `priorSummaries` 固定为空，跨章连续性问题在 A2-D 之前无法被覆盖；
+10. 每次正文生成都会多出一个 `chapter.review` 任务，Worker 吞吐与真实模型成本相应增加。
 
 ---
 
@@ -234,6 +261,9 @@ D-007 正式版本与事实候选均 append-only；旧版本不覆盖。
 D-008 事实候选不自动写回实体，写回必须另立阶段并由作者确认。
 D-009 RAG、向量库、Neo4j 仅在个人版实际需要时评估。
 D-010 deploy --legacy 产物必须独立做版本与许可证扫描。
+D-011 Reviewer 是独立任务：候选保存成功后同事务入队，失败不回滚候选、不改变采纳权。
+D-012 Reviewer 结论只落 run / issues，不写 audit_logs；成功是终态，问题 append-only。
+D-013 A2-D 之前 `priorSummaries` 固定为空，不得用候选正文或正式正文冒充前章摘要。
 ```
 
 ---

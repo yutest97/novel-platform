@@ -147,6 +147,7 @@ model Work {
   chapterContracts ChapterContract[]
   chapterCandidates ChapterCandidate[]
   chapterVersions ChapterVersion[]
+  chapterReviewRuns ChapterReviewRun[] @relation("WorkChapterReviewRuns")
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -309,6 +310,7 @@ model Chapter {
   contracts       ChapterContract[]
   candidates      ChapterCandidate[]
   versions        ChapterVersion[]
+  reviewRuns      ChapterReviewRun[] @relation("ChapterChapterReviewRuns")
 
   @@unique([workId, chapterNo])
   /// 供 chapter_contracts / chapter_candidates 的复合外键引用
@@ -359,6 +361,7 @@ model GenerationTask {
   llmLogs    LlmCallLog[]
   chapterContract ChapterContract?
   chapterCandidate ChapterCandidate?
+  reviewRuns ChapterReviewRun[] @relation("TaskChapterReviewRun")
 
   @@unique([workId, requestId])
   /// 供 chapter_contracts / chapter_candidates 的复合外键引用
@@ -470,6 +473,9 @@ model ChapterCandidate {
   contract ChapterContract @relation(fields: [contractId], references: [id], onDelete: Restrict)
   /// 该候选生成的正式版本（数据库部分唯一索引保证最多一条）
   sourceVersion ChapterVersion? @relation("ChapterVersionSource")
+  /// 该候选的审阅运行（数据库 UNIQUE(candidate_id) 保证最多一条；
+  /// Prisma 侧只能用数组表达复合外键，不额外造重复唯一索引）
+  reviewRuns ChapterReviewRun[] @relation("CandidateChapterReviewRun")
 
   @@unique([generationTaskId])
   /// 供 chapter_versions 的复合外键引用（来源候选必须同章节同作品）
@@ -573,4 +579,78 @@ model ChapterFactCandidate {
   @@index([runId])
   @@index([chapterId, factType])
   @@map("chapter_fact_candidates")
+}
+
+/// 章节候选审阅运行（A2-C-B）。
+///
+/// - `UNIQUE(candidate_id)`：每个候选最多一个 run；
+/// - `UNIQUE(generation_task_id)`：一个 `chapter.review` 任务对应一个 run，
+///   任务重试复用同一行（failed → running），不产生第二条；
+/// - `(id, candidateId, chapterId, workId)` 唯一：让 issue 的 run 外键是复合外键，
+///   数据库层保证「问题与 run 属于同一作品 / 章节 / 候选」；
+/// - `passed / issue_count` 只在成功时写入，且必须与状态自洽：
+///   passed=true ⇔ 0 条；passed=false ⇔ 1..20 条；running / failed 时 passed 为 NULL；
+/// - 只允许受控状态更新，成功后不可改；DELETE 由触发器拒绝；
+/// - **不保存正文副本 / prompt / 模型原始响应 / 密钥**：表里没有这些列。
+model ChapterReviewRun {
+  id               String    @id @default(uuid()) @db.Uuid
+  workId           String    @map("work_id") @db.Uuid
+  chapterId        String    @map("chapter_id") @db.Uuid
+  candidateId      String    @map("candidate_id") @db.Uuid
+  generationTaskId String    @map("generation_task_id") @db.Uuid
+  agentName        String    @map("agent_name")
+  agentVersion     String    @map("agent_version")
+  provider         String
+  model            String
+  /// running | succeeded | failed
+  status           String
+  /// 成功结论：true 表示没有问题；未终结时为 NULL。
+  passed           Boolean?
+  issueCount       Int       @default(0) @map("issue_count")
+  errorCode        String?   @map("error_code")
+  createdAt        DateTime  @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  /// 本次尝试开始时间（running 租约起点，重试时刷新）。
+  startedAt        DateTime  @default(dbgenerated("clock_timestamp()")) @map("started_at") @db.Timestamptz(3)
+  finishedAt       DateTime? @map("finished_at") @db.Timestamptz(3)
+
+  work      Work               @relation("WorkChapterReviewRuns", fields: [workId], references: [id], onDelete: Restrict)
+  chapter   Chapter            @relation("ChapterChapterReviewRuns", fields: [chapterId, workId], references: [id, workId], onDelete: Restrict)
+  candidate ChapterCandidate   @relation("CandidateChapterReviewRun", fields: [candidateId, chapterId, workId], references: [id, chapterId, workId], onDelete: Restrict)
+  task      GenerationTask     @relation("TaskChapterReviewRun", fields: [generationTaskId, chapterId, workId], references: [id, chapterId, workId], onDelete: Restrict)
+  issues    ChapterReviewIssue[]
+
+  @@unique([candidateId])
+  @@unique([generationTaskId])
+  @@unique([id, candidateId, chapterId, workId])
+  @@index([chapterId, createdAt])
+  @@map("chapter_review_runs")
+}
+
+/// 章节审阅问题（A2-C-B）。
+///
+/// append-only：UPDATE / DELETE 由触发器拒绝；
+/// severity / type / 长度 / ordinal 由数据库 CHECK 兜底。
+/// `evidence` 是 Reviewer 输出的一部分（正文中的原句），按原样保存；
+/// 但本表**不保存整段 draft**、prompt 或模型原始响应。
+model ChapterReviewIssue {
+  id          String   @id @default(uuid()) @db.Uuid
+  runId       String   @map("run_id") @db.Uuid
+  workId      String   @map("work_id") @db.Uuid
+  chapterId   String   @map("chapter_id") @db.Uuid
+  candidateId String   @map("candidate_id") @db.Uuid
+  /// 0 起算，按 Reviewer 输出顺序。
+  ordinal     Int
+  /// high | medium | low
+  severity    String
+  /// 七类白名单（见 docs/08 §23）
+  type        String
+  evidence    String
+  suggestion  String
+  createdAt   DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  run ChapterReviewRun @relation(fields: [runId, candidateId, chapterId, workId], references: [id, candidateId, chapterId, workId], onDelete: Restrict)
+
+  @@unique([runId, ordinal])
+  @@index([candidateId, ordinal])
+  @@map("chapter_review_issues")
 }

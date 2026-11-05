@@ -22,6 +22,7 @@ import { AgentInputInvalidError, AgentOutputInvalidError } from '../agent.js';
 import type { JsonIssue, JsonSchema } from '../json-schema.js';
 import { validateJson } from '../json-schema.js';
 import type { ModelProvider } from '../model-types.js';
+import { loadSafeEntityGroups, type SafeEntityRow } from './safe-entities.js';
 
 /** 六类事实（稳定白名单）。 */
 export const CHAPTER_FACT_TYPES = [
@@ -722,44 +723,16 @@ async function loadFactContext(
   workId: string,
   base: LoadFactContextInput,
 ): Promise<ChapterFactInput> {
-  const [characters, items, realms, factions] = await Promise.all([
-    loadEntitiesOfType(db, workId, 'character'),
-    loadEntitiesOfType(db, workId, 'item'),
-    loadEntitiesOfType(db, workId, 'realm_level'),
-    loadEntitiesOfType(db, workId, 'faction'),
-  ]);
-  const entities = [...characters, ...items, ...realms, ...factions];
+  // 实体摘要与 Reviewer 共用同一套安全规则（秘密字段过滤、每类上限、稳定顺序）。
+  const groups = await loadSafeEntityGroups(db, workId, {
+    limit: MAX_FACT_CONTEXT_ENTITIES,
+    summaryMax: MAX_ENTITY_SUMMARY_LENGTH,
+  });
 
-  const attributes =
-    entities.length === 0
-      ? []
-      : await db.entityAttribute.findMany({
-          where: { entityId: { in: entities.map((entity) => entity.id) } },
-          orderBy: { createdAt: 'asc' },
-          select: { entityId: true, attrKey: true, attrValue: true },
-        });
-
-  const attributesByEntity = new Map<string, string[]>();
-  for (const row of attributes) {
-    // 秘密类字段永不进入模型输入（docs/08 的硬约束）
-    if (row.attrKey.startsWith('secret')) {
-      continue;
-    }
-    const bucket = attributesByEntity.get(row.entityId) ?? [];
-    const text = formatAttributeValue(row.attrValue);
-    if (text !== '') {
-      bucket.push(`${row.attrKey}：${text}`);
-    }
-    attributesByEntity.set(row.entityId, bucket);
-  }
-
-  const toRef = (entity: EntityRow): FactEntityRef => ({
+  const toRef = (entity: SafeEntityRow): FactEntityRef => ({
     id: entity.id,
     name: entity.name,
-    summary: truncate(
-      (attributesByEntity.get(entity.id) ?? []).join('；'),
-      MAX_ENTITY_SUMMARY_LENGTH,
-    ),
+    summary: entity.summary,
   });
 
   return {
@@ -770,70 +743,12 @@ async function loadFactContext(
       title: base.chapter.title,
     },
     sourceVersion: base.sourceVersion,
-    characters: characters.map(toRef),
-    items: items.map(toRef),
-    realms: realms.map((entity) => ({ ...toRef(entity), orderIndex: entity.orderIndex })),
-    factions: factions.map(toRef),
+    characters: groups.characters.map(toRef),
+    items: groups.items.map(toRef),
+    realms: groups.realms.map((entity) => ({ ...toRef(entity), orderIndex: entity.orderIndex })),
+    factions: groups.factions.map(toRef),
     chapterText: base.chapterText,
   };
-}
-
-interface EntityRow {
-  readonly id: string;
-  readonly name: string;
-  readonly orderIndex: number | null;
-}
-
-/** 单一类型的实体：每类独立上限，顺序固定，不会被其它类型挤占。 */
-async function loadEntitiesOfType(
-  db: Prisma.TransactionClient,
-  workId: string,
-  entityType: 'character' | 'item' | 'realm_level' | 'faction',
-): Promise<EntityRow[]> {
-  return db.entity.findMany({
-    where: { workId, deletedAt: null, entityType },
-    orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    take: MAX_FACT_CONTEXT_ENTITIES,
-    select: { id: true, name: true, orderIndex: true },
-  });
-}
-
-/** 属性值转成稳定的一句话摘要（数组用「、」连接，对象只取标量键）。 */
-function formatAttributeValue(value: unknown): string {
-  if (typeof value === 'string') {
-    return truncate(value.trim(), 120);
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  if (Array.isArray(value)) {
-    return truncate(
-      value
-        .map((item) =>
-          typeof item === 'string' ? item : typeof item === 'number' ? String(item) : '',
-        )
-        .filter((item) => item !== '')
-        .join('、'),
-      120,
-    );
-  }
-  if (value !== null && typeof value === 'object') {
-    const parts: string[] = [];
-    for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
-      if (key.startsWith('secret')) {
-        continue;
-      }
-      if (typeof inner === 'string' || typeof inner === 'number' || typeof inner === 'boolean') {
-        parts.push(`${key}=${String(inner)}`);
-      }
-    }
-    return truncate(parts.join('，'), 120);
-  }
-  return '';
-}
-
-function truncate(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
 /** 错误 → 稳定错误码（供 run.error_code 与上层映射）。 */

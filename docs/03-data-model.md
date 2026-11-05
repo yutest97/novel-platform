@@ -504,6 +504,58 @@ completion_tokens, latency_ms, success, error_code, created_at`。
 
 > v1.1 的 `fact_version int` 已修正为 `fact_version uuid FK→fact_versions`，保证指向真实存在的事实版本行。
 
+### 3.12 chapter_review_runs / chapter_review_issues（A2-C-B 实现口径）
+
+> 以迁移 `20261106090000_a2c_review_runs` 与 `packages/workflow/src/chapter/review.ts` 为准。
+> 只记录**结构化审阅结论**：不存正文副本、prompt、模型原始响应或密钥。
+
+**chapter_review_runs**：一次候选审阅运行。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| work_id / chapter_id / candidate_id | uuid | 归属三件套 |
+| generation_task_id | uuid | 产生它的 `chapter.review` 任务 |
+| agent_name / agent_version | text | `reviewer.chapter` / `1.0.0`，不可变 |
+| provider / model | text | 本次实际调用的 Provider / 模型（成功后以 Provider 返回值为准） |
+| status | text | `running / succeeded / failed` |
+| passed | boolean nullable | 成功结论：true = 无问题；未终结时为 NULL |
+| issue_count | int | 0..20；成功时与 passed 自洽 |
+| error_code | text nullable | 失败时的稳定错误码 |
+| created_at / started_at / finished_at | timestamptz | `started_at` 是本次尝试起点，重试时刷新 |
+
+约束：
+
+- `UNIQUE(candidate_id)`：每个候选最多一个 run；`UNIQUE(generation_task_id)`：一个 review 任务一个 run；
+- `UNIQUE(id, candidate_id, chapter_id, work_id)`：让 issue 的 run 外键可以是复合外键；
+- 复合外键：`(chapter_id, work_id) → chapters`、`(candidate_id, chapter_id, work_id) → chapter_candidates`、
+  `(generation_task_id, chapter_id, work_id) → generation_tasks`；
+- `CHECK` 结论自洽：`succeeded AND passed` ⇔ `issue_count = 0`；`succeeded AND NOT passed` ⇔ `1..20`；
+  `running / failed` ⇒ `passed IS NULL AND issue_count = 0`；`running` 必须没有 `finished_at / error_code`；
+- 只允许受控更新（`running → succeeded / failed`、`failed → running`），
+  归属 / Agent 身份 / `created_at` 不可变，成功后不可改、不可删；
+- 触发器 `generation_tasks_close_review_run`：review 任务进入 `cancelled / failed` 终态时，
+  把仍在 `running` 的 run 标为 `failed`（`TASK_CANCELLED` 或任务错误码），不留下永久 running。
+
+**chapter_review_issues**：一条结构化审阅问题（append-only）。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| run_id / work_id / chapter_id / candidate_id | uuid | 复合外键绑定到 run，四者必须一致 |
+| ordinal | int | 0..19，按 Reviewer 输出顺序 |
+| severity | text | `high / medium / low` |
+| type | text | 七类白名单（见 docs/08 §23.2） |
+| evidence | text | 正文原句，1..300 |
+| suggestion | text | 修改方向，1..500 |
+| created_at | timestamptz | |
+
+约束：`UNIQUE(run_id, ordinal)`；`CHECK` 兜底 severity / type / 长度；
+`UPDATE / DELETE` 一律由触发器拒绝。
+
+> 归属组合（例如把 issue 挂在 run A 上却把 work / chapter / candidate 指向另一个合法组合）
+> 由 `chapter_review_issues_run_fkey` 直接拒绝，不只靠服务层校验。
+
 ---
 
 ## 4. 通用核心 vs 玄幻规则包（边界）

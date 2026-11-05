@@ -787,6 +787,7 @@ describe('章节关闭（finalized / abandoned）后的竞态保护', () => {
         contract,
         draft: prepareDraftText(longDraft()),
         plan,
+        review: { provider: 'mock', model: 'mock-model' },
       }),
     ).rejects.toMatchObject({ code: 'TASK_INPUT_INVALID' });
 
@@ -796,8 +797,11 @@ describe('章节关闭（finalized / abandoned）后的竞态保护', () => {
     expect((await chapterRow(fixture.chapterId)).status).toBe('finalized');
   });
 
-  it('其它允许状态（drafting / in_review）不受影响，仍可生成', async () => {
-    for (const status of ['drafting', 'in_review'] as const) {
+  // 每个状态单独一个用例：A2-C-B 起，候选保存会同时入队 `chapter.review`，
+  // 同一用例里连续跑第二个 fixture 时 `runOnce` 会先领到上一个用例留下的审阅任务。
+  it.each(['drafting', 'in_review'] as const)(
+    '其它允许状态（%s）不受影响，仍可生成',
+    async (status) => {
       const fixture = await newFixture();
       await db.chapter.update({ where: { id: fixture.chapterId }, data: { status } });
       const { provider } = createChapterProvider(
@@ -811,8 +815,8 @@ describe('章节关闭（finalized / abandoned）后的竞态保护', () => {
       expect((await taskRow(task.id)).errorCode).toBeNull();
       expect(await db.chapterCandidate.count({ where: { chapterId: fixture.chapterId } })).toBe(1);
       expect((await chapterRow(fixture.chapterId)).status).toBe('in_review');
-    }
-  });
+    },
+  );
 });
 
 describe('取消、审计与隔离', () => {

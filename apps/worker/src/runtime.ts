@@ -12,6 +12,7 @@ import type { PrismaClient } from '@novel/db';
 import {
   createChapterDraftWorkflow,
   createChapterMockProvider,
+  createChapterReviewWorkflow,
   createModelProvider,
   readProviderConfig,
   WorkflowKernel,
@@ -60,6 +61,8 @@ export function createWorkerRuntime(
 
   const registry = new WorkflowRegistry();
   registry.register(createChapterDraftWorkflow({ db, provider }));
+  // A2-C-B：候选审阅是独立任务，与正文生成共用同一个 Provider 实例。
+  registry.register(createChapterReviewWorkflow({ db, provider }));
 
   const runner = new WorkerRunner(db, new WorkflowKernel(registry), {
     provider,

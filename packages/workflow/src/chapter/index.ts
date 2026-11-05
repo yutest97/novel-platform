@@ -121,6 +121,7 @@ export {
 } from './service.js';
 export {
   CHAPTER_DRAFT_TASK_TYPE,
+  CHAPTER_REVIEW_TASK_TYPE,
   MAX_CONTEXT_ENTITIES_PER_TYPE,
   MAX_CONTRACT_TARGET_WORDS,
   MAX_DRAFT_CHARS,
@@ -146,3 +147,31 @@ export type {
   ValidatedDraft,
 } from './types.js';
 export { createChapterDraftWorkflow, type ChapterDraftWorkflowOptions } from './workflow.js';
+export {
+  buildChapterReviewContext,
+  getReviewRunByTaskId,
+  markReviewRunFailed,
+  parseChapterReviewTaskInput,
+  persistReviewResult,
+  prepareReviewRun,
+  type ChapterReviewContext,
+  type ChapterReviewRunRow,
+  type ChapterReviewTaskInput,
+  type ReviewTaskFence,
+} from './review.js';
+export {
+  createChapterReviewWorkflow,
+  type ChapterReviewWorkflowOptions,
+} from './review-workflow.js';
+export {
+  ensureReviewTask,
+  reviewTaskRequestId,
+  type ReviewTaskSpec,
+  type TaskFenceScope,
+} from './persistence.js';
+export {
+  loadSafeEntityGroups,
+  toSafeEntityRefs,
+  type SafeEntityRef,
+  type SafeEntityRow,
+} from './safe-entities.js';

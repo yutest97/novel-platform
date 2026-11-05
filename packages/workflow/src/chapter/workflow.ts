@@ -32,8 +32,10 @@ import {
   loadExistingContract,
   markChapterDrafting,
   persistChapterCandidate,
+  type ReviewTaskSpec,
   type TaskFence,
 } from './persistence.js';
+import { REVIEWER_CHAPTER_AGENT } from './reviewer.js';
 import {
   CHAPTER_DRAFT_TASK_TYPE,
   MAX_CONTRACT_TARGET_WORDS,
@@ -252,6 +254,12 @@ export function createChapterDraftWorkflow(
 ): WorkflowDefinition {
   const { db, provider } = options;
   const runner = new AgentRunner(provider);
+  // 审阅任务与正文任务使用同一套服务端 Provider 配置：
+  // model 由 `runner.resolveModel(reviewer.chapter)` 决定（Agent 未硬编码模型）。
+  const reviewTask: ReviewTaskSpec = {
+    provider: provider.name,
+    model: runner.resolveModel(REVIEWER_CHAPTER_AGENT),
+  };
 
   function assertChapterTask(context: WorkflowStepContext): string {
     const chapterId = context.task.chapterId;
@@ -396,7 +404,7 @@ export function createChapterDraftWorkflow(
           const contract = requireState<FrozenContract>(context, STATE_CONTRACT);
           const plan = requireState<PlannerOutput>(context, STATE_PLAN);
           const draft = requireState<ValidatedDraft>(context, STATE_DRAFT);
-          await persistChapterCandidate({ db, fence, contract, draft, plan });
+          await persistChapterCandidate({ db, fence, contract, draft, plan, review: reviewTask });
         },
       },
     ],
