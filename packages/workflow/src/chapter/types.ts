@@ -67,6 +67,28 @@ export function isChapterOpenForSave(status: string): boolean {
 /** 保存人工版本后的章节状态。 */
 export const SAVED_CHAPTER_STATUS = 'in_review';
 
+/** 定稿后的章节状态。 */
+export const FINALIZED_CHAPTER_STATUS = 'finalized';
+
+/**
+ * 允许**恢复历史版本**的章节状态（A1-4B-C-C）。
+ *
+ * 与生成 / 采纳同一组开放态：`finalized` 是关闭态 —— 定稿锁定了当前正文，
+ * 恢复历史版本会改写正文，必须先把章节重新打开（人工保存 revision 会回到
+ * `in_review`）。`abandoned` 同样关闭。
+ */
+export const RESTORE_CHAPTER_STATUSES = ['planned', 'outlined', 'drafting', 'in_review'] as const;
+
+/** 章节是否允许恢复历史版本（白名单，新增状态默认拒绝）。 */
+export function isChapterOpenForRestore(status: string): boolean {
+  return (RESTORE_CHAPTER_STATUSES as readonly string[]).includes(status);
+}
+
+/** 是否可以把章节从当前状态定稿（只有 `in_review` 是唯一入口）。 */
+export function isChapterFinalizable(status: string): boolean {
+  return status === SAVED_CHAPTER_STATUS;
+}
+
 /** 写作风格参数（由任务输入覆盖，缺省从作品方向推导）。 */
 export interface ChapterStyle {
   readonly tone: string;

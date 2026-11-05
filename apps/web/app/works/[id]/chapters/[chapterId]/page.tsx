@@ -1,10 +1,10 @@
 'use client';
 
 /**
- * 章节工作台（A1-4A / A1-4B-B / A1-4B-C-B）。
+ * 章节工作台（A1-4A / A1-4B-B / A1-4B-C）。
  *
  * 作者在这里完成：提交生成 → 查看进度/取消 → 预览候选 → 采纳 → 阅读正式正文
- * → 手工编辑 Markdown 并保存为新的 human 版本 → 对比版本差异 / 恢复历史版本。
+ * → 手工编辑 Markdown 并保存为新的 human 版本 → 对比版本差异 / 恢复历史版本 → 定稿。
  *
  * 边界：
  * - 只读正文用 `pre-wrap` 纯文本渲染，Markdown 编辑器是 textarea，
@@ -16,7 +16,9 @@
  *   有未保存修改时取消需二次确认，离开页面有 beforeunload 提示；
  * - 只允许编辑**最新**正式版本：旧版本只读，不能把旧版本 id 当作 baseVersionId；
  * - 版本对比只读、按需展开；历史版本恢复只新增版本，不修改 / 删除旧版本；
- * - 仍不提供定稿流程（A1-4B-C-C）。
+ * - 定稿只锁定当前最新正式版本；定稿后生成 / 采纳 / 恢复被拒绝，
+ *   人工保存 revision 会回到待定稿，需要重新定稿；
+ * - 仍不提供撤销定稿与版本删除。
  */
 
 import Link from 'next/link';
@@ -35,6 +37,7 @@ import {
   fetchChapterVersions,
   fetchGenerationTask,
   fetchWork,
+  finalizeChapter,
   formatDateTime,
   messageOf,
   restoreChapterVersion,
@@ -176,6 +179,10 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState<ApiError | null>(null);
+  // 章节定稿（A1-4B-C-C）
+  const [finalizeConfirmOpen, setFinalizeConfirmOpen] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState<ApiError | null>(null);
 
   const targetInitialized = useRef(false);
   const selectedVersionIdRef = useRef<string | null>(null);
@@ -189,8 +196,9 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
         const version = await fetchChapterVersion(workId, chapterId, versionId);
         setSelectedVersion(version);
         selectedVersionIdRef.current = version.id;
-        // 换版本后，上一条恢复错误不再对应当前选择。
+        // 换版本后，上一条恢复 / 定稿错误不再对应当前选择。
         setRestoreError(null);
+        setFinalizeError(null);
       } catch (caught) {
         if (handleSessionError(caught, router)) {
           return;
@@ -373,6 +381,68 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   /** 冲突后「载入最新版本」：刷新列表并选中最新（不覆盖任何历史版本）。 */
   const reloadLatestAfterRestoreConflict = useCallback(async (): Promise<void> => {
     setRestoreError(null);
+    await refreshDetailAndVersions({ selectLatest: true });
+  }, [refreshDetailAndVersions]);
+
+  /**
+   * 打开定稿确认。
+   *
+   * 只有 `in_review` + 选中**最新**版本时才允许：历史版本只提示、不弹窗。
+   */
+  const requestFinalize = useCallback((): void => {
+    const latest = versions[0];
+    if (
+      detail === null ||
+      detail.chapter.status !== 'in_review' ||
+      selectedVersion === null ||
+      latest === undefined ||
+      latest.id !== selectedVersion.id
+    ) {
+      return;
+    }
+    setFinalizeError(null);
+    setFinalizeConfirmOpen(true);
+  }, [detail, selectedVersion, versions]);
+
+  /**
+   * 确认定稿：锁定当前最新版本。
+   *
+   * - 成功：提示「章节已定稿，版本 N」、刷新章节与版本、保持选中最新；
+   * - 版本冲突：保留页面状态 + 「载入最新版本」；
+   * - 状态不允许：稳定提示并刷新章节状态（可能已被其它操作改变）。
+   */
+  const confirmFinalize = useCallback(async (): Promise<void> => {
+    const latest = versions[0];
+    if (latest === undefined) {
+      setFinalizeConfirmOpen(false);
+      return;
+    }
+    setFinalizing(true);
+    setFinalizeError(null);
+    try {
+      const result = await finalizeChapter(workId, chapterId, latest.id);
+      setFinalizeConfirmOpen(false);
+      setActionNotice(`章节已定稿，版本 ${result.versionNo}`);
+      await refreshDetailAndVersions({ selectLatest: true });
+    } catch (caught) {
+      setFinalizeConfirmOpen(false);
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      const apiError = caught instanceof ApiError ? caught : new ApiError('INTERNAL_ERROR', 500);
+      setFinalizeError(apiError);
+      if (apiError.code === 'CHAPTER_STATE_INVALID_FOR_FINALIZE') {
+        // 状态已被其它操作改变：把最新的章节状态拉回来，按钮按新状态显示。
+        await refreshDetailAndVersions();
+      }
+    } finally {
+      setFinalizing(false);
+    }
+  }, [workId, chapterId, versions, refreshDetailAndVersions]);
+
+  /** 定稿冲突后「载入最新版本」：刷新列表并选中最新（不覆盖任何版本）。 */
+  const reloadLatestAfterFinalizeConflict = useCallback(async (): Promise<void> => {
+    setFinalizeError(null);
     await refreshDetailAndVersions({ selectLatest: true });
   }, [refreshDetailAndVersions]);
 
@@ -1229,17 +1299,23 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
               </pre>
 
               {selectedCandidate.status === 'candidate' ? (
-                <button
-                  type="button"
-                  className="btn-primary"
-                  onClick={() => {
-                    setAdoptError('');
-                    setAdoptTargetId(selectedCandidate.id);
-                  }}
-                  data-testid="candidate-adopt"
-                >
-                  采纳为正式版本
-                </button>
+                generatable ? (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => {
+                      setAdoptError('');
+                      setAdoptTargetId(selectedCandidate.id);
+                    }}
+                    data-testid="candidate-adopt"
+                  >
+                    采纳为正式版本
+                  </button>
+                ) : (
+                  <p className="alert alert--error" data-testid="candidate-adopt-closed">
+                    章节已定稿或已废弃，不能采纳候选。
+                  </p>
+                )
               ) : null}
               {adoptError === '' ? null : (
                 <p className="alert alert--error" role="alert" data-testid="adopt-error">
@@ -1302,7 +1378,48 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
               </ul>
             )}
 
-            {versions.length > 0 && !canEditCurrentVersion && editor === null ? (
+            {detail !== null &&
+            detail.chapter.status === 'in_review' &&
+            selectedVersion !== null ? (
+              versions[0]?.id === selectedVersion.id ? (
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    className="btn-primary btn-small"
+                    onClick={requestFinalize}
+                    disabled={finalizing}
+                    data-testid="finalize-open"
+                  >
+                    {finalizing ? '定稿中…' : `定稿最新版本（版本 ${selectedVersion.versionNo}）`}
+                  </button>
+                </div>
+              ) : (
+                <p className="hint" data-testid="finalize-history-hint">
+                  定稿仅支持最新版本，请先选择最新版本。
+                </p>
+              )
+            ) : null}
+
+            {finalizeError === null ? null : (
+              <div className="alert alert--error" role="alert" data-testid="finalize-error">
+                <p>{finalizeError.message}</p>
+                {finalizeError.code === 'CHAPTER_VERSION_CONFLICT' ? (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small"
+                    onClick={() => void reloadLatestAfterFinalizeConflict()}
+                    data-testid="finalize-reload-latest"
+                  >
+                    载入最新版本
+                  </button>
+                ) : null}
+              </div>
+            )}
+
+            {versions.length > 0 &&
+            !canEditCurrentVersion &&
+            editor === null &&
+            detail?.chapter.status !== 'finalized' ? (
               <>
                 <p className="hint" data-testid="version-readonly-hint">
                   历史版本只读，请先选择最新版本再编辑。
@@ -1588,6 +1705,21 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
           onCancel={() => {
             if (!restoring) {
               setRestoreConfirmOpen(false);
+            }
+          }}
+        />
+      ) : null}
+
+      {finalizeConfirmOpen && selectedVersion !== null ? (
+        <ConfirmDialog
+          title="定稿章节"
+          message={`定稿版本 ${selectedVersion.versionNo} 会锁定当前正文；之后人工修订会重新进入待定稿。`}
+          confirmLabel={finalizing ? '定稿中…' : '确认定稿'}
+          busy={finalizing}
+          onConfirm={() => void confirmFinalize()}
+          onCancel={() => {
+            if (!finalizing) {
+              setFinalizeConfirmOpen(false);
             }
           }}
         />

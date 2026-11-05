@@ -1,8 +1,8 @@
 # 07 总路线（个人可用版优先）
 
-- 版本：v1.3
+- 版本：v1.4
 - 日期：2026-11-05
-- 当前基线：`49cc75a`（A1-4B-C-A 已验收）+ A1-4B-C-B（本地提交）
+- 当前基线：`4a41927`（A1-4B-C-B-REV-02 已验收）+ A1-4B-C-C（本地提交）
 - 状态：执行中
 
 ---
@@ -48,7 +48,7 @@
 | **A1-4B-B** | Markdown 人工编辑器与 human 版本保存 UI | 正式版本区编辑入口（首版 / 最新版本）、textarea 纯文本编辑、实时字数下限提示、dirty 状态、`Ctrl/Cmd+S` 保存、取消二次确认与 `beforeunload`、冲突后「载入最新版本」、旧版本只读、移动端可用；**无 diff / 恢复** | 已完成 + REV-01/02（本地提交） |
 | **A1-4B-C-A** | 章节版本 diff（服务 + 只读 API） | `GET /chapters/:chapterId/versions/diff?fromVersionId=&toVersionId=`、`diffChapterVersions`（归属校验 + 行级 LCS diff）、`equal/added/removed` + 双侧行号 + `stats`、换行归一化、`CHAPTER_DIFF_TOO_LARGE`（20 万字符 / 行数 / 编辑距离上限，超编辑距离退化为整段替换）、只读不写审计；**无 UI、无恢复、无迁移** | 已完成（本地提交） |
 | **A1-4B-C-B** | 版本对比 UI 与历史版本恢复 | 正式版本区按需展开的对比面板（双选择器、双列行号、added/removed 中文标签、空 diff / 超大 / 冲突提示、移动端不撑破）、`GET /versions/diff` 前端严格解析、`POST /versions/:versionId/restore`、新错误码 `CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`；**不含定稿流程** | **本轮完成** |
-| **A1-4B-C-C** | 章节定稿流程 | 定稿按钮与确认、定稿后只读、定稿状态流转 | 待开始 |
+| **A1-4B-C-C** | 章节定稿流程 | `POST /chapters/:chapterId/finalize`、`finalizeChapter`（作品锁 + 章节行锁、只锁当前最新版本、同版本幂等）、`in_review → finalized`、`CHAPTER_STATE_INVALID_FOR_FINALIZE`、审计 `chapter.finalized`；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到 `in_review`；**无撤销定稿、无 migration** | **本轮完成** |
 | **A2** | 连续性与事实（个人版） | 章节事实提取、人物/资源状态回写、跨章一致性提示 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
@@ -117,3 +117,4 @@
 | 2026-11-05 | A1-4B-C 拆分为 C-A（diff 服务 + 只读 API，本轮完成）与 C-B（diff UI / 历史恢复 / 定稿） |
 | 2026-11-05 | A1-4B-C-B：版本对比 UI（按需展开、双选择器、行级标签、移动端）与历史版本恢复（`CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`）；定稿流程独立为 C-C，仍未实现 |
 | 2026-11-05 | A1-4B-C-B-REV-01：diff 请求身份改为单调序号（选择器组合无法区分相同组合的旧请求），收起 / 切换 / 展开均使在途请求失效，旧请求不得写结果 / 错误 / loading |
+| 2026-11-05 | A1-4B-C-C：章节定稿（只锁当前最新版本、同版本幂等、审计 chapter.finalized）；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到待定稿；不新增 final_version_id / migration |

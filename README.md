@@ -1,13 +1,14 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-4B-C-B（版本对比 UI 与历史版本恢复）**。
+> 当前阶段：**A1-4B-C-C（章节定稿流程）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
 A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
 A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器、A1-4B-C-A 版本 diff API、
-A1-4B-C-B 版本对比 UI 与历史版本恢复（**定稿流程仍未实现**）。
+A1-4B-C-B 版本对比 UI 与历史版本恢复、A1-4B-C-C 章节定稿
+（**无撤销定稿 / 版本删除**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -878,9 +879,11 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **A1-4B-A** 再补 18 个（人工版本保存 API）；**A1-4B-B** 再补 13 个（编辑器纯逻辑）；
 **REV-01** 再补 5 个（离开保护 / 冲突重载确认）；**REV-02** 再补 4 个（哨兵生命周期）；
 **A1-4B-C-A** 再补 31 个（diff 纯函数 17、diff API 14）；
-**A1-4B-C-B** 再补 33 个（恢复服务 / API 18、diff 视图纯逻辑 15），
-全量单测 **789** 个（web 277 / workflow 197 / worker 63 / shared 15 / db 10 /
-auth 95 / works 132）；浏览器 E2E 合计 **107**（96 + 版本对比与恢复 7 + REV-01 并发隔离 4）。
+**A1-4B-C-B** 再补 33 个（恢复服务 / API 18、diff 视图纯逻辑 15）；
+**A1-4B-C-C** 再补 16 个（定稿服务 / API），
+全量单测 **805** 个（web 293 / workflow 197 / worker 63 / shared 15 / db 10 /
+auth 95 / works 132）；浏览器 E2E 合计 **113**（96 + 版本对比与恢复 7 +
+REV-01 并发隔离 4 + 定稿 6）。
 
 ### 人工章节版本保存（A1-4B-A）
 
@@ -1039,7 +1042,63 @@ versionNo / sourceVersionId / parentVersionId / wordCount`），不含正文；�
 - UI：二次确认明确「创建新版本、不删除历史」→ 成功提示「已从版本 N 恢复为版本 M」、
   关闭对比、刷新列表并选中最新；冲突保留页面状态并提供「载入最新版本」。
 
-**仍不提供**：定稿流程、版本删除 / 覆盖、diff 内局部编辑。
+**仍不提供**：版本删除 / 覆盖、diff 内局部编辑。
+
+### 章节定稿（A1-4B-C-C）
+
+章节有正式版本后才能定稿；定稿只**锁定当前最新版本**，不新增 `final_version_id`、
+不写 migration、不改版本表。
+
+```bash
+POST /api/works/:workId/chapters/:chapterId/finalize
+{ "versionId": "<当前最新正式版本 id>" }
+```
+
+```jsonc
+// 200（不含正文）
+{
+  "chapter": {
+    "chapterId": "…",
+    "status": "finalized",
+    "versionId": "…",
+    "versionNo": 5,
+    "deduplicated": false,
+  },
+}
+```
+
+**状态机**
+
+| 当前状态                                          | 结果                                          |
+| ------------------------------------------------- | --------------------------------------------- |
+| `planned` / `outlined` / `drafting` / `abandoned` | 409 `CHAPTER_STATE_INVALID_FOR_FINALIZE`      |
+| `in_review` + 最新版本                            | 200，章节 → `finalized`                       |
+| `finalized` + 同一最新版本                        | 200 `deduplicated=true`（幂等，不重复写审计） |
+| `finalized` + 不同版本                            | 409 `CHAPTER_STATE_INVALID_FOR_FINALIZE`      |
+| 没有任何正式版本                                  | 409 `CHAPTER_STATE_INVALID_FOR_FINALIZE`      |
+
+- `versionId` 是旧版本 → 409 `CHAPTER_VERSION_CONFLICT`；
+- `versionId` 必填且非空；未知字段 / null / 非法 UUID → 400；
+- 写接口校验 Origin；未登录 401、非作者（含管理员）403、他人作品 404；
+- 作品级 advisory lock + 章节行锁：并发定稿一个首次写入、一个幂等，审计最多一条；
+- 审计 `chapter.finalized` 只记 5 个字段（`workId / chapterId / versionId / versionNo /
+wordCount`），不含正文；审计失败整体回滚。
+
+**定稿后的写操作**：
+
+| 操作              | 定稿后                                             |
+| ----------------- | -------------------------------------------------- |
+| 生成候选          | 关闭（409 `CHAPTER_STATE_INVALID_FOR_GENERATION`） |
+| 采纳候选          | 关闭（409 `CHAPTER_STATE_INVALID_FOR_ADOPTION`）   |
+| 恢复历史版本      | 关闭（409 `CHAPTER_STATE_INVALID_FOR_SAVE`）       |
+| 人工保存 revision | **允许**：保存后回到 `in_review`，需要重新定稿     |
+
+**UI**：`in_review` 且选中最新版本 → 「定稿最新版本（版本 N）」；选中历史版本 →
+「定稿仅支持最新版本，请先选择最新版本」；其他状态不显示。二次确认后成功提示
+「章节已定稿，版本 N」，状态徽标「已完成」，生成 / 采纳 / 恢复入口关闭；
+冲突保留页面状态并提供「载入最新版本」。
+
+**仍不提供**：撤销定稿、版本删除 / 覆盖。
 
 ### 浏览器 E2E（Playwright Chromium）
 
@@ -1116,7 +1175,11 @@ dirty 时退出登录取消保持登录与草稿、确认才退出；后退并�
 确认后新增并保留历史、刷新后仍在）→ 替身注入冲突保留页面状态并可「载入最新版本」→
 390×844 移动端浏览 diff 并恢复、不撑破视口 →
 **REV-01**：用 route 精确控制请求顺序 —— 相同选择器的旧请求（失败 / 成功）不得覆盖新结果、
-不得提前关闭 loading；收起对比使在途请求失效；当前请求完成前 loading 持续存在。
+不得提前关闭 loading；收起对比使在途请求失效；当前请求完成前 loading 持续存在 →
+**A1-4B-C-C**：待定稿章节选中最新版本 → 定稿取消 / 确认 → 状态徽标「已完成」、
+生成与恢复入口关闭、刷新后仍在 → 历史版本不显示定稿入口 → 冲突替身保留页面状态并可
+「载入最新版本」→ 定稿后生成 / 恢复接口 409（绕过 UI 直调）→ 人工保存 revision 回到
+待定稿并可再次定稿 → 390×844 完成定稿且不撑破视口。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

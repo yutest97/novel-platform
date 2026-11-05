@@ -1742,3 +1742,211 @@ test('40. 当前请求完成前 loading 持续存在，完成后才关闭', asyn
     await page.unroute(DIFF_PATTERN);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* A1-4B-C-C：章节定稿                                                          */
+/* -------------------------------------------------------------------------- */
+
+/** 打开章节 1 并确保处于可交互状态（会话可能被前面的用例挤掉）。 */
+async function openChapterForFinalize(): Promise<void> {
+  await page.context().clearCookies();
+  await login(page, authorEmail, authorPassword);
+  await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(page.getByTestId('version-item').first()).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId('chapter-status')).toBeVisible();
+}
+
+test('41. 定稿：二次确认、取消保留状态、确认后锁定版本', async () => {
+  await openChapterForFinalize();
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  await expect(page.getByTestId('finalize-open')).toHaveText(/定稿最新版本（版本 \d+）/);
+
+  // 取消分支
+  await page.getByTestId('finalize-open').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('会锁定当前正文');
+  await expect(dialog).toContainText('人工修订会重新进入待定稿');
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+
+  // 确认分支
+  await page.getByTestId('finalize-open').click();
+  await page.getByRole('dialog').getByRole('button', { name: '确认定稿' }).click();
+  await expect(page.getByTestId('workbench-notice')).toContainText(/章节已定稿，版本 \d+/);
+  await expect(page.getByTestId('chapter-status')).toHaveText('已完成');
+  await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+  // 生成入口关闭
+  await expect(page.getByTestId('generate-submit')).toHaveCount(0);
+  await expect(page.getByTestId('chapter-closed-hint')).toContainText('不能继续生成候选');
+  await expectNoCredentials(page);
+});
+
+test('42. 刷新后仍为已完成；选择历史版本不显示定稿入口', async () => {
+  await page.reload();
+  await expect(page.getByTestId('chapter-status')).toHaveText('已完成');
+  await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+  await expect(page.getByTestId('generate-submit')).toHaveCount(0);
+
+  // 选中历史版本：已定稿状态下不出现任何定稿 UI
+  await page.getByTestId('version-item').last().click();
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText(/版本 \d+/);
+  await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+  await expect(page.getByTestId('finalize-history-hint')).toHaveCount(0);
+  // 定稿后也不能恢复历史版本
+  await expect(page.getByTestId('version-restore')).toHaveCount(0);
+});
+
+test('43. 定稿后人工保存 revision → 回到待定稿，可再次定稿', async () => {
+  // 选中最新版本并编辑保存
+  await page.getByTestId('version-item').first().click();
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  await textarea.fill(`${original}\n（定稿后修订）${'风穿过廊下。'.repeat(80)}`);
+  await page.getByTestId('editor-save').click();
+
+  await expect(page.getByTestId('workbench-notice')).toContainText(/已保存正式版本 \d+/);
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  await expect(page.getByTestId('finalize-open')).toHaveText(/定稿最新版本（版本 \d+）/);
+
+  // 再次定稿
+  await page.getByTestId('finalize-open').click();
+  await page.getByRole('dialog').getByRole('button', { name: '确认定稿' }).click();
+  await expect(page.getByTestId('chapter-status')).toHaveText('已完成');
+  await expect(page.getByTestId('workbench-notice')).toContainText(/章节已定稿，版本 \d+/);
+});
+
+test('44. 定稿冲突：保留页面状态并可「载入最新版本」', async () => {
+  // 先保存 revision 让章节回到 in_review
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  await textarea.fill(`${original}\n（冲突前的修订）`);
+  await page.getByTestId('editor-save').click();
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+
+  const pattern = '**/api/works/**/finalize';
+  await page.route(pattern, async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'CHAPTER_VERSION_CONFLICT', message: '章节版本发生冲突，请刷新后重试' },
+      }),
+    });
+  });
+
+  try {
+    await page.getByTestId('finalize-open').click();
+    await page.getByRole('dialog').getByRole('button', { name: '确认定稿' }).click();
+
+    await expect(page.getByTestId('finalize-error')).toContainText('章节版本发生冲突');
+    // 页面状态保留
+    await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+    await expect(page.getByTestId('finalize-open')).toBeVisible();
+    await expect(page.getByTestId('finalize-reload-latest')).toBeVisible();
+  } finally {
+    await page.unroute(pattern);
+  }
+
+  await page.getByTestId('finalize-reload-latest').click();
+  await expect(page.getByTestId('finalize-error')).toHaveCount(0);
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+});
+
+test('45. 定稿后写接口全部关闭（生成 / 恢复 409），UI 无定稿入口', async () => {
+  // 真正定稿
+  await page.getByTestId('finalize-open').click();
+  await page.getByRole('dialog').getByRole('button', { name: '确认定稿' }).click();
+  await expect(page.getByTestId('chapter-status')).toHaveText('已完成');
+
+  // UI：生成区提示、无生成按钮；恢复按钮消失
+  await expect(page.getByTestId('generate-submit')).toHaveCount(0);
+  await expect(page.getByTestId('chapter-closed-hint')).toBeVisible();
+  await page.getByTestId('version-item').last().click();
+  await expect(page.getByTestId('version-restore')).toHaveCount(0);
+
+  // 后端：绕过 UI 直接调用生成 / 恢复也被拒绝
+  const generateResponse = await page.request.post(
+    `/api/works/${workId}/chapters/${chapter1Id}/generate`,
+    {
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      data: { requestId: `finalize-e2e-${Date.now()}`, targetWords: 3000 },
+    },
+  );
+  expect(generateResponse.status()).toBe(409);
+  const generateBody = (await generateResponse.json()) as { error?: { code?: string } };
+  expect(generateBody.error?.code).toBe('CHAPTER_STATE_INVALID_FOR_GENERATION');
+
+  // 恢复接口：用当前最新版本作为 base，来源用最旧版本
+  const versionsResponse = await page.request.get(
+    `/api/works/${workId}/chapters/${chapter1Id}/versions`,
+    { headers: { origin: ORIGIN } },
+  );
+  const versionsBody = (await versionsResponse.json()) as {
+    versions: { id: string; versionNo: number }[];
+  };
+  const newest = versionsBody.versions[0];
+  const oldest = versionsBody.versions[versionsBody.versions.length - 1];
+  expect(newest).toBeDefined();
+  expect(oldest).toBeDefined();
+  const restoreResponse = await page.request.post(
+    `/api/works/${workId}/chapters/${chapter1Id}/versions/${oldest?.id ?? ''}/restore`,
+    {
+      headers: { origin: ORIGIN, 'content-type': 'application/json' },
+      data: { baseVersionId: newest?.id ?? '' },
+    },
+  );
+  expect(restoreResponse.status()).toBe(409);
+  const restoreBody = (await restoreResponse.json()) as { error?: { code?: string } };
+  expect(restoreBody.error?.code).toBe('CHAPTER_STATE_INVALID_FOR_SAVE');
+
+  // 审计记录里没有正文
+  const bodyText = await page.locator('body').innerText();
+  expect(bodyText).not.toContain('风穿过廊下');
+});
+
+test('46. 390×844 移动端完成定稿并保持无横向溢出', async ({ browser }) => {
+  const mobileContext = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  const mobile = await mobileContext.newPage();
+  await login(mobile, authorEmail, authorPassword);
+  await mobile.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(mobile.getByTestId('version-item').first()).toBeVisible({ timeout: 20_000 });
+
+  // 定稿后需要先保存 revision 才能再次定稿
+  if ((await mobile.getByTestId('finalize-open').count()) === 0) {
+    await mobile.getByTestId('editor-open').click();
+    const textarea = mobile.getByTestId('editor-textarea');
+    const original = await textarea.inputValue();
+    await textarea.fill(`${original}\n（移动端定稿前修订）`);
+    await mobile.getByTestId('editor-save').click();
+    await expect(mobile.getByTestId('chapter-status')).toHaveText('待定稿');
+  }
+
+  await expect(mobile.getByTestId('finalize-open')).toBeVisible();
+  await mobile.getByTestId('finalize-open').click();
+  await mobile.getByRole('dialog').getByRole('button', { name: '确认定稿' }).click();
+  await expect(mobile.getByTestId('chapter-status')).toHaveText('已完成');
+
+  const metrics = await mobile.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+
+  const cookies = await mobileContext.cookies();
+  const body = await mobile.locator('body').innerText();
+  for (const value of cookies.map((cookie) => cookie.value).filter((v) => v.length > 0)) {
+    expect(body).not.toContain(value);
+  }
+  expect(body).not.toContain('Bearer ');
+  expect(body).not.toContain(ADMIN_EMAIL);
+  await expectNoCredentials(mobile);
+
+  await mobileContext.close();
+});

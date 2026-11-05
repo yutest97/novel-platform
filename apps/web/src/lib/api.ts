@@ -61,6 +61,8 @@ export type ApiErrorCode =
   | 'CHAPTER_DIFF_TOO_LARGE'
   // 历史版本恢复（A1-4B-C-B）：目标版本已是当前最新
   | 'CHAPTER_VERSION_ALREADY_LATEST'
+  // 章节定稿（A1-4B-C-C）：状态不允许定稿
+  | 'CHAPTER_STATE_INVALID_FOR_FINALIZE'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -99,6 +101,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CHAPTER_STATE_INVALID_FOR_SAVE: '章节当前状态不允许保存人工版本',
   CHAPTER_DIFF_TOO_LARGE: '章节正文规模超出对比上限',
   CHAPTER_VERSION_ALREADY_LATEST: '该版本已是最新版本，无需恢复',
+  CHAPTER_STATE_INVALID_FOR_FINALIZE: '章节当前状态不允许定稿',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -1012,4 +1015,39 @@ export async function restoreChapterVersion(
     { method: 'POST', body: { baseVersionId: input.baseVersionId } },
   );
   return (body as { version: RestoredChapterVersionSummary }).version;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 章节定稿（A1-4B-C-C）                                                        */
+/* -------------------------------------------------------------------------- */
+
+/** 定稿结果（**不含正文**）。 */
+export interface FinalizedChapterSummary {
+  readonly chapterId: string;
+  readonly status: 'finalized';
+  readonly versionId: string;
+  readonly versionNo: number;
+  /** `true` 表示幂等重试：章节早已定稿在同一版本，没有新增审计。 */
+  readonly deduplicated: boolean;
+}
+
+/**
+ * 把章节定稿到**当前最新正式版本**。
+ *
+ * - `versionId` 必须是当前最大版本 id：否则 409 `CHAPTER_VERSION_CONFLICT`；
+ * - 章节状态不是 `in_review` / 没有正式版本 / 已定稿但版本不同 →
+ *   409 `CHAPTER_STATE_INVALID_FOR_FINALIZE`；
+ * - 已定稿且同一版本 → 200 且 `deduplicated=true`（幂等，不重复写审计）；
+ * - 定稿后人工保存 revision 会回到 `in_review`，需要重新定稿。
+ */
+export async function finalizeChapter(
+  workId: string,
+  chapterId: string,
+  versionId: string,
+): Promise<FinalizedChapterSummary> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}/finalize`,
+    { method: 'POST', body: { versionId } },
+  );
+  return (body as { chapter: FinalizedChapterSummary }).chapter;
 }

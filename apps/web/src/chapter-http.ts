@@ -110,6 +110,26 @@ export function requireRestoreBaseVersionId(body: Record<string, unknown>): stri
   return value;
 }
 
+/** 章节定稿的允许字段（A1-4B-C-C）：只有目标版本。 */
+export const FINALIZE_FIELDS = ['versionId'] as const;
+
+/**
+ * 读取定稿请求的 `versionId`：必须显式出现且为非空字符串。
+ *
+ * 定稿只能锁定"当前最新正式版本"，`null` 没有语义；漏传 / null / 空串 /
+ * 非字符串一律 400，不做隐式兜底。
+ */
+export function requireFinalizeVersionId(body: Record<string, unknown>): string {
+  if (!Object.prototype.hasOwnProperty.call(body, 'versionId')) {
+    throw new AuthError('VALIDATION_FAILED', '缺少字段 versionId');
+  }
+  const value = body['versionId'];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new AuthError('VALIDATION_FAILED', 'versionId 必须是版本 id');
+  }
+  return value;
+}
+
 /** 版本 diff 的允许 query 参数：每个都必须且只能出现一次。 */
 export const DIFF_QUERY_PARAMS = ['fromVersionId', 'toVersionId'] as const;
 

@@ -41,6 +41,7 @@ import {
   MAX_DRAFT_CHARS,
   MIN_DRAFT_WORDS,
   SAVED_CHAPTER_STATUS,
+  isChapterOpenForRestore,
   isChapterOpenForSave,
 } from './types.js';
 
@@ -115,7 +116,7 @@ export function normalizeHumanContent(raw: unknown): NormalizedContent {
  *
  * 与采纳（adoption.ts）同一手法：跨作品 / 跨章节一律 404，不泄露存在性。
  */
-async function lockChapter(
+export async function lockChapter(
   tx: Prisma.TransactionClient,
   workId: string,
   chapterId: string,
@@ -140,7 +141,7 @@ async function lockChapter(
  * - 死锁 / 序列化失败 → `CONCURRENT_MODIFICATION`（409，可重试）；
  * - 业务错误原样抛出。
  */
-function translateSaveError(error: unknown): unknown {
+export function translateChapterWriteError(error: unknown): unknown {
   if (error instanceof AuthError) {
     return error;
   }
@@ -273,7 +274,7 @@ export async function saveHumanChapterVersion(
       };
     });
   } catch (error) {
-    throw translateSaveError(error);
+    throw translateChapterWriteError(error);
   }
 }
 
@@ -338,8 +339,11 @@ export async function restoreChapterVersion(
       await requireOwnedWork(tx, workId, input.authorId);
 
       const chapter = await lockChapter(tx, workId, chapterId);
-      if (!isChapterOpenForSave(chapter.status)) {
-        throw new AuthError('CHAPTER_STATE_INVALID_FOR_SAVE', '章节已废弃，不能恢复历史版本');
+      if (!isChapterOpenForRestore(chapter.status)) {
+        throw new AuthError(
+          'CHAPTER_STATE_INVALID_FOR_SAVE',
+          '章节已定稿或已废弃，不能恢复历史版本',
+        );
       }
 
       // 历史版本必须同时属于该作品与章节：跨作品 / 跨章节 / 不存在统一 404。
@@ -413,6 +417,6 @@ export async function restoreChapterVersion(
       };
     });
   } catch (error) {
-    throw translateSaveError(error);
+    throw translateChapterWriteError(error);
   }
 }

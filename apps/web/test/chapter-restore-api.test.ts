@@ -308,14 +308,16 @@ describe('恢复语义', () => {
     expect(restored.json.version?.restoredFromVersionId).toBe(v1);
   });
 
-  it('恢复后章节状态进入 in_review（finalized 也会被拉回）', async () => {
+  it('定稿后恢复 → 409，章节仍为 finalized（A1-4B-C-C 关闭恢复入口）', async () => {
     const fixture = await createFixture();
     const { v1, v2 } = await seedTwoVersions(fixture);
     await db.chapter.update({ where: { id: fixture.chapterId }, data: { status: 'finalized' } });
 
     const restored = await restore(fixture, v1, { baseVersionId: v2 });
-    expect(restored.status).toBe(201);
-    expect(await chapterStatus(fixture.chapterId)).toBe('in_review');
+    expect(restored.status).toBe(409);
+    expect(restored.json.error?.code).toBe('CHAPTER_STATE_INVALID_FOR_SAVE');
+    expect(await chapterStatus(fixture.chapterId)).toBe('finalized');
+    expect(await versionRows(fixture.chapterId)).toHaveLength(2);
   });
 });
 

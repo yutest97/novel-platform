@@ -709,3 +709,21 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-137 | 无残留任务 | `afterAll` 删除本 spec 用 `lockedBy='e2e-seed'` 种入的 `queued` / `processing` 任务；测试结束后 `generation_tasks` 只剩终态 | 同上；验收时直连数据库断言 |
 | AT-WF-138 | 全量 E2E | 从**全新数据库**（重建 → 10 迁移 → 初始管理员）一次运行全部 spec：**107 passed / 0 failed / 0 skipped / 0 did not run** | `npx playwright test` |
 | AT-WF-139 | 夹具灵敏度 | 临时改为"延迟注册"（`setTimeout` 500ms 后再 `route`）：用例 37 在 `waitFor(1)` 的 poll 断言处失败（`entries` 为空），证明"未等待注册"的竞态真实存在；恢复后 107 全通过 | 同上（临时改动后已还原） |
+
+## 26. 章节定稿验收（A1-4B-C-C）
+
+> 对应 `docs/07-master-roadmap.md` A1-4B-C-C、`docs/08` 第 20 节、`README`「章节定稿」。
+> 不新增 `final_version_id`、不新增 migration、不改 `chapter_versions` 触发器；
+> 不提供撤销定稿与版本删除。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-140 | 定稿语义 | `in_review` + 当前最新版本 → 200，章节 `status=finalized`；审计 `chapter.finalized` 的 detail **恰为** `workId / chapterId / versionId / versionNo / wordCount` 5 个字段，不含正文 | `test/chapter-finalize-api.test.ts` |
+| AT-WF-141 | 幂等 | 对已定稿章节重复提交**同一最新版本** → 200 `deduplicated=true`，不新增审计、不改状态 | 同上 |
+| AT-WF-142 | 状态规则 | 旧版本 → 409 `CHAPTER_VERSION_CONFLICT`；无正式版本 / `planned` / `outlined` / `drafting` / `abandoned` / 已定稿但版本不同 → 409 `CHAPTER_STATE_INVALID_FOR_FINALIZE`；每种情况都不写审计、不改状态 | 同上 |
+| AT-WF-143 | 定稿后写操作 | 生成候选 → 409 `CHAPTER_STATE_INVALID_FOR_GENERATION` 且不建任务；恢复历史版本 → 409 `CHAPTER_STATE_INVALID_FOR_SAVE` 且不新增版本；采纳候选 → 409 `CHAPTER_STATE_INVALID_FOR_ADOPTION`（既有 `chapter-adoption.test.ts`）；人工保存 revision → 201、回到 `in_review`、可再次定稿 | `test/chapter-finalize-api.test.ts`、`packages/workflow/test/chapter-adoption.test.ts` |
+| AT-WF-144 | 并发与回滚 | 两次并发定稿同一版本 → 两个 200（一个 `deduplicated=false`、一个 `true`），审计最多一条；审计写入失败 → 500 且章节仍 `in_review`，之后可正常定稿 | `test/chapter-finalize-api.test.ts` |
+| AT-WF-145 | API 契约 | `POST /chapters/:chapterId/finalize` 严格白名单 `{ versionId }`；缺字段 / null / 空串 / 非字符串 / 未知字段 / 非法 UUID → 400；缺 Origin 403；未登录 401；管理员 403；他人作品 404；跨章节 / 跨作品 / 随机版本 → 稳定冲突；响应不含正文 | 同上 |
+| AT-WF-146 | 定稿 UI | `in_review` 且选中最新版本时显示「定稿最新版本（版本 N）」；选中历史版本显示「定稿仅支持最新版本，请先选择最新版本」；其他状态不显示；二次确认文案明确「锁定当前正文；之后人工修订会重新进入待定稿」；提交中禁用；成功后提示「章节已定稿，版本 N」、刷新并保持最新、状态徽标「已完成」、生成 / 采纳 / 恢复入口关闭；冲突保留状态 + 「载入最新版本」；状态不允许显示稳定文案并刷新章节 | `e2e/chapter-workbench.spec.ts` 用例 41–46 |
+| AT-WF-147 | 定稿 E2E | 取消 / 确认两条分支；刷新后仍「已完成」；历史版本不显示定稿；冲突替身；定稿后生成 / 恢复接口 409；人工保存 revision 后回到待定稿并再次定稿；390×844 完成定稿且无横向溢出 | 同上 |
+| AT-WF-148 | 测试数 | 全量单测 **805**（789 + 定稿服务/API 16）；浏览器 E2E **113**（107 + 定稿 6） | 全量 `pnpm test`、`playwright test` |

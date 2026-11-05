@@ -31,6 +31,7 @@ export {
   type AdoptedChapterVersion,
   type AdoptionMeta,
 } from './adoption.js';
+export { finalizeChapter, type FinalizeChapterInput, type FinalizedChapter } from './finalize.js';
 export {
   normalizeHumanContent,
   restoreChapterVersion,
@@ -69,8 +70,12 @@ export {
   MAX_DRAFT_CHARS,
   MIN_CONTRACT_TARGET_WORDS,
   MIN_DRAFT_WORDS,
+  FINALIZED_CHAPTER_STATUS,
+  RESTORE_CHAPTER_STATUSES,
   SAVED_CHAPTER_STATUS,
   SAVE_CHAPTER_STATUSES,
+  isChapterFinalizable,
+  isChapterOpenForRestore,
   isChapterOpenForSave,
 } from './types.js';
 export type {

@@ -1136,3 +1136,114 @@ runWorkWrite（作品级 advisory lock）
 
 定稿流程（章节定稿按钮、定稿后只读）、diff 内局部编辑、版本删除 / 覆盖、
 AI 候选采纳逻辑改动、`chapter_versions` 表结构变更、第三方 diff 依赖。
+
+## 20. A1-4B-C-C：章节定稿
+
+> 定稿 = 把章节锁定在**当前最新正式版本**上。不新增 `final_version_id`、
+> 不新增 migration、不改 `chapter_versions` 触发器；旧版本继续 append-only。
+
+### 20.1 状态机
+
+```
+planned / outlined / drafting ──✗──> finalized   （409 STATE_INVALID_FOR_FINALIZE）
+abandoned ─────────────────────✗──> finalized   （409 STATE_INVALID_FOR_FINALIZE）
+in_review ─────────────────────✓──> finalized   （唯一入口）
+finalized + 同一最新版本 ──────✓──> finalized   （幂等，200 deduplicated=true）
+finalized + 不同版本 ──────────✗──> finalized   （409 STATE_INVALID_FOR_FINALIZE）
+finalized ──人工保存 revision──> in_review      （可重新定稿）
+```
+
+白名单：`isChapterFinalizable(status)` 只接受 `in_review`；未知状态默认拒绝。
+
+### 20.2 事务顺序（`finalizeChapter`）
+
+```
+runWorkWrite（作品级 advisory lock）
+  → requireOwnedWork
+  → SELECT chapter FOR UPDATE
+  → 读当前最大版本 latest
+  → 已 finalized：latest 存在且 versionId === latest.id → 幂等返回（不写审计）
+                  否则 → 409 STATE_INVALID_FOR_FINALIZE
+  → 非 in_review 或 latest === null → 409 STATE_INVALID_FOR_FINALIZE
+  → versionId !== latest.id → 409 CHAPTER_VERSION_CONFLICT
+  → UPDATE chapters SET status='finalized'（带 status 条件，防并发覆盖）
+  → 审计 chapter.finalized
+  → 任一步失败整体回滚
+```
+
+并发：与保存 / 恢复 / 采纳共用同一把作品锁与章节行锁，因此两个并发定稿串行化：
+一个首次写入（`deduplicated=false`），一个幂等（`deduplicated=true`），审计最多一条。
+
+### 20.3 定稿后的写操作边界
+
+| 写操作 | 定稿后 | 错误码 |
+| --- | --- | --- |
+| 生成候选 `startChapterDraft` | 拒绝 | 409 `CHAPTER_STATE_INVALID_FOR_GENERATION` |
+| 采纳候选 `adoptChapterCandidate` | 拒绝（未采纳候选） | 409 `CHAPTER_STATE_INVALID_FOR_ADOPTION` |
+| 恢复历史版本 `restoreChapterVersion` | 拒绝 | 409 `CHAPTER_STATE_INVALID_FOR_SAVE` |
+| 人工保存 revision `saveHumanChapterVersion` | **允许** | —（保存后回到 `in_review`） |
+
+- 生成 / 采纳沿用既有 `GENERATION_CHAPTER_STATUSES` 白名单（不含 `finalized`）；
+- 恢复改用新的 `RESTORE_CHAPTER_STATUSES`（同样不含 `finalized`），
+  与"保存仍允许"区分开：定稿后可以人工改稿，但不能用旧版本覆盖当前正文；
+- 已采纳候选的重复采纳仍走幂等分支（不产生新版本），不视为绕过。
+
+### 20.4 API
+
+| 方法 | 路径 | 成功 |
+| --- | --- | --- |
+| POST | `/api/works/:workId/chapters/:chapterId/finalize` | 200 `{ chapter }` |
+
+请求体严格白名单：只有 `versionId`（string，非空；不允许 null）。
+
+```jsonc
+// 请求
+{ "versionId": "<当前最新正式版本 id>" }
+// 响应 200（**不含正文**）
+{
+  "chapter": {
+    "chapterId": "…",
+    "status": "finalized",
+    "versionId": "…",
+    "versionNo": 5,
+    "deduplicated": false
+  }
+}
+```
+
+- 写接口校验 Origin；未登录 401、非作者（含管理员）403、他人作品 404；
+- 跨章节 / 跨作品 / 随机版本 id → 409 `CHAPTER_VERSION_CONFLICT`（不泄露存在性）；
+- 未知字段 / 缺 `versionId` / null / 空串 / 非字符串 / 非法 UUID → 400；
+- 响应不含正文、作者 id、数据库错误。
+
+### 20.5 审计
+
+`chapter.finalized`，detail **只有 5 个字段**：
+`workId / chapterId / versionId / versionNo / wordCount`。
+不含正文；幂等重试不写审计；审计失败 → 章节状态整体回滚。
+
+### 20.6 错误码
+
+| 错误码 | HTTP | 触发 |
+| --- | --- | --- |
+| `CHAPTER_STATE_INVALID_FOR_FINALIZE` | 409 | 无正式版本；状态不是 `in_review`；已定稿但版本不是当前最新 |
+| `CHAPTER_VERSION_CONFLICT` | 409 | `versionId` 不是当前最新版本（in_review 分支）/ 唯一约束冲突 |
+| `VALIDATION_FAILED` | 400 | 缺 / null / 非法 `versionId`、未知字段、非法 UUID |
+| `NOT_FOUND` | 404 | 作品 / 章节不属于当前作者 |
+| `CONCURRENT_MODIFICATION` | 409 | 死锁 / 序列化失败 / 状态被并发修改 |
+| `UNAUTHORIZED` / `FORBIDDEN` | 401 / 403 | 未登录 / 非作者 |
+
+### 20.7 UI
+
+- `in_review` 且选中**最新**版本 → 「定稿最新版本（版本 N）」；
+- `in_review` 且选中历史版本 → 「定稿仅支持最新版本，请先选择最新版本」；
+- 其他状态不显示任何定稿入口；
+- 二次确认：「定稿版本 N 会锁定当前正文；之后人工修订会重新进入待定稿。」；
+- 成功：提示「章节已定稿，版本 N」、刷新并保持选中最新、状态徽标「已完成」，
+  生成 / 采纳 / 恢复入口按状态关闭；
+- 冲突：保留页面状态 + 「载入最新版本」；状态不允许：稳定文案 + 刷新章节状态。
+
+### 20.8 未做
+
+撤销定稿按钮、版本删除 / 覆盖、`final_version_id`、migration、
+定稿后禁止 diff（diff 仍只读可用）。
