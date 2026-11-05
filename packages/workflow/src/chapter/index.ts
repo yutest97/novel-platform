@@ -89,6 +89,20 @@ export {
   type ChapterFactView,
 } from './fact-read.js';
 export {
+  REVIEW_RUN_STATUSES,
+  REVIEW_TASK_STATUSES,
+  REVIEW_TASK_STEPS,
+  getChapterReviewForAuthor,
+  type ChapterReviewIssueView,
+  type ChapterReviewRunView,
+  type ChapterReviewTaskView,
+  type ChapterReviewView,
+  type GetChapterReviewInput,
+  type ReviewRunStatus,
+  type ReviewTaskStatus,
+  type ReviewTaskStep,
+} from './review-read.js';
+export {
   MAX_SUMMARY_CHARS,
   MAX_SUMMARY_CHAPTER_TEXT_CHARS,
   MAX_SUMMARY_NO,

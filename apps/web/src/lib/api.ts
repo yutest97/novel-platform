@@ -12,6 +12,11 @@ import {
   parseChapterVersionDiff,
   type ChapterVersionDiff,
 } from './chapter-diff-view';
+import {
+  ReviewPayloadError,
+  parseChapterReview,
+  type ChapterReviewView,
+} from './chapter-review-view';
 
 export type {
   ChapterDiffLine,
@@ -20,6 +25,15 @@ export type {
   ChapterDiffVersionRef,
   ChapterVersionDiff,
 } from './chapter-diff-view';
+export type {
+  ChapterReviewIssueView,
+  ChapterReviewRunView,
+  ChapterReviewTaskView,
+  ChapterReviewView,
+  ReviewRunStatus,
+  ReviewTaskStatus,
+  ReviewTaskStep,
+} from './chapter-review-view';
 
 /** 后端稳定错误码。 */
 export type ApiErrorCode =
@@ -70,6 +84,8 @@ export type ApiErrorCode =
   | 'CONTINUITY_EXTRACTION_LEASE_LOST'
   | 'CONTINUITY_FACTS_INVALID'
   | 'CONTINUITY_EXTRACTION_FAILED'
+  // 审阅结果（A2-C-D）：没有审阅任务 / 不属于该作品章节候选
+  | 'REVIEW_NOT_FOUND'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -115,6 +131,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CONTINUITY_EXTRACTION_LEASE_LOST: '该连续性提取任务已由新的尝试接管',
   CONTINUITY_FACTS_INVALID: '模型输出的连续性事实不合法',
   CONTINUITY_EXTRACTION_FAILED: '连续性事实提取失败，请稍后重试',
+  REVIEW_NOT_FOUND: '该候选还没有审阅结果',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -1195,4 +1212,36 @@ export async function fetchChapterFactRun(
     )}/fact-runs/${encodeURIComponent(runId)}`,
   );
   return (body as { run: ChapterFactRunView }).run;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reviewer 结果只读（A2-C-D）                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 读取候选对应的审阅任务状态、run 与 issues（只读，不触发审阅）。
+ *
+ * - 候选不属于该作品 / 该章节、或没有审阅任务 → 404 `REVIEW_NOT_FOUND`；
+ * - 任务已入队但 run 尚未创建 → `run === null`（可轮询）；
+ * - 响应严格解析：形状不符或结论不自洽时抛 `INTERNAL_ERROR`，不展示半截数据；
+ * - 不返回正文全文、prompt、provider / model、租约或内部任务字段。
+ */
+export async function fetchChapterReview(
+  workId: string,
+  chapterId: string,
+  candidateId: string,
+): Promise<ChapterReviewView> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/candidates/${encodeURIComponent(candidateId)}/review`,
+  );
+  try {
+    return parseChapterReview(body);
+  } catch (error) {
+    if (error instanceof ReviewPayloadError) {
+      throw new ApiError('INTERNAL_ERROR', 500);
+    }
+    throw error;
+  }
 }

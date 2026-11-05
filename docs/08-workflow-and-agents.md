@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v2.0
+- 版本：v2.1
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -1938,3 +1938,101 @@ high severity 采纳门禁、自动重写、RAG / embedding / 图谱。
 
 摘要读取 API / UI、事实 UI、RAG / embedding / 图谱、摘要回写正文、
 high severity 采纳门禁。
+
+## 28. A2-C-D：Reviewer 结果只读 API
+
+> 让作者能读到候选对应的 `chapter.review` 任务状态、review run 与 issues。
+> **只读**：不触发审阅、不重试、不采纳、不写审计，也不修改 task / run / issue。
+> 本轮**不做** UI、手动重检、采纳门禁、摘要读取接口。
+
+### 28.1 接口
+
+```text
+GET /api/works/:workId/chapters/:chapterId/candidates/:candidateId/review
+```
+
+```json
+{
+  "review": {
+    "candidateId": "uuid",
+    "task": {
+      "id": "uuid",
+      "status": "queued | processing | succeeded | failed | cancelled",
+      "currentStep": "load_review_input | run_reviewer | persist_review_result | null",
+      "attemptCount": 1,
+      "errorCode": "STABLE_CODE | null"
+    },
+    "run": {
+      "id": "uuid",
+      "status": "running | succeeded | failed",
+      "passed": true,
+      "issueCount": 1,
+      "errorCode": null,
+      "agentName": "reviewer.chapter",
+      "agentVersion": "1.0.0",
+      "startedAt": "ISO-8601",
+      "finishedAt": "ISO-8601",
+      "issues": [
+        {
+          "id": "uuid",
+          "ordinal": 0,
+          "severity": "high",
+          "type": "setting_contradiction",
+          "evidence": "正文原句",
+          "suggestion": "修改建议"
+        }
+      ]
+    }
+  }
+}
+```
+
+- `run = null`：任务已入队但审阅尚未开始，前端可安全轮询；
+- `run.status = running`：`passed = null`、`issues = []`、`finishedAt = null`；
+- `run.status = failed`：`passed = null`、`issues = []`，`errorCode` 为稳定码
+  （含 `MODEL_*` / `AGENT_*` / `TASK_*` / `TASK_CANCELLED`）；
+- `issues` 按 `ordinal` 升序，最多 20 条（与 `reviewer.chapter` 输出上限一致）；
+- 响应头 `Cache-Control: no-store`（沿用 `authJson`）。
+
+### 28.2 查询、一致性与 404 语义
+
+实现：`packages/workflow/src/chapter/review-read.ts` 的 `getChapterReviewForAuthor`。
+
+1. `requireOwnedWork`（会话里的作者 id）→ 他人作品 404 `NOT_FOUND`；
+2. `requireChapterInWork` → 章节不属于作品 404 `NOT_FOUND`；
+3. **同一 RepeatableRead 事务**内读候选、任务、run、issues，避免
+   "task 已 succeeded、run 还是上一 attempt 的 running" 这类跨快照组合；
+4. 候选与任务定位：
+   - 候选必须 `(id, work_id, chapter_id)` 全匹配；
+   - 任务必须 `work_id + chapter_id + task_type='chapter.review' + requestId='review:<candidateId>'`；
+   - 任务快照里的 `candidateId` 必须与路径一致（作者可提交任意 `requestId`，
+     只按 requestId 认领会把 `chapter.draft` 任务当成审阅任务）；
+   - run 必须 `candidate_id + generation_task_id + work_id + chapter_id` 全匹配。
+5. 任一不满足 → 统一 404 `REVIEW_NOT_FOUND`，不区分"不存在"与"不是你的"。
+
+### 28.3 字段边界
+
+- 只回显：任务 id / 状态 / 步骤 / 次数 / 稳定错误码；run 状态 / 结论 / 计数 /
+  Agent 身份 / 起止时间 / 问题列表；
+- **不返回**：正文全文、prompt、模型原始响应、`provider` / `model`、
+  `inputSnapshot` / `inputHash` / `requestId`、`lockedBy` / `leaseUntil`、
+  `attemptToken`；
+- `currentStep` 只回显本章工作流的三步之一，未知值收敛为 `null`；
+- `errorCode` 走白名单（`STABLE_REVIEW_ERROR_CODES`），历史 / 内部值收敛为 `null`；
+- `evidence` 是问题证据本身，按已落库内容原样返回；不是正文副本。
+
+### 28.4 前端
+
+`apps/web/src/lib/chapter-review-view.ts` + `fetchChapterReview()`：
+
+- 严格解析：字段缺失、状态未知、`passed` 与 `status` 不自洽、
+  `issueCount ≠ issues.length`、ordinal 非升序、时间戳不可解析 → 整份拒绝；
+- 解析失败收敛为 `ApiError('INTERNAL_ERROR')`，不展示半截审阅结果；
+- 404 保留 `REVIEW_NOT_FOUND`，文案"该候选还没有审阅结果"；
+- **只读接口不做 Origin 校验**（与章节 / 候选 / 事实的只读 GET 一致）：
+  同源 `fetch` 不会带 Origin，要求 Origin 反而会让轮询失败。写接口仍强制 Origin。
+
+### 28.5 未做
+
+Reviewer UI（问题列表 / 严重度筛选 / 采纳前确认）、手动重检 / 重试 / 取消、
+high severity 采纳门禁、摘要读取 API / UI、事实 UI、migration、RAG / 图谱。

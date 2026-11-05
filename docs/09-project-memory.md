@@ -4,7 +4,7 @@
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
 - 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C 均本地完成，待复审**
+  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -182,7 +182,7 @@ Agent 产出候选
 | --- | --- | --- |
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
-| A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B 本地完成待复审 |
+| A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 结果只读 API 本地完成**（无 UI） |
 | A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）本地完成；**A2-D-C `priorSummaries` 接线本地完成待复审** |
 | A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
@@ -207,14 +207,14 @@ A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C 均已在本�
 - `docs/tasks/A2-D-B-summarizer-workflow.md`（工作流与落库）
 - `docs/tasks/A2-D-B-REV-01-finalize-resilience.md`（定稿不被摘要配置阻断）
 - `docs/tasks/A2-D-C-prior-summaries.md`（Reviewer 前章摘要接线）
+- `docs/tasks/A2-C-D-review-results-api.md`（Reviewer 结果只读 API）
 
-A2-D-B-REV-01 与 A2-D-C 的本地实现已通过代码复审；当前等待整体复审 / CI。
+A2-D-B-REV-01、A2-D-C、A2-C-D 的本地实现已通过代码复审；当前等待整体复审 / CI。
 
 复审通过前不推送。复审通过后的候选顺序：
 
-1. Reviewer 结果只读 API（卡已备：
-   `docs/tasks/A2-C-D-review-results-api.md`）：读取候选对应 task / run / issues，
-   只读、无 UI；
+1. Reviewer 结果**展示 UI**（读接口已就绪：
+   `GET /candidates/:candidateId/review`，可直接轮询 `run=null → succeeded`）；
 2. 摘要读取 API / UI（摘要已落库但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
 4. 是否给 high severity 加采纳门禁——仍需产品确认。
@@ -266,7 +266,7 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **968**（web 315 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **994**（web 341 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | 浏览器 E2E | **118** |
 | migrations | **13** |
 | 数据表 | **23** |
@@ -277,8 +277,9 @@ A2-C-B（本地，未推送）后的当前数字：
 A2-D-A 再新增 17 个纯单测（`chapter-summarizer-agent.test.ts`）；
 A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`）
 与 1 个定稿 API 用例；A2-D-B-REV-01 再补 5 个定稿 API 用例与 2 个 workflow 用例；
-A2-D-C 新增 12 个 workflow 用例（前章摘要选择规则），因此 workflow **338**、
-web **315**、全量 **968**。
+A2-D-C 新增 12 个 workflow 用例（前章摘要选择规则）；
+A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
+响应解析用例（`chapter-review-view.test.ts`），因此 web **341**、全量 **994**。
 
 最近新增质量门禁：
 
@@ -292,7 +293,9 @@ web **315**、全量 **968**。
 - 审阅任务的**任务行锁 + `locked_by` fence**（旧 Worker 晚返回写不进 issue）；
 - review run 的结论自洽 CHECK 与 append-only 触发器；issue 只能在 running run 追加；
 - review 任务终态时由触发器关闭 running run（取消不留下永久 running）；
-- 元数据摘要（实体摘要加载）在事实提取与 Reviewer 之间共用同一套 secret 过滤。
+- 元数据摘要（实体摘要加载）在事实提取与 Reviewer 之间共用同一套 secret 过滤；
+- 审阅结果只读接口按 `work + chapter + taskType + requestId + 快照 candidateId` 五重定位，
+  run / issues 用 RepeatableRead 同快照读取；只回显白名单错误码与三步名。
 
 ---
 
@@ -305,13 +308,15 @@ web **315**、全量 **968**。
 5. 事实候选质量尚未经过真实章节批量审阅；
 6. 本地 PostgreSQL 可能被后台进程回收，测试前必须确认连接；
 7. Prisma/应用时间写库与数据库时钟在部分环境可能有偏移，关键租约和时间戳优先使用数据库时钟；
-8. Reviewer run / issues 已落库但**没有读取接口**，作者目前看不到任何审阅结论；
-9. `priorSummaries` 固定为空，跨章连续性问题在 A2-D 之前无法被覆盖；
+8. Reviewer run / issues 已有只读 API（A2-C-D），但**没有 UI**：作者仍需直接请求接口
+   才能看到审阅结论，页面上仍是一片空白；
+9. 只读接口用确定性 `review:<candidateId>` 定位任务：A2-C-B 之前的历史候选没有审阅任务，
+   统一 404 `REVIEW_NOT_FOUND`，前端必须把这种情况展示成"未审阅"而不是错误；
 10. 每次正文生成都会多出一个 `chapter.review` 任务，Worker 吞吐与真实模型成本相应增加；
 11. `summarizer.chapter@1.0.0` 只有契约，摘要既不落库也无人消费；真实摘要质量与
     长度分布尚未经过样本验证；
-12. 摘要已落库但**没有读取接口**，Reviewer 的 `priorSummaries` 仍固定为空，
-    跨章连续性在接线前无法被覆盖；
+12. 摘要已落库但**没有读取接口 / UI**，作者看不到；Reviewer 侧已在 A2-D-C 接线
+    （覆盖范围限制见风险 16）；
 13. 定稿后再人工 revision 会让已排队的旧摘要任务以
     `SUMMARY_CHAPTER_NOT_FINALIZED` / `SOURCE_VERSION_STALE` 失败（预期行为，
     但会在任务列表里留下失败记录，后续需要只读 UI 时要注意展示口径）；
@@ -319,7 +324,9 @@ web **315**、全量 **968**。
 15. 模型配置不可用期间定稿的章节**不会自动补摘要任务**：必须由作者再次幂等定稿，
     当前没有手动重建入口，也没有提示；配置长期不可用会让摘要长期缺失；
 16. `priorSummaries` 只覆盖「已定稿且有摘要」的前 20 章：未定稿章节、摘要失败或
-    配置长期不可用期间定稿的章节会静默缺失，Reviewer 无法感知"这里本该有摘要"。
+    配置长期不可用期间定稿的章节会静默缺失，Reviewer 无法感知"这里本该有摘要"；
+17. 审阅问题的 `evidence` 是正文原句，会随只读接口原样返回给作者；当前只对作品作者可见
+    （管理员 403），若将来开放给编辑 / 读者角色，需要重新评估这一字段的暴露边界。
 
 ---
 
@@ -349,6 +356,11 @@ D-017 确定性内部任务按逻辑输入判等，不按 input_hash：配置漂
       可执行性交给 Worker 预检，不允许 finalize 静默改写任务元数据。
 D-018 前章摘要只取「同作品 + 前序 + 已定稿 + 对应当前最新正式版本」的最近 20 章；
       缺失即空，不猜测、不用正文补、不跨作品补全。
+D-019 Reviewer 结果是只读资源：接口不触发审阅、不写审计、不改 task / run / issue；
+      任务定位必须同时满足 work + chapter + taskType + requestId + 快照 candidateId，
+      任一不符统一 404 `REVIEW_NOT_FOUND`（不泄露存在性）。
+D-020 只读 GET 不做 Origin 校验（同源 fetch 不带 Origin，写接口仍强制）；
+      审阅结果的 run / issues 在 RepeatableRead 同快照内读取，不返回 provider / model。
 ```
 
 ---
