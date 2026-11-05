@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v1.7
+- 版本：v1.8
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -1749,3 +1749,59 @@ load_review_input → run_reviewer → persist_review_result
 
 检查结果读取 API、前端展示、high severity 采纳门禁、自动重写 / 自动重试 Writer、
 人工重新检查、Summarizer（`priorSummaries` 仍为空）、RAG / embedding / 图谱。
+
+## 25. A2-D-A：Summarizer Agent 契约
+
+> 只建立 `summarizer.chapter@1.0.0` 的输入 / 输出契约、代码语义校验、专用 Mock 与纯单测。
+> **不接数据库、不接工作流、不接 API / UI / Worker**；定稿校验、幂等、租约与落库属于 A2-D-B。
+
+### 25.1 输入契约
+
+```json
+{
+  "chapter": { "id": "uuid", "chapterNo": 1, "title": "章节标题" },
+  "sourceVersion": { "id": "uuid", "versionNo": 1 },
+  "chapterText": "正式定稿正文"
+}
+```
+
+- `chapter.id` / `sourceVersion.id` 必须是 UUID；
+- `chapterNo` / `versionNo` 是 1..100000 的整数；
+- `chapter.title` 1..200 字符，且 **trim 后非空**（Schema 的 `minLength` 挡不住纯空白，
+  由 `assertSummarizerInput` 在代码侧拒绝，错误路径 `$.chapter.title`）；
+- `chapterText` 1..200000 字符；
+- 顶层与嵌套对象都拒绝未声明字段：`prompt`、`secret`、`secretKnownBy`、
+  模型原始响应、API Key 无法进入契约；
+- `sourceVersion` 只是**追溯标识**：Agent 不判断"是否定稿、是否最新版本"。
+
+### 25.2 输出契约
+
+```json
+{ "summary": "本章摘要" }
+```
+
+- 只允许 `summary`，未知字段拒绝；
+- Schema 上限 1000 字符；代码在 `trim()` 后再次确认非空、≤1000；
+- 拒绝 Markdown 标题（行首 `#`）与代码块围栏（连续三个反引号）：它们是格式残留，
+  不是摘要内容；
+- 保留中文、emoji 与换行；首尾空白被去掉后再落库；
+- 摘要应覆盖本章关键事件、人物状态变化、重要物品 / 关系 / 境界变化、未解决线索，
+  没有的类别不编造；
+- 错误只返回路径与固定原因，不回显正文或摘要内容；
+- 所有失败统一为稳定 `AGENT_OUTPUT_INVALID`（输入问题为 `AGENT_INPUT_INVALID`）。
+
+### 25.3 Agent、Mock 与运行入口
+
+- `summarizer.chapter@1.0.0`：`model` 为空由 Provider 决定，`maxOutputTokens = 2048`，
+  role prompt 明确"只摘要、不续写、不改写正文、不输出多个方案"；
+- `createChapterSummarizerMockProvider({ summary? })`：`name=mock`、`defaultModel=mock-model`，
+  默认输出确定、合法、非空，不联网 / 不读 Key / 不读系统时钟；通用 `MockProvider` 未改动；
+- `runChapterSummarizer()` 是纯内存包装：先 `assertSummarizerInput`（Schema + 标题 trim），
+  再 `AgentRunner`（Schema + Provider 调用），最后强制 `validateSummarizerOutput`；
+  不写日志、不写数据库、不决定下一步。
+
+### 25.4 未做
+
+`chapter_summaries` 表 / migration、定稿版本查询与幂等、租约 / attempt fencing、
+`chapter.summarize` 任务与 Worker 注册、Reviewer `priorSummaries` 接线、API / UI、
+RAG / embedding / 图谱、摘要回写章节或正式版本。

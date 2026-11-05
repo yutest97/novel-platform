@@ -3,7 +3,8 @@
 - 更新日期：2026-11-06
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
-- 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；**A2-C-B 本地完成，待复审**
+- 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
+  **A2-C-B（含 REV-01）与 A2-D-A 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -75,6 +76,17 @@
 - 作者读接口只展示 `chapter.draft` 任务，审阅任务不会成为"最新正文任务"；
 - 仍**没有**检查结果 API / UI，`priorSummaries` 固定为空（A2-D 未实现）。
 
+### A2-D-A Summarizer Agent 契约（本地完成，待复审）
+
+- `summarizer.chapter@1.0.0`：输入只有章节标识、正式版本追溯标识与正文（1..200000 字符）；
+- 标题 trim 后必须非空（Schema 兜不住纯空白，`assertSummarizerInput` 在代码侧拒绝）；
+- 输出只有 `summary`（1..1000 字符），拒绝未知字段、空白、Markdown 标题与代码块；
+- 错误统一 `AGENT_INPUT_INVALID` / `AGENT_OUTPUT_INVALID`，只带路径与固定原因；
+- `createChapterSummarizerMockProvider()` 默认输出确定、非空，可注入固定 summary；
+- `runChapterSummarizer()` 纯内存：输入校验 → AgentRunner → 专用语义校验；
+- **未接**数据库、`chapter.summarize` 任务、Worker、API / UI，Reviewer 的
+  `priorSummaries` 仍未接线。
+
 ---
 
 ## 2. 当前冻结决策
@@ -135,7 +147,7 @@ Agent 产出候选
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
 | A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B 本地完成待复审 |
-| A2-D | Summarizer Agent | 待开始 |
+| A2-D | Summarizer Agent | A2-D-A 契约本地完成待复审；A2-D-B（工作流 / 落库）下一步 |
 | A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
@@ -159,11 +171,13 @@ A2-C-B 主体与复审修复均已在本地完成，等待负责人复审：
 
 复审通过后的候选顺序：
 
-1. A2-D-A Summarizer Agent 契约（已备卡，A2-C-B 复审通过后派发：
-   `docs/tasks/A2-D-A-summarizer-agent.md`）；
+1. A2-D-B：`chapter.summarize` 工作流与 `chapter_summaries` 落库（把已完成的
+   `summarizer.chapter@1.0.0` 接入定稿版本，才可能让 Reviewer 的 `priorSummaries` 非空）；
 2. Reviewer 结果读取 API / UI（当前 run 与 issues 已落库，但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
 4. 是否给 high severity 加采纳门禁——仍需产品确认。
+
+A2-D-A 已按 `docs/tasks/A2-D-A-summarizer-agent.md` 在本地完成（仅契约层，不含落库）。
 
 尚待产品确认：
 
@@ -212,14 +226,15 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **911**（web 309 / workflow 287 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **928**（web 309 / workflow 304 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | migrations | **12** |
 | 数据表 | **22** |
 | 数据库触发器 | **14** |
 
 新增 24 个 workflow 集成测试（`chapter-review-workflow.test.ts`）；
-另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review），
-因此 workflow 287、全量 911。
+另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review）；
+A2-D-A 再新增 17 个纯单测（`chapter-summarizer-agent.test.ts`，不连库、不联网），
+因此 workflow **304**、全量 **928**。
 
 最近新增质量门禁：
 
@@ -248,7 +263,9 @@ A2-C-B（本地，未推送）后的当前数字：
 7. Prisma/应用时间写库与数据库时钟在部分环境可能有偏移，关键租约和时间戳优先使用数据库时钟；
 8. Reviewer run / issues 已落库但**没有读取接口**，作者目前看不到任何审阅结论；
 9. `priorSummaries` 固定为空，跨章连续性问题在 A2-D 之前无法被覆盖；
-10. 每次正文生成都会多出一个 `chapter.review` 任务，Worker 吞吐与真实模型成本相应增加。
+10. 每次正文生成都会多出一个 `chapter.review` 任务，Worker 吞吐与真实模型成本相应增加；
+11. `summarizer.chapter@1.0.0` 只有契约，摘要既不落库也无人消费；真实摘要质量与
+    长度分布尚未经过样本验证。
 
 ---
 
@@ -270,6 +287,7 @@ D-010 deploy --legacy 产物必须独立做版本与许可证扫描。
 D-011 Reviewer 是独立任务：候选保存成功后同事务入队，失败不回滚候选、不改变采纳权。
 D-012 Reviewer 结论只落 run / issues，不写 audit_logs；成功是终态，问题 append-only。
 D-013 A2-D 之前 `priorSummaries` 固定为空，不得用候选正文或正式正文冒充前章摘要。
+D-014 Summarizer 只处理正式定稿版本；本卡只交付契约，落库 / 幂等 / 租约属于 A2-D-B。
 ```
 
 ---

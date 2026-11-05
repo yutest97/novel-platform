@@ -89,6 +89,23 @@ export {
   type ChapterFactView,
 } from './fact-read.js';
 export {
+  MAX_SUMMARY_CHARS,
+  MAX_SUMMARY_CHAPTER_TEXT_CHARS,
+  MAX_SUMMARY_NO,
+  MAX_SUMMARY_TITLE_CHARS,
+  SUMMARIZER_CHAPTER_AGENT,
+  assertSummarizerInput,
+  runChapterSummarizer,
+  validateSummarizerOutput,
+  type ChapterSummarizerInput,
+  type ChapterSummarizerOutput,
+} from './summarizer.js';
+export {
+  CHAPTER_SUMMARIZER_MOCK_OUTPUT,
+  createChapterSummarizerMockProvider,
+  type ChapterSummarizerMockOptions,
+} from './summarizer-mock.js';
+export {
   normalizeHumanContent,
   restoreChapterVersion,
   saveHumanChapterVersion,
