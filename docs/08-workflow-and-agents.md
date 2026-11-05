@@ -1586,7 +1586,7 @@ LIMIT 200
 - 全部参数化（work / chapter / fact_type / limit），不拼接用户输入；
 - 仍只读，不写审计、不改任何表。
 
-## 23. A2-C-A：Reviewer Agent 契约（本地完成，待复审）
+## 23. A2-C-A：Reviewer Agent 契约（已验收，CI #24）
 
 > 本轮只建立 Agent 契约、语义校验、Mock 和纯单测。
 > **没有接入 `chapter.draft`**，不写数据库，不新增 API / UI / Worker，

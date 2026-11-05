@@ -1,9 +1,9 @@
 # 09 项目记忆（当前事实快照）
 
 - 更新日期：2026-11-06
-- 最后已验收产品基线：`0f23683`
-- 对应 CI：A2-B-CI-FIX-01，CI #23 绿色
-- 当前产品阶段：A1 已完成；A2-A / A2-B 已完成；A2-C-A 契约本地完成，待复审
+- 最后已验收产品基线：`1482573`
+- 对应 CI：A2-C-A，CI #24 绿色
+- 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已完成；下一阶段 A2-C-B
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -49,7 +49,7 @@
 - 默认 Mock 可成功提取空事实；
 - 列表使用单条 SQL 保证 `total` 与集合同快照。
 
-### A2-C-A Reviewer Agent 契约（本地完成，待复审）
+### A2-C-A Reviewer Agent 契约（已验收）
 
 - `reviewer.chapter@1.0.0`：严格输入 / 输出 Schema，正文上限 20 万字符；
 - 输入只含章节标识、冻结合同、正文候选、四类安全实体摘要与前章摘要；
@@ -59,6 +59,7 @@
   以及 `passed` 与 issues 数量矛盾，统一为 `AGENT_OUTPUT_INVALID`；
 - `createChapterReviewerMockProvider()` 默认无问题，可注入固定问题；
 - 尚未接入 `chapter.draft`、数据库、API、UI 或 Worker。
+- CI #24 绿色；提交 `1482573` 已进入远端 `main`。
 
 ---
 
@@ -119,7 +120,7 @@ Agent 产出候选
 | --- | --- | --- |
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
-| A2-C | Reviewer Agent | 下一步 |
+| A2-C | Reviewer Agent | A2-C-A 已完成；A2-C-B 下一步 |
 | A2-D | Summarizer Agent | 待开始 |
 | A2-E | 事实候选只读审阅 UI | 待开始 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
@@ -134,22 +135,22 @@ Agent 产出候选
 
 ---
 
-## 4. 当前下一步：A2-C-A 复审
+## 4. 当前下一步：A2-C-B Reviewer 候选执行与持久化
 
-本轮已完成 `docs/tasks/A2-C-A-reviewer-agent.md` 的 Agent 契约层：
+A2-C-A 已完成并通过 CI #24：
 
 - `reviewer.chapter@1.0.0` 严格输入 / 输出 Schema；
 - 专用代码语义校验与稳定 `AGENT_OUTPUT_INVALID`；
 - 确定性 `createChapterReviewerMockProvider()`；
 - 18 个纯单测，未连数据库、未联网。
 
-当前等待复审。Reviewer 接入 Writer 之后的工作流、问题持久化、展示和采纳门禁
-都不在本轮，必须另立任务卡；不根据本任务卡推导自动阻断或自动重写。
+当前执行卡为 `docs/tasks/A2-C-B-reviewer-execution.md`：
 
-A2-C-A 复审通过后，下一张执行卡为
-`docs/tasks/A2-C-B-reviewer-execution.md`：独立 `chapter.review` 任务、
-候选保存后同事务幂等入队、review run / issues 持久化与失败隔离；
-仍不提供 API / UI，也不改变采纳门禁。
+- 独立 `chapter.review` 任务；
+- 候选保存后同事务幂等入队；
+- review run / issues 持久化；
+- Reviewer 失败、重试和取消不回滚候选；
+- 仍不提供 API / UI，也不改变作者采纳权。
 
 尚待产品确认：
 
@@ -180,25 +181,19 @@ A2-C-A 复审通过后，下一张执行卡为
 
 ## 6. 当前质量基线
 
-截至最后已验收基线 `0f23683`：
+截至最后已验收基线 `1482573`：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | 868 |
+| 全量单测 | 886 |
 | 浏览器 E2E | 118 |
 | migrations | 11 |
 | 数据表 | 20 |
 | 数据库触发器 | 10 |
 | deploy 版本守卫行为测试 | 22 |
 
-本轮 A2-C-A 未验收本地增量：
-
-| 项目 | 数量 / 结果 |
-| --- | --- |
-| workflow 测试 | 262 / 262 通过（244 + 18） |
-| 全仓单测声明数 | 886（已验收 868 + 18） |
-| 本地单测执行 | 884 通过；2 个既有 secret-ledger 用例因本机无 `bash` 无法执行 |
-| migrations / 数据表 / 触发器 | 11 / 20 / 10（未变） |
+A2-C-A 新增 18 个 workflow 纯单测，workflow 包当前 **262** 个测试。
+migrations / 数据表 / 触发器保持 **11 / 20 / 10**。
 
 最近新增质量门禁：
 
@@ -208,6 +203,7 @@ A2-C-A 复审通过后，下一张执行卡为
 - deploy `caniuse-lite` 精确版本守卫；
 - 默认 Mock 事实提取；
 - 单 SQL 列表快照。
+- Reviewer 输入字段封锁与 evidence 子串校验。
 
 ---
 
