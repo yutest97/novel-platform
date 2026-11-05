@@ -1,8 +1,8 @@
 # 07 总路线（个人可用版优先）
 
-- 版本：v1.5
+- 版本：v1.6
 - 日期：2026-11-05
-- 当前基线：`408cb05`（A1-4B-C-C-REV-01 已验收）+ A2-A（本地提交）
+- 当前基线：`b7c51c7`（A2-A 已验收）+ A2-B（本地提交）
 - 状态：执行中
 
 ---
@@ -50,7 +50,8 @@
 | **A1-4B-C-B** | 版本对比 UI 与历史版本恢复 | 正式版本区按需展开的对比面板（双选择器、双列行号、added/removed 中文标签、空 diff / 超大 / 冲突提示、移动端不撑破）、`GET /versions/diff` 前端严格解析、`POST /versions/:versionId/restore`、新错误码 `CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`；**不含定稿流程** | **本轮完成** |
 | **A1-4B-C-C** | 章节定稿流程 | `POST /chapters/:chapterId/finalize`、`finalizeChapter`（作品锁 + 章节行锁、只锁当前最新版本、同版本幂等）、`in_review → finalized`、`CHAPTER_STATE_INVALID_FOR_FINALIZE`、审计 `chapter.finalized`；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到 `in_review`；**无撤销定稿、无 migration** | **本轮完成** |
 | **A2-A** | 连续性事实提取契约与候选存储 | `continuity.extractor@1.0.0`（六类事实、严格 Schema + 语义校验）、`extractChapterFacts`（定稿 + 最新版本前置、同版本幂等、失败可重试、审计 `continuity.facts_extracted`）、`chapter_fact_runs` / `chapter_fact_candidates`（复合外键 + 受控更新 + append-only）；**提交阶段二次校验**（模型调用期间的新 revision 一律拒绝）、候选 run 外键为**复合外键**、running **租约**（10 分钟，CAS 接管）+ **attempt_token fencing**（旧 attempt 晚返回也不能提交）、重试记录本次实际 provider / model、上下文**按类型**截断；**无 API / UI / Worker 注册 / RAG** | **本轮完成** |
-| **A2-B** | 事实候选审阅与状态写回 | 候选列表 / 采纳 UI、人物/物品/势力状态写回、冲突提示；`A2-A` 的候选是唯一数据来源 | 待开始 |
+| **A2-B** | 连续性事实 API 与候选读取模型 | `POST /chapters/:chapterId/facts/extract`（严格白名单 `sourceVersionId`、201/200 幂等、409 四态）、`GET /facts`（factType 过滤、排序、200 条上限 + `truncated`）、`GET /facts/:candidateId`、`GET /fact-runs/:runId`；`listChapterFacts` / `getChapterFactCandidate` / `getChapterFactRun` 显式 DTO、只读不写审计；**无 UI / 采纳 / 写回** | **本轮完成** |
+| **A2-C** | 事实候选审阅与状态写回 | 候选列表 / 采纳 UI、人物/物品/势力状态写回、冲突提示；`A2-A` 的候选是唯一数据来源 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
 | **多人/运营** | 多作者、管理员运营、配额 | 既有账号体系扩展 | **后置** |
@@ -123,3 +124,4 @@
 | 2026-11-05 | A2-A：连续性事实候选（六类事实契约、`continuity.extractor@1.0.0`、`extractChapterFacts`、`chapter_fact_runs` / `chapter_fact_candidates`）；只产生候选，不写回任何实体 |
 | 2026-11-05 | A2-A-REV-01：提交阶段二次校验（版本 / 定稿 / run 归属）、候选与 run 复合外键、running 租约 CAS 接管、重试元数据以本次实际 provider / model 为准、上下文按类型截断；同一未推送迁移内升级，不新增迁移 |
 | 2026-11-05 | A2-A-REV-02：attempt fencing（`attempt_token` 每次重试轮换）；commit 成功写入与 `markRunFailed` 都以 token 做 CAS，旧 attempt 即使晚返回也不能提交、更不能把新 attempt 标 failed；新增 `CONTINUITY_EXTRACTION_LEASE_LOST` |
+| 2026-11-05 | A2-B：连续性事实 API（提取 201/200 幂等、列表 factType 过滤 + 200 条上限 truncated、候选详情、run 状态）；显式 DTO + 只读，不新增 migration、不做 UI / 采纳 / 写回 |

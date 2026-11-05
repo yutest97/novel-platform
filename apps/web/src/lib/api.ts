@@ -63,6 +63,13 @@ export type ApiErrorCode =
   | 'CHAPTER_VERSION_ALREADY_LATEST'
   // 章节定稿（A1-4B-C-C）：状态不允许定稿
   | 'CHAPTER_STATE_INVALID_FOR_FINALIZE'
+  // 连续性事实（A2-B）
+  | 'CONTINUITY_CHAPTER_NOT_FINALIZED'
+  | 'CONTINUITY_SOURCE_VERSION_STALE'
+  | 'CONTINUITY_EXTRACTION_IN_PROGRESS'
+  | 'CONTINUITY_EXTRACTION_LEASE_LOST'
+  | 'CONTINUITY_FACTS_INVALID'
+  | 'CONTINUITY_EXTRACTION_FAILED'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -102,6 +109,12 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CHAPTER_DIFF_TOO_LARGE: '章节正文规模超出对比上限',
   CHAPTER_VERSION_ALREADY_LATEST: '该版本已是最新版本，无需恢复',
   CHAPTER_STATE_INVALID_FOR_FINALIZE: '章节当前状态不允许定稿',
+  CONTINUITY_CHAPTER_NOT_FINALIZED: '章节尚未定稿，不能提取连续性事实',
+  CONTINUITY_SOURCE_VERSION_STALE: '章节最新版本已变化，请重新提取',
+  CONTINUITY_EXTRACTION_IN_PROGRESS: '该版本正在提取连续性事实，请稍后重试',
+  CONTINUITY_EXTRACTION_LEASE_LOST: '该连续性提取任务已由新的尝试接管',
+  CONTINUITY_FACTS_INVALID: '模型输出的连续性事实不合法',
+  CONTINUITY_EXTRACTION_FAILED: '连续性事实提取失败，请稍后重试',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -1050,4 +1063,136 @@ export async function finalizeChapter(
     { method: 'POST', body: { versionId } },
   );
   return (body as { chapter: FinalizedChapterSummary }).chapter;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 连续性事实（A2-B）                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** 一次提取的结果摘要（**不含正文、prompt、模型原始响应、attemptToken**）。 */
+export interface ChapterFactExtractionSummary {
+  readonly runId: string;
+  readonly created: boolean;
+  readonly sourceVersionId: string;
+  readonly sourceVersionNo: number;
+  readonly agentName: string;
+  readonly agentVersion: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly factCount: number;
+  readonly factTypeCounts: Readonly<Record<string, number>>;
+}
+
+/** 一条候选（只读视图）。 */
+export interface ChapterFactListItem {
+  readonly id: string;
+  readonly runId: string;
+  readonly sourceVersionId: string;
+  readonly sourceVersionNo: number;
+  readonly factType: string;
+  readonly summary: string;
+  readonly reason: string;
+  readonly subjectId: string | null;
+  readonly objectId: string | null;
+  readonly name: string | null;
+  readonly threadStatus: string | null;
+  readonly createdAt: string;
+}
+
+/** 候选列表（最多 200 条；被截断时 `truncated=true`）。 */
+export interface ChapterFactListPage {
+  readonly facts: readonly ChapterFactListItem[];
+  readonly total: number;
+  readonly truncated: boolean;
+}
+
+/** 候选对应的 run 安全元信息。 */
+export interface ChapterFactRunView {
+  readonly runId: string;
+  readonly sourceVersionId: string;
+  readonly sourceVersionNo: number;
+  readonly status: string;
+  readonly agentName: string;
+  readonly agentVersion: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly errorCode: string | null;
+  readonly factCount: number;
+  readonly createdAt: string;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+}
+
+/** 候选详情。 */
+export interface ChapterFactCandidateDetail {
+  readonly fact: ChapterFactListItem;
+  readonly run: ChapterFactRunView;
+}
+
+function chapterFactsBasePath(workId: string, chapterId: string): string {
+  return `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(chapterId)}/facts`;
+}
+
+/**
+ * 触发当前定稿版本的连续性事实提取（A2-B）。
+ *
+ * - `sourceVersionId` 必须是当前最新正式版本 → 否则 409 `CONTINUITY_SOURCE_VERSION_STALE`；
+ * - 章节未定稿 → 409 `CONTINUITY_CHAPTER_NOT_FINALIZED`；
+ * - 同版本已有成功 run → 200 且 `created=false`（幂等，不新增候选与审计）；
+ * - 同版本正在提取 → 409 `CONTINUITY_EXTRACTION_IN_PROGRESS`；
+ * - 本次尝试被接管 → 409 `CONTINUITY_EXTRACTION_LEASE_LOST`。
+ *
+ * 只产生候选，不写回人物 / 物品 / 势力 / 关系 / 境界。
+ */
+export async function extractChapterFactsFromApi(
+  workId: string,
+  chapterId: string,
+  sourceVersionId: string,
+): Promise<ChapterFactExtractionSummary> {
+  const { body } = await apiRequest(`${chapterFactsBasePath(workId, chapterId)}/extract`, {
+    method: 'POST',
+    body: { sourceVersionId },
+  });
+  return (body as { extraction: ChapterFactExtractionSummary }).extraction;
+}
+
+/** 读取某章节的候选列表（可选按 `factType` 过滤；最多 200 条）。 */
+export async function fetchChapterFacts(
+  workId: string,
+  chapterId: string,
+  options: { readonly factType?: string } = {},
+): Promise<ChapterFactListPage> {
+  const query = new URLSearchParams();
+  if (options.factType !== undefined) {
+    query.set('factType', options.factType);
+  }
+  const suffix = query.size === 0 ? '' : `?${query.toString()}`;
+  const { body } = await apiRequest(`${chapterFactsBasePath(workId, chapterId)}${suffix}`);
+  return body as ChapterFactListPage;
+}
+
+/** 读取单条候选详情（跨作品 / 跨章节 / 随机 id → 404）。 */
+export async function fetchChapterFactCandidate(
+  workId: string,
+  chapterId: string,
+  candidateId: string,
+): Promise<ChapterFactCandidateDetail> {
+  const { body } = await apiRequest(
+    `${chapterFactsBasePath(workId, chapterId)}/${encodeURIComponent(candidateId)}`,
+  );
+  return body as ChapterFactCandidateDetail;
+}
+
+/** 读取一次提取运行的状态（不含 `attemptToken` 与原始错误消息）。 */
+export async function fetchChapterFactRun(
+  workId: string,
+  chapterId: string,
+  runId: string,
+): Promise<ChapterFactRunView> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/fact-runs/${encodeURIComponent(runId)}`,
+  );
+  return (body as { run: ChapterFactRunView }).run;
 }

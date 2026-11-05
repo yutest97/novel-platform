@@ -883,7 +883,8 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **A1-4B-C-C** 再补 16 个（定稿服务 / API）；**REV-01** 再补 5 个浏览器用例（编辑器 / 加载竞态）；
 **A2-A** 再补 37 个（事实校验 22、事实服务 15）；**A2-A-REV-01** 再补 7 个
 （提交竞态 / 复合归属 / 租约 / 重试元数据 / 截断）；**A2-A-REV-02** 再补 3 个
-（attempt fencing），全量单测 **852** 个（web 293 / workflow 244 / worker 63 / shared 15 / db 10 /
+（attempt fencing）；**A2-B** 再补 13 个（事实 API），
+全量单测 **865** 个（web 306 / workflow 244 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **118**（96 + 版本对比与恢复 7 +
 REV-01 并发隔离 4 + 定稿 6 + 定稿入口前置条件 5）。
 
@@ -1179,6 +1180,41 @@ run 标为 `failed`；新版本重新定稿后再次提取会创建新的 run。
 runId / agentName / agentVersion / provider / model / factCount / factTypeCounts`。
 
 **未提供**：HTTP API、候选审阅 UI、Worker 常驻注册、事实写回、RAG / embedding / 图谱。
+
+### 连续性事实 API（A2-B）
+
+```http
+POST /api/works/:workId/chapters/:chapterId/facts/extract
+{ "sourceVersionId": "<当前最新正式版本 id>" }     // 必填、不允许 null
+→ 201 { "extraction": { runId, created: true, sourceVersionId, sourceVersionNo,
+                        agentName, agentVersion, provider, model,
+                        factCount, factTypeCounts } }
+→ 200 （同版本幂等命中，created=false，不再调用模型）
+
+GET /api/works/:workId/chapters/:chapterId/facts?factType=character_state
+→ { "facts": [...], "total": 3, "truncated": false }     // 最多 200 条
+
+GET /api/works/:workId/chapters/:chapterId/facts/:candidateId
+→ { "fact": {...}, "run": {...} }
+
+GET /api/works/:workId/chapters/:chapterId/fact-runs/:runId
+→ { "run": { runId, sourceVersionId, sourceVersionNo, status, agentName,
+             agentVersion, provider, model, errorCode, factCount,
+             createdAt, startedAt, finishedAt } }
+```
+
+- POST 校验 Origin；三个 GET 只读、不校验 Origin；
+- 未登录 401、管理员 403、他人作品 / 跨章节 / 随机 id 404；
+- 提取失败态：未定稿 / 旧版本 / 进行中 / 被接管 → 409（`CONTINUITY_CHAPTER_NOT_FINALIZED` /
+  `CONTINUITY_SOURCE_VERSION_STALE` / `CONTINUITY_EXTRACTION_IN_PROGRESS` /
+  `CONTINUITY_EXTRACTION_LEASE_LOST`）；Provider 失败 502、模型输出不合法 422；
+- 列表只返回**成功 run** 的候选，默认 `createdAt desc → id desc`；`factType` 仅接受六类，
+  未知 / 重复 / 其它 query → 400；超过 200 条时 `truncated=true` 且 `total` 为完整数量；
+- 响应**不含**正文、prompt、模型原始响应、`attemptToken`、数据库错误或其它作品实体；
+- 只读接口不写审计、不改 run / candidate；**不自动采纳**，不写回任何实体。
+
+**客户端**：`apps/web/src/lib/api.ts` 提供 `extractChapterFactsFromApi` /
+`fetchChapterFacts` / `fetchChapterFactCandidate` / `fetchChapterFactRun`。
 
 ### 浏览器 E2E（Playwright Chromium）
 

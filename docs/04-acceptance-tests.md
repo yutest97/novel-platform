@@ -806,3 +806,23 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-183 | 回归 | 首次提取成功、同版本幂等命中、普通 `failed → running` 重试均不回归；复合 run 外键在 token 轮换后仍然生效（版本不一致的候选被 23503 拒绝） | 同上（原有 22 个服务用例） |
 | AT-WF-184 | 迁移 | 空库仍为 **11** 个迁移 / **20** 张表 / **10** 个触发器；`attempt_token` 为 `NOT NULL DEFAULT gen_random_uuid()` | `pnpm db:deploy` + 直连计数 |
 | AT-WF-185 | 测试数 | 全量单测 **852**（849 + 3）；浏览器 E2E 仍 **118**（本轮无 UI / API 变更） | 全量 `pnpm test` |
+
+## 28. 连续性事实 API 验收（A2-B）
+
+> 对应 `docs/07` A2-B、`docs/08` 第 22 节、`README`「连续性事实 API」。
+> 本轮**只有只读 API 与读取模型**：不新增 migration、不做 UI / 采纳 / 写回、
+> 不注册 Worker、不引入队列。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-186 | 提取响应 | `POST /chapters/:chapterId/facts/extract` 严格白名单 `{ sourceVersionId }`；首次 201 `created=true`；同版本重试 200 `created=false` 且不再调用模型；响应只含 run / 版本 / agent / provider / model / factCount / factTypeCounts | `apps/web/test/chapter-facts-api.test.ts` |
+| AT-WF-187 | 提取状态码 | 未定稿 → 409 `CONTINUITY_CHAPTER_NOT_FINALIZED`；旧版本 → 409 `CONTINUITY_SOURCE_VERSION_STALE`；进行中 → 409 `CONTINUITY_EXTRACTION_IN_PROGRESS`；attempt 被接管 → 409 `CONTINUITY_EXTRACTION_LEASE_LOST`；Provider 失败 → 502 `CONTINUITY_EXTRACTION_FAILED`；模型输出不合法 → 422 `CONTINUITY_FACTS_INVALID` | 同上 |
+| AT-WF-188 | 提取校验与权限 | 未知字段 / 缺字段 / null / 非法 UUID → 400 `VALIDATION_FAILED`；缺 Origin → 403；未登录 401；管理员 403；他人作品 / 跨作品章节 / 随机章节 → 404（同作品的另一章节属于"未定稿" 409） | 同上 |
+| AT-WF-189 | 候选列表 | 只返回成功 run 的候选；默认 `createdAt desc → id desc`；六类 `factType` 均可过滤；未知 `factType` / 重复 `factType` / 其它 query / 空值 → 400；空列表为 `{ facts: [], total: 0, truncated: false }` | 同上 |
+| AT-WF-190 | 列表上限 | 超过 200 条时返回 200 条 + `total`（完整数量）+ `truncated: true`，不静默截断 | 同上 |
+| AT-WF-191 | 候选详情 / run | 详情返回 `{ fact, run }`，`sourceVersionNo` 关联正确；候选与 run 跨章节 / 跨作品 / 随机 id → 404；非法 UUID → 400；run 的 `errorCode` 只回显稳定码 | 同上 |
+| AT-WF-192 | 脱敏 | 提取 / 列表 / 详情 / run 的响应都不含正文、prompt、模型原始响应、`attemptToken`（键与值都不出现） | 同上 |
+| AT-WF-193 | 只读 | GET 列表 / 详情 / run 前后：审计条数、run 行、候选行完全一致（不写审计、不改状态） | 同上 |
+| AT-WF-194 | 客户端 | `apps/web/src/lib/api.ts` 提供 `extractChapterFactsFromApi` / `fetchChapterFacts` / `fetchChapterFactCandidate` / `fetchChapterFactRun` 与对应类型；CONTINUITY 错误码登记到 `ApiErrorCode` 与文案表 | 同上（类型检查） |
+| AT-WF-195 | 迁移 | 本轮**不新增 migration**：空库仍为 11 迁移 / 20 表 / 10 触发器 | `pnpm db:deploy` |
+| AT-WF-196 | 测试数 | 全量单测 **865**（852 + A2-B API 13）；浏览器 E2E 仍 **118**（本轮无 UI） | 全量 `pnpm test` |

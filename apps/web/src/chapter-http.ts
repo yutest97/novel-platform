@@ -8,8 +8,10 @@
 
 import { AuthError } from '@novel/auth';
 import {
+  CHAPTER_FACT_TYPES,
   MAX_CONTRACT_TARGET_WORDS,
   MIN_CONTRACT_TARGET_WORDS,
+  type ChapterFactType,
   type ChapterStyle,
 } from '@novel/workflow';
 
@@ -256,4 +258,61 @@ export function optionalStyle(body: Record<string, unknown>): Partial<ChapterSty
     style[key] = trimmed;
   }
   return style;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 连续性事实（A2-B）                                                           */
+/* -------------------------------------------------------------------------- */
+
+/** 触发事实提取的允许字段：只有目标版本。 */
+export const FACT_EXTRACT_FIELDS = ['sourceVersionId'] as const;
+
+/**
+ * 读取提取请求的 `sourceVersionId`：必须显式出现且为非空字符串。
+ *
+ * 提取只针对"当前最新正式版本"，`null` 没有语义；漏传 / null / 空串 /
+ * 非字符串一律 400，不做隐式兜底。
+ */
+export function requireFactSourceVersionId(body: Record<string, unknown>): string {
+  if (!Object.prototype.hasOwnProperty.call(body, 'sourceVersionId')) {
+    throw new AuthError('VALIDATION_FAILED', '缺少字段 sourceVersionId');
+  }
+  const value = body['sourceVersionId'];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new AuthError('VALIDATION_FAILED', 'sourceVersionId 必须是版本 id');
+  }
+  return value;
+}
+
+/** 候选列表的允许 query 参数：只有 `factType`。 */
+export const FACT_LIST_QUERY_PARAMS = ['factType'] as const;
+
+/**
+ * 读取候选列表的过滤条件（A2-B）。
+ *
+ * - 只接受 `factType`；出现其它参数 → 400；
+ * - `factType` 最多出现一次（重复传参 → 400），空值 → 400；
+ * - 取值必须是六类事实之一，否则 400。
+ */
+export function readFactListFilter(request: Request): {
+  readonly factType?: ChapterFactType;
+} {
+  const url = new URL(request.url);
+  for (const key of url.searchParams.keys()) {
+    if (!(FACT_LIST_QUERY_PARAMS as readonly string[]).includes(key)) {
+      throw new AuthError('VALIDATION_FAILED', `不支持的查询参数：${key}`);
+    }
+  }
+  const values = url.searchParams.getAll('factType');
+  if (values.length === 0) {
+    return {};
+  }
+  if (values.length > 1) {
+    throw new AuthError('VALIDATION_FAILED', 'factType 只能提供一次');
+  }
+  const value = values[0] ?? '';
+  if (!(CHAPTER_FACT_TYPES as readonly string[]).includes(value)) {
+    throw new AuthError('VALIDATION_FAILED', 'factType 不是合法的事实类型');
+  }
+  return { factType: value as ChapterFactType };
 }

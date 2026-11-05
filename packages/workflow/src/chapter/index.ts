@@ -51,6 +51,16 @@ export {
   type FactEntityRef,
 } from './facts.js';
 export {
+  MAX_CHAPTER_FACT_LIST,
+  getChapterFactCandidate,
+  getChapterFactRun,
+  listChapterFacts,
+  type ChapterFactCandidateDetail,
+  type ChapterFactListResult,
+  type ChapterFactRunSummary,
+  type ChapterFactView,
+} from './fact-read.js';
+export {
   normalizeHumanContent,
   restoreChapterVersion,
   saveHumanChapterVersion,

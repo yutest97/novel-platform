@@ -1440,3 +1440,103 @@ provider / model / factCount / factTypeCounts`。
 
 HTTP API、候选审阅 / 采纳 UI、Worker 常驻注册、事实写回人物/物品/势力/关系/境界、
 冲突检测、RAG / embedding / 图谱、自动修改任何实体。
+
+## 22. A2-B：连续性事实 API
+
+> 在 `extractChapterFacts` 与候选存储之上只加**作者 API 与只读模型**：
+> 不新增 migration、不做 UI、不自动采纳、不写回实体、不注册 Worker。
+
+### 22.1 路由
+
+| 方法 | 路径 | 语义 |
+| --- | --- | --- |
+| POST | `/api/works/:workId/chapters/:chapterId/facts/extract` | 手动触发当前定稿版本的事实提取 |
+| GET | `/api/works/:workId/chapters/:chapterId/facts?factType=` | 候选列表（只读） |
+| GET | `/api/works/:workId/chapters/:chapterId/facts/:candidateId` | 候选详情 + run 安全元信息 |
+| GET | `/api/works/:workId/chapters/:chapterId/fact-runs/:runId` | 一次提取运行的状态 |
+
+- POST 校验 Origin；三个 GET 不校验 Origin；
+- 未登录 401、管理员 403、他人作品 / 跨章节 / 随机 id 404；
+- 路由注册在章节下，与版本 / 定稿接口共用 `requireAuthorSession` 与 `requireOwnedWork`。
+
+### 22.2 提取请求与响应
+
+请求体严格白名单：只有 `sourceVersionId`（必须显式出现，不允许 null）。
+
+```jsonc
+// 201 created=true（首次）/ 200 created=false（同版本幂等命中）
+{
+  "extraction": {
+    "runId": "…",
+    "created": true,
+    "sourceVersionId": "…",
+    "sourceVersionNo": 5,
+    "agentName": "continuity.extractor",
+    "agentVersion": "1.0.0",
+    "provider": "…",
+    "model": "…",
+    "factCount": 3,
+    "factTypeCounts": { "character_state": 1, "plot_thread": 2 }
+  }
+}
+```
+
+**不返回**：正文、prompt、模型原始响应、`attemptToken`、数据库错误、其它作品实体。
+
+状态码：
+
+| 情况 | 状态 / 错误码 |
+| --- | --- |
+| 首次提取 | 201 `created=true` |
+| 同版本已有成功 run | 200 `created=false`（不新增候选与审计，不再调用模型） |
+| 章节未定稿 / 无版本 | 409 `CONTINUITY_CHAPTER_NOT_FINALIZED` |
+| `sourceVersionId` 不是当前最新 | 409 `CONTINUITY_SOURCE_VERSION_STALE` |
+| 同版本正在提取（租约未到期） | 409 `CONTINUITY_EXTRACTION_IN_PROGRESS` |
+| 本次 attempt 已被接管 | 409 `CONTINUITY_EXTRACTION_LEASE_LOST` |
+| Provider / 内部失败 | 502 `CONTINUITY_EXTRACTION_FAILED` |
+| 模型输出不合法 | 422 `CONTINUITY_FACTS_INVALID` |
+| 未知字段 / null / 非法 UUID / 异常 query | 400 `VALIDATION_FAILED` |
+| 缺 Origin | 403 |
+| 未登录 / 管理员 / 他人作品 | 401 / 403 / 404 |
+
+### 22.3 候选列表
+
+- 只返回**成功 run** 的候选；默认 `createdAt desc → id desc`；
+- `factType` 可选，取值必须是六类之一；其它 query / 重复传参 / 空值 → 400；
+- 硬上限 `MAX_CHAPTER_FACT_LIST = 200`；被截断时 `truncated=true` 且 `total` 是过滤后的完整数量
+  （**不静默截断**）；
+- 每条只含 `id / runId / sourceVersionId / sourceVersionNo / factType / summary / reason /
+  subjectId / objectId / name / threadStatus / createdAt`。
+
+### 22.4 候选详情与 run 状态
+
+- 候选必须同时属于该作品与该章节，否则 404；
+- 详情返回 `{ fact, run }`：`run` 只含 `runId / sourceVersionId / sourceVersionNo / status /
+  agentName / agentVersion / provider / model / errorCode / factCount / createdAt / startedAt / finishedAt`；
+- `errorCode` 只回显**稳定码**（`CONTINUITY_*`），其它值一律 `null`；
+- run 状态接口不返回 `deduplicated`（那是提取响应的语义）、`attemptToken`、原始错误消息。
+
+### 22.5 服务层
+
+| 函数 | 说明 |
+| --- | --- |
+| `listChapterFacts` | 归属校验 + 过滤 + 计数 + 版本号关联，返回 `{ facts, total, truncated }` |
+| `getChapterFactCandidate` | 归属 + 作品 / 章节双重过滤，返回 `{ fact, run }` |
+| `getChapterFactRun` | 归属 + 作品 / 章节双重过滤，返回运行状态 |
+
+- 全部复用 `requireOwnedWork` 与 `requireChapterInWork`，不复制归属逻辑；
+- 显式构造 DTO（不把 Prisma row 直接交给 HTTP）；
+- **只读**：不写审计、不改 run / candidate；
+- `sourceVersionNo` 通过 `chapter_versions` 关联读取（候选与 run 只存版本 id）。
+
+### 22.6 Provider 解析
+
+`apps/web/src/fact-provider.ts`：
+
+- 生产：`createModelProviderFromEnv()`（与 Worker 完全一致的 `MODEL_PROVIDER` 等变量）；
+- 测试：`setChapterFactProvider()` 注入确定性替身，`null` 复原。
+
+### 22.7 未做
+
+候选列表 / 采纳 UI、事实采纳与拒绝、写回人物 / 物品 / 势力 / 关系 / 境界、
+冲突检测、批量提取、Worker 常驻任务、RAG / embedding / 图谱。
