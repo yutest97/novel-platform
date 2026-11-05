@@ -18,8 +18,22 @@ import { fileURLToPath } from 'node:url';
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 
-/** 关键运行时依赖：必须与仓库安装版本一致。 */
-const CRITICAL_PACKAGES = ['next', 'react', 'react-dom', '@prisma/client', 'pg'];
+/**
+ * 关键运行时依赖：必须与仓库安装版本一致。
+ *
+ * `caniuse-lite` 由 `next` 间接引入，版本范围宽松；`pnpm deploy --legacy`
+ * 不读 workspace lockfile，会从 registry 重新解析到更新版本。
+ * 它带 CC-BY-4.0（非宽松许可，逐包逐版本审阅），因此必须在第一道版本检查
+ * 就发现漂移，而不是等到许可证扫描才失败。
+ */
+export const CRITICAL_PACKAGES = [
+  'next',
+  'react',
+  'react-dom',
+  'caniuse-lite',
+  '@prisma/client',
+  'pg',
+];
 
 /**
  * 从 pnpm-lock.yaml 解析关键依赖的版本作为基线。
@@ -29,7 +43,7 @@ const CRITICAL_PACKAGES = ['next', 'react', 'react-dom', '@prisma/client', 'pg']
  * lockfile 中每个包以 `  <name>@<version>:` 形式出现（scoped 包带引号），
  * 同一包可能有多个带 peer 后缀的条目，取第一条（即声明版本）。
  */
-function loadLockfileBaseline() {
+export function loadLockfileBaseline() {
   const lockPath = resolve(repoRoot, 'pnpm-lock.yaml');
   if (!existsSync(lockPath)) {
     throw new Error(`未找到 ${lockPath}`);
@@ -49,7 +63,7 @@ function loadLockfileBaseline() {
 }
 
 /** 读取某个 node_modules 下指定包的版本。 */
-function readInstalledVersion(nodeModulesDir, pkgName) {
+export function readInstalledVersion(nodeModulesDir, pkgName) {
   const pkgJsonPath = resolve(nodeModulesDir, pkgName, 'package.json');
   if (!existsSync(pkgJsonPath)) {
     return null;
@@ -63,7 +77,7 @@ function readInstalledVersion(nodeModulesDir, pkgName) {
 }
 
 /** 校验单个 deploy 目录。 */
-function checkDir(dir, baseline) {
+export function checkDir(dir, baseline) {
   const nodeModules = resolve(dir, 'node_modules');
   if (!existsSync(nodeModules)) {
     console.error(`✗ ${dir}：未找到 node_modules，deploy 产物不完整`);

@@ -169,6 +169,29 @@ services:
 - 建立 `docs/licenses/` 目录存放生成的许可证清单与 `NOTICE`。
 - CI 加入许可证门禁：发现 GPL 系即失败。
 
+### 6.4 逐包逐版本审阅（`REVIEWED_PACKAGES`）
+
+不在宽松白名单里的许可证（如 CC-BY-4.0）**只能按"包名@版本"逐个放行**：
+
+- 键格式 `name@version`，必须与 lockfile / deploy 产物中的实际版本一致；
+- 不按包名放行所有版本，也不把许可证加进 `ALLOWED_LICENSES`；
+- 每条必须写明审阅结论（用途、是否可执行代码、是否可闭源分发、是否需署名、有无 copyleft）。
+
+当前唯一例外：
+
+| 包 | 版本 | 许可证 | 结论 |
+| --- | --- | --- | --- |
+| `caniuse-lite` | `1.0.30001822` | CC-BY-4.0 | 浏览器兼容性**数据集**（非可执行代码），允许闭源分发、需署名、无 copyleft 传染；已在清单中署名 |
+
+**版本锁定要求**：该包由 `next` 间接引入且范围宽松，而 `pnpm deploy --legacy`
+不读 workspace lockfile、会重新解析依赖。为保证 lockfile / deploy 产物 / 审阅清单三者一致：
+
+1. 根 `package.json` 的 `pnpm.overrides` 精确锁定 `caniuse-lite` 版本（不使用范围值）；
+2. `caniuse-lite` 已加入 `scripts/check-deploy-versions.mjs` 的 `CRITICAL_PACKAGES`，
+   deploy 后第一道门禁即比对版本；
+3. 升级该包时必须同步更新 `pnpm-lock.yaml`、`REVIEWED_PACKAGES` 与
+   `THIRD_PARTY_LICENSES.md`（`pnpm license:report` 重新生成）。
+
 ---
 
 ## 7. 首批依赖许可证检查清单（预登记，阶段二落地核对）

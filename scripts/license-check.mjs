@@ -51,7 +51,9 @@ const ALLOWED_LICENSES = new Set([
  */
 const REVIEWED_PACKAGES = new Map([
   [
-    'caniuse-lite@1.0.30001820',
+    // 精确到版本：CC-BY-4.0 不允许按许可证名称整体放行。
+    // 版本由根 package.json 的 pnpm.overrides 锁定，与 lockfile / deploy 产物一致。
+    'caniuse-lite@1.0.30001822',
     '浏览器兼容性**数据集**（非可执行代码），由 browserslist 引入。' +
       'CC-BY-4.0 允许闭源分发，要求署名 → 已在清单中署名；不存在 copyleft 传染。',
   ],

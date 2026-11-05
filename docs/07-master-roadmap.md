@@ -2,7 +2,7 @@
 
 - 版本：v1.6
 - 日期：2026-11-05
-- 当前基线：`2feb72d`（A2-B 已验收）+ A2-B-REV-01（本地提交）
+- 当前基线：`1237676`（A2-B-REV-01 已验收）+ A2-B-CI-FIX-01（本地提交）
 - 状态：执行中
 
 ---
@@ -126,3 +126,4 @@
 | 2026-11-05 | A2-A-REV-02：attempt fencing（`attempt_token` 每次重试轮换）；commit 成功写入与 `markRunFailed` 都以 token 做 CAS，旧 attempt 即使晚返回也不能提交、更不能把新 attempt 标 failed；新增 `CONTINUITY_EXTRACTION_LEASE_LOST` |
 | 2026-11-05 | A2-B：连续性事实 API（提取 201/200 幂等、列表 factType 过滤 + 200 条上限 truncated、候选详情、run 状态）；显式 DTO + 只读，不新增 migration、不做 UI / 采纳 / 写回 |
 | 2026-11-05 | A2-B-REV-01：`MODEL_PROVIDER=mock` 改用事实专用 Mock（`{"facts": []}`）；Provider 配置错误稳定映射 502 `CONTINUITY_EXTRACTION_FAILED`；列表改为单条 SQL（`COUNT(*) OVER()`），统计与集合同快照 |
+| 2026-11-05 | A2-B-CI-FIX-01：`pnpm.overrides` 精确锁定 `caniuse-lite@1.0.30001822`（deploy --legacy 不读 lockfile 会漂移）；REVIEWED_PACKAGES 同步；`caniuse-lite` 加入 deploy 版本守卫并新增 22 项行为测试；全版本 CC-BY-4.0 仍不放行 |

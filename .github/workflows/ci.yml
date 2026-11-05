@@ -86,6 +86,9 @@ jobs:
       - name: 符号链接分类校验器的行为测试
         run: pnpm test:deploy-symlinks
 
+      - name: deploy 依赖版本守卫的行为测试
+        run: pnpm test:deploy-versions
+
       # 纯文本断言，不需要 Docker：防止把「先迁移再起四服务」的顺序改回去。
       - name: CI 启动顺序守卫（无需 Docker）
         run: |

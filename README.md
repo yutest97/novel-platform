@@ -1586,8 +1586,16 @@ Playwright（步骤 env 注入**宿主机** `DATABASE_URL`：`127.0.0.1:5432/nov
 | `THIRD_PARTY_LICENSES.md`     | 生产依赖（`pnpm licenses list --prod`） |
 | `THIRD_PARTY_LICENSES.dev.md` | 开发依赖（`pnpm licenses list --dev`）  |
 
-当前唯一的审阅例外：`caniuse-lite@1.0.30001820`（CC-BY-4.0，浏览器兼容数据集，
+当前唯一的审阅例外：**`caniuse-lite@1.0.30001822`**（CC-BY-4.0，浏览器兼容数据集，
 要求署名、无 copyleft 传染）。
+
+> **为什么必须精确锁版本**：`caniuse-lite` 由 `next` 间接引入且版本范围宽松，
+> 而 `pnpm deploy --legacy` **不读 workspace lockfile**，会从 registry 重新解析到更新版本。
+> 因此根 `package.json` 用 `pnpm.overrides` 精确锁定 `1.0.30001822`，
+> 让 lockfile、deploy 产物与 `REVIEWED_PACKAGES` 三者一致；
+> **不允许**把 CC-BY-4.0 整体加入 `ALLOWED_LICENSES`，也不按包名放行所有版本。
+> 版本漂移由 `scripts/check-deploy-versions.mjs` 在第一道门禁拦截
+> （`caniuse-lite` 已在 `CRITICAL_PACKAGES` 中），不会等到许可证扫描才暴露。
 
 门禁已拦截并处理的三项（均已**移除**，未登记为例外）：
 
