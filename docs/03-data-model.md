@@ -551,7 +551,8 @@ completion_tokens, latency_ms, success, error_code, created_at`。
 | created_at | timestamptz | |
 
 约束：`UNIQUE(run_id, ordinal)`；`CHECK` 兜底 severity / type / 长度；
-`UPDATE / DELETE` 一律由触发器拒绝。
+只有 `running` 的 run 允许 INSERT；`UPDATE / DELETE` 一律由触发器拒绝。
+run 进入 `succeeded / failed` 终态后不能再追加问题，避免 `issue_count` 与真实问题数失配。
 
 > 归属组合（例如把 issue 挂在 run A 上却把 work / chapter / candidate 指向另一个合法组合）
 > 由 `chapter_review_issues_run_fkey` 直接拒绝，不只靠服务层校验。

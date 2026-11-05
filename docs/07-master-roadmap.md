@@ -134,4 +134,4 @@
 | 2026-11-05 | A2-B-REV-01：`MODEL_PROVIDER=mock` 改用事实专用 Mock（`{"facts": []}`）；Provider 配置错误稳定映射 502 `CONTINUITY_EXTRACTION_FAILED`；列表改为单条 SQL（`COUNT(*) OVER()`），统计与集合同快照 |
 | 2026-11-05 | A2-B-CI-FIX-01：`pnpm.overrides` 精确锁定 `caniuse-lite@1.0.30001822`（deploy --legacy 不读 lockfile 会漂移）；REVIEWED_PACKAGES 同步；`caniuse-lite` 加入 deploy 版本守卫并新增 22 项行为测试；全版本 CC-BY-4.0 仍不放行 |
 | 2026-11-06 | A2-C-A 通过 CI #24（提交 `1482573`）：Reviewer Agent 契约、语义校验、专用 Mock 与 18 个纯单测进入已验收基线；A2-C-B 进入下一步 |
-| 2026-11-06 | A2-C-B（本地，未推送）：独立 `chapter.review` 任务与同事务自动入队、`chapter_review_runs` / `chapter_review_issues`（复合外键 + 结论自洽 CHECK + append-only）、固定三步 `load_review_input → run_reviewer → persist_review_result`、失败隔离与 run 复用、取消兜底触发器；新增 22 个 workflow 集成测试，migrations / 表 / 触发器 12 / 22 / 13；仍无检查结果 API / UI |
+| 2026-11-06 | A2-C-B（本地，未推送）：独立 `chapter.review` 任务与同事务自动入队、`chapter_review_runs` / `chapter_review_issues`（复合外键 + 结论自洽 CHECK + append-only）、固定三步 `load_review_input → run_reviewer → persist_review_result`、失败隔离与 run 复用、取消/失败终态兜底触发器、终态后禁止追加 issue；新增 24 个 workflow 集成测试，migrations / 表 / 触发器 12 / 22 / 14；仍无检查结果 API / UI |
