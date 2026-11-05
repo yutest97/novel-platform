@@ -979,3 +979,337 @@ describe('上下文截断（A2-A-REV-01）', () => {
     expect(sent.characters.every((entity) => entity.id !== item.id)).toBe(true);
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* A2-A-REV-02：attempt fencing（租约 + attempt_token 双层）                     */
+/* -------------------------------------------------------------------------- */
+
+interface AttemptPlan {
+  readonly facts: unknown;
+  /** 该 attempt 的 Provider 返回身份（用于验证不被旧 attempt 覆盖）。 */
+  readonly provider?: string;
+  readonly model?: string;
+  /** 该 attempt 直接抛错（模拟模型失败）。 */
+  readonly fail?: boolean;
+}
+
+/** 按调用顺序分派的 Provider：每次调用各自挂起，由测试逐个放行。 */
+function sequencedProvider(plans: readonly AttemptPlan[]): {
+  readonly provider: ModelProvider;
+  readonly waitEntered: (index: number) => Promise<void>;
+  readonly release: (index: number) => void;
+} {
+  let cursor = 0;
+  const gates = plans.map(() => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  });
+  const entered = plans.map(() => {
+    let notify!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      notify = resolve;
+    });
+    return { promise, notify };
+  });
+
+  const provider: ModelProvider = {
+    name: 'gated',
+    defaultModel: 'gated-model',
+    async generateJson() {
+      const index = cursor;
+      cursor += 1;
+      const plan = plans[index];
+      entered[index]?.notify();
+      await gates[index]?.promise;
+      if (plan?.fail === true) {
+        throw new Error('stub provider failure');
+      }
+      return {
+        json: { facts: plan?.facts ?? [] },
+        provider: plan?.provider ?? 'gated',
+        model: plan?.model ?? 'gated-model',
+        usage: { promptTokens: 1, completionTokens: 1 },
+        latencyMs: 1,
+      };
+    },
+    async generateText() {
+      throw new Error('未使用');
+    },
+  };
+
+  return {
+    provider,
+    waitEntered: async (index) => {
+      await entered[index]?.promise;
+    },
+    release: (index) => {
+      gates[index]?.release();
+    },
+  };
+}
+
+/**
+ * 把本次尝试推到租约之外（模拟"进程卡住 / 崩溃"）。
+ *
+ * 触发器只允许在重试时刷新 `started_at`，因此夹具必须临时关闭用户触发器；
+ * 这是测试夹具手段，不是应用路径。
+ */
+async function expireRunLease(runId: string): Promise<void> {
+  await db.$executeRawUnsafe('ALTER TABLE chapter_fact_runs DISABLE TRIGGER USER');
+  try {
+    await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "started_at" = clock_timestamp() - (${FACT_RUN_LEASE_MS + 60_000}::int * interval '1 millisecond')
+      WHERE "id" = ${runId}::uuid
+    `;
+  } finally {
+    await db.$executeRawUnsafe('ALTER TABLE chapter_fact_runs ENABLE TRIGGER USER');
+  }
+}
+
+async function currentRun(fixture: ChapterFixture) {
+  return db.chapterFactRun.findFirstOrThrow({ where: { workId: fixture.workId } });
+}
+
+describe('attempt fencing（A2-A-REV-02）', () => {
+  it('旧 attempt 成功返回被拒绝：不写候选 / 审计，不覆盖新 attempt', async () => {
+    const fixture = await newFixture();
+    await seedFinalizedVersion(fixture);
+    const character = fixture.characters[0];
+    const factsB = sampleFacts(fixture);
+    const gated = sequencedProvider([
+      {
+        facts: [
+          {
+            factType: 'character_state',
+            subjectId: character?.id ?? '',
+            summary: '旧尝试的事实',
+            reason: '旧依据',
+          },
+        ],
+        provider: 'stub-a',
+        model: 'model-a',
+      },
+      { facts: factsB, provider: 'stub-b', model: 'model-b' },
+    ]);
+
+    // A：创建 running attempt 并进入模型
+    const attemptA = extract(fixture, gated.provider);
+    await gated.waitEntered(0);
+    const runA = await currentRun(fixture);
+    expect(runA.status).toBe('running');
+    const tokenA = runA.attemptToken;
+
+    // 租约到期 → B 接管同一 run，拿到新的 attempt_token
+    await expireRunLease(runA.id);
+    const attemptB = extract(fixture, gated.provider);
+    await gated.waitEntered(1);
+    const runB = await currentRun(fixture);
+    expect(runB.id).toBe(runA.id);
+    expect(runB.status).toBe('running');
+    expect(runB.attemptToken).not.toBe(tokenA);
+
+    // 旧 A 先成功返回：必须被 fence 掉
+    gated.release(0);
+    await expect(attemptA).rejects.toMatchObject({
+      code: 'CONTINUITY_EXTRACTION_LEASE_LOST',
+    });
+
+    expect(await candidateCount(fixture.workId)).toBe(0);
+    expect(await factsAuditCount(fixture.chapterId)).toBe(0);
+    const afterA = await currentRun(fixture);
+    expect(afterA.status).toBe('running');
+    expect(afterA.attemptToken).toBe(runB.attemptToken);
+    // 旧 attempt 不得覆盖 provider / model（仍是 B 的配置值）
+    expect(afterA.provider).toBe('gated');
+    expect(afterA.model).toBe('gated-model');
+
+    // B 正常完成：候选与审计只来自 B
+    gated.release(1);
+    const resultB = await attemptB;
+    expect(resultB.created).toBe(true);
+    expect(resultB.provider).toBe('stub-b');
+    expect(resultB.model).toBe('model-b');
+
+    const finalRun = await currentRun(fixture);
+    expect(finalRun.status).toBe('succeeded');
+    expect(finalRun.provider).toBe('stub-b');
+    expect(finalRun.model).toBe('model-b');
+    expect(await candidateCount(fixture.workId)).toBe(factsB.length);
+    expect(await factsAuditCount(fixture.chapterId)).toBe(1);
+
+    const candidates = await db.chapterFactCandidate.findMany({
+      where: { workId: fixture.workId },
+    });
+    const dump = JSON.stringify(candidates);
+    expect(dump).not.toContain('旧尝试的事实');
+  });
+
+  it('旧 attempt 抛错不能杀死新 attempt', async () => {
+    const fixture = await newFixture();
+    await seedFinalizedVersion(fixture);
+    const gated = sequencedProvider([
+      { facts: [], fail: true },
+      { facts: sampleFacts(fixture), provider: 'stub-b', model: 'model-b' },
+    ]);
+
+    const attemptA = extract(fixture, gated.provider);
+    await gated.waitEntered(0);
+    const runA = await currentRun(fixture);
+    await expireRunLease(runA.id);
+
+    const attemptB = extract(fixture, gated.provider);
+    await gated.waitEntered(1);
+    const runB = await currentRun(fixture);
+    const tokenB = runB.attemptToken;
+    expect(tokenB).not.toBe(runA.attemptToken);
+
+    // A 的 Provider 抛错：markRunFailed 必须因 token 不匹配而 0 行
+    gated.release(0);
+    await expect(attemptA).rejects.toMatchObject({
+      code: 'CONTINUITY_EXTRACTION_LEASE_LOST',
+    });
+
+    const afterA = await currentRun(fixture);
+    expect(afterA.status).toBe('running');
+    expect(afterA.attemptToken).toBe(tokenB);
+    expect(afterA.errorCode).toBeNull();
+
+    // B 不受影响，仍然成功
+    gated.release(1);
+    await expect(attemptB).resolves.toMatchObject({ created: true, provider: 'stub-b' });
+    const finalRun = await currentRun(fixture);
+    expect(finalRun.status).toBe('succeeded');
+    expect(finalRun.attemptToken).toBe(tokenB);
+    expect(await factsAuditCount(fixture.chapterId)).toBe(1);
+    expect(await candidateCount(fixture.workId)).toBe(3);
+    expect(await runCount(fixture.workId)).toBe(1);
+  });
+
+  it('attempt_token 数据库约束：新建必有、重试必换、成功不可改', async () => {
+    const fixture = await newFixture();
+    const first = await seedFinalizedVersion(fixture, 1);
+    const content2 = `${MARKER}-版本2，${'风穿过廊下。'.repeat(220)}`;
+    const second = await db.chapterVersion.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        versionNo: 2,
+        content: content2,
+        wordCount: content2.length,
+        source: 'human',
+        createdBy: fixture.authorId,
+      },
+      select: { id: true },
+    });
+
+    // 新建：不传 attempt_token，由数据库默认生成
+    const run = await db.chapterFactRun.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        sourceVersionId: first.versionId,
+        agentName: 'continuity.extractor',
+        agentVersion: '1.0.0',
+        provider: 'p',
+        model: 'm',
+        status: 'running',
+      },
+    });
+    expect(run.attemptToken).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+
+    // 复合 run 外键仍然生效：版本不一致的候选被拒绝
+    const mismatchBefore = await rawInsertCandidate({
+      runId: run.id,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: second.id,
+    }).catch((caught: unknown) => caught);
+    expect(String((mismatchBefore as Error).message)).toMatch(/23503/);
+
+    // 结束第一次尝试
+    await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "status" = 'failed',
+          "error_code" = 'CONTINUITY_EXTRACTION_FAILED',
+          "finished_at" = clock_timestamp()
+      WHERE "id" = ${run.id}::uuid
+    `;
+
+    // failed → running 必须轮换 token：沿用旧 token 被触发器拒绝
+    const sameToken = await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "status" = 'running',
+          "error_code" = NULL,
+          "finished_at" = NULL,
+          "started_at" = clock_timestamp(),
+          "attempt_token" = ${run.attemptToken}::uuid
+      WHERE "id" = ${run.id}::uuid
+    `.catch((caught: unknown) => caught);
+    expect(sameToken).toBeInstanceOf(Error);
+    expect((await currentRun(fixture)).status).toBe('failed');
+
+    // 轮换后允许重试
+    const rotated = await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "status" = 'running',
+          "error_code" = NULL,
+          "finished_at" = NULL,
+          "started_at" = clock_timestamp(),
+          "attempt_token" = gen_random_uuid()
+      WHERE "id" = ${run.id}::uuid
+    `;
+    expect(rotated).toBe(1);
+    const afterRetry = await currentRun(fixture);
+    expect(afterRetry.status).toBe('running');
+    expect(afterRetry.attemptToken).not.toBe(run.attemptToken);
+
+    // 换 token 之后，复合外键约束依旧生效
+    const mismatchAfter = await rawInsertCandidate({
+      runId: run.id,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: second.id,
+    }).catch((caught: unknown) => caught);
+    expect(String((mismatchAfter as Error).message)).toMatch(/23503/);
+    const matched = await rawInsertCandidate({
+      runId: run.id,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: first.versionId,
+    });
+    expect(matched).toBe(1);
+
+    // running → succeeded 不允许同时改 token
+    const tokenOnSuccess = await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "status" = 'succeeded',
+          "finished_at" = clock_timestamp(),
+          "attempt_token" = gen_random_uuid()
+      WHERE "id" = ${run.id}::uuid
+    `.catch((caught: unknown) => caught);
+    expect(tokenOnSuccess).toBeInstanceOf(Error);
+
+    const succeeded = await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "status" = 'succeeded', "finished_at" = clock_timestamp()
+      WHERE "id" = ${run.id}::uuid
+    `;
+    expect(succeeded).toBe(1);
+    const succeededRow = await currentRun(fixture);
+    expect(succeededRow.attemptToken).toBe(afterRetry.attemptToken);
+
+    // succeeded 之后不可修改（含尝试改 token）
+    const afterSuccess = await db.$executeRaw`
+      UPDATE "chapter_fact_runs"
+      SET "attempt_token" = gen_random_uuid()
+      WHERE "id" = ${run.id}::uuid
+    `.catch((caught: unknown) => caught);
+    expect(afterSuccess).toBeInstanceOf(Error);
+  });
+});

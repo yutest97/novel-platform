@@ -23,6 +23,13 @@
 --    - 进程崩溃留下的 running 在租约（服务层常量，10 分钟）到期后可被接管：
 --      先原子标为 failed，再复用同一行重新 running。
 --
+-- 4b. `attempt_token` 是**本次尝试的身份**（fencing token）：
+--    - 新建 run 由数据库默认 `gen_random_uuid()` 生成；
+--    - 每次 failed → running（含租约接管后的 restart）**必须轮换**为新值；
+--    - 只允许在 failed → running 时变化，running → succeeded 与 succeeded 之后都不可改；
+--    - 服务层的成功写入与失败标记都以 `attempt_token` 做 CAS：租约过期只触发接管，
+--      不保证旧进程立即停止，因此旧 attempt 即使稍后返回也**不能**提交或改写新 attempt。
+--
 -- 5. runs 只允许**受控状态更新**：
 --    - 归属 / Agent 身份 / created_at 不可变；
 --    - running → succeeded / failed、failed → running；
@@ -54,6 +61,8 @@ CREATE TABLE "chapter_fact_runs" (
     "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
     -- 本次尝试开始时间（running 租约的起点）
     "started_at" TIMESTAMPTZ(3) NOT NULL DEFAULT clock_timestamp(),
+    -- 本次尝试的身份（fencing token）：每次重试必须轮换
+    "attempt_token" UUID NOT NULL DEFAULT gen_random_uuid(),
     "finished_at" TIMESTAMPTZ(3),
 
     CONSTRAINT "chapter_fact_runs_pkey" PRIMARY KEY ("id")
@@ -193,6 +202,21 @@ BEGIN
      AND NOT (OLD."status" = 'failed' AND NEW."status" = 'running')
   THEN
     RAISE EXCEPTION 'started_at 只允许在重试开始时刷新'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  -- attempt_token 是本次尝试的身份：只允许在重试开始时变化，且必须变成新值
+  IF NEW."attempt_token" IS DISTINCT FROM OLD."attempt_token"
+     AND NOT (OLD."status" = 'failed' AND NEW."status" = 'running')
+  THEN
+    RAISE EXCEPTION 'attempt_token 只允许在重试开始时轮换'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  IF OLD."status" = 'failed' AND NEW."status" = 'running'
+     AND NEW."attempt_token" IS NOT DISTINCT FROM OLD."attempt_token"
+  THEN
+    RAISE EXCEPTION '重试必须轮换 attempt_token'
       USING ERRCODE = 'restrict_violation';
   END IF;
 

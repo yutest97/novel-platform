@@ -1313,7 +1313,7 @@ chapter_fact_runs
   id, work_id, chapter_id, source_version_id,
   agent_name, agent_version, provider, model,
   status(running|succeeded|failed), error_code,
-  created_at, started_at, finished_at
+  created_at, started_at, attempt_token, finished_at
   UNIQUE(source_version_id)
   UNIQUE(id, source_version_id, chapter_id, work_id)
 
@@ -1324,6 +1324,9 @@ chapter_fact_candidates
      → chapter_fact_runs(id, source_version_id, chapter_id, work_id)
 ```
 
+- `attempt_token UUID NOT NULL DEFAULT gen_random_uuid()`：本次尝试的身份（fencing token）。
+  新建时由数据库生成，`failed → running` **必须**轮换；
+  只允许在该迁移中变化，`running → succeeded` 与 `succeeded` 之后都不可改；
 - 归属：候选的 run 外键是**复合外键**，候选的 work / chapter / version 必须与它引用的
   run 完全一致。只用 `run_id` 单列外键时，候选可以挂在 run A 上却把三者指向另一个
   合法组合，数据库无法拒绝；现在这种组合直接被 `chapter_fact_candidates_run_fkey` 拒绝。
@@ -1337,7 +1340,7 @@ chapter_fact_candidates
 - `candidates` append-only（UPDATE / DELETE 一律拒绝）；
 - 测试清理沿用 `DISABLE TRIGGER USER` 受控策略。
 
-### 21.4 幂等、并发与 running 租约
+### 21.4 幂等、并发、running 租约与 attempt fencing
 
 ```
 runWorkWrite（作品锁）
@@ -1346,18 +1349,34 @@ runWorkWrite（作品锁）
   → 已有 running run？
       · started_at 未超出租约（10 分钟）→ 409 CONTINUITY_EXTRACTION_IN_PROGRESS
       · 已超出租约（进程崩溃）→ CAS 接管：标 failed 再复用同一行 running
-  → 已有 failed run？→ 复用同一行置回 running（刷新 started_at 与本次 provider/model）
-  → 否则插入 running
+  → 已有 failed run？→ 复用同一行置回 running（轮换 attempt_token，刷新 started_at
+                       与本次 provider/model）
+  → 否则插入 running（attempt_token 由数据库 gen_random_uuid() 生成）
 （锁外调用模型）
 runWorkWrite（作品锁）
   → 提交阶段二次校验（见 21.5）
-  → 写候选 + run succeeded + 审计（同一事务）
+  → 校验 attempt_token 仍是 run 的当前 attempt
+  → 写候选 + run succeeded（带 token 的 CAS）+ 审计（同一事务）
 ```
 
-- `UNIQUE(source_version_id)` 兜底"同一版本只有一个 run"；
-- **租约接管**用一条带 `status = 'running'`、旧 `started_at` 与数据库时钟租约条件的
-  `UPDATE` 做 CAS：两个请求即使同时判断"已过期"，也只有一个能真正接管；
-  `succeeded` 永远不会被接管；
+**双层 fencing**：
+
+| 层 | 作用 | 失效表现 |
+| --- | --- | --- |
+| 租约 `started_at` | 决定**什么时候允许接管** | 未到期 → 409 `IN_PROGRESS`；到期 → 后来的请求可接管 |
+| `attempt_token` | 决定**谁的写入有效** | token 不匹配 → 409 `CONTINUITY_EXTRACTION_LEASE_LOST` |
+
+- **租约过期只触发接管，不保证旧进程立即停止**：旧 attempt 的模型调用可能仍在运行、
+  稍后才返回。此时它的成功结果会被 token 校验拒绝（不写候选、不写审计、
+  不覆盖 provider / model、不标记 succeeded），失败也不会把新 attempt 标成 failed；
+- 成功写入是 CAS：`WHERE id = ? AND status = 'running' AND attempt_token = ?`，
+  更新数必须为 1，否则整个事务回滚并返回 `LEASE_LOST`；
+- 失败标记同样是 CAS：旧 attempt 的 `markRunFailed` 影响 0 行时**不覆盖任何新 attempt**，
+  调用方返回 `LEASE_LOST`（写库异常时保留原始错误，run 由租约兜底）；
+- token 轮换由数据库生成（`gen_random_uuid()`），调用方无法把旧值写回去；
+  触发器要求 `failed → running` **必须**轮换，`running → succeeded` 与 `succeeded`
+  之后都不可变；
+- `UNIQUE(source_version_id)` 兜底"同一版本只有一个 run"；`succeeded` 永远不被接管；
 - 失败不写候选；失败 run 可重试（复用同一行，不产生第二条）；
 - 正文不落库，候选 `payload` 只含结构化字段。
 
@@ -1413,6 +1432,7 @@ provider / model / factCount / factTypeCounts`。
 | `CONTINUITY_CHAPTER_NOT_FINALIZED` | 409 | 章节未定稿（或无正式版本，含提交时已不再是定稿） |
 | `CONTINUITY_SOURCE_VERSION_STALE` | 409 | 指定版本不是当前最新（含模型调用期间产生的 new revision） |
 | `CONTINUITY_EXTRACTION_IN_PROGRESS` | 409 | 同版本已有进行中的提取（租约未到期） |
+| `CONTINUITY_EXTRACTION_LEASE_LOST` | 409 | 本次尝试已被新尝试接管，结果被丢弃（不写候选 / 审计） |
 | `CONTINUITY_FACTS_INVALID` | 422 | 模型输出不合法（**不可重试**，不写候选） |
 | `CONTINUITY_EXTRACTION_FAILED` | 502 | Provider / 内部失败（可重试） |
 

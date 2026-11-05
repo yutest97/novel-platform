@@ -882,8 +882,8 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **A1-4B-C-B** 再补 33 个（恢复服务 / API 18、diff 视图纯逻辑 15）；
 **A1-4B-C-C** 再补 16 个（定稿服务 / API）；**REV-01** 再补 5 个浏览器用例（编辑器 / 加载竞态）；
 **A2-A** 再补 37 个（事实校验 22、事实服务 15）；**A2-A-REV-01** 再补 7 个
-（提交竞态 / 复合归属 / 租约 / 重试元数据 / 截断），
-全量单测 **849** 个（web 293 / workflow 241 / worker 63 / shared 15 / db 10 /
+（提交竞态 / 复合归属 / 租约 / 重试元数据 / 截断）；**A2-A-REV-02** 再补 3 个
+（attempt fencing），全量单测 **852** 个（web 293 / workflow 244 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **118**（96 + 版本对比与恢复 7 +
 REV-01 并发隔离 4 + 定稿 6 + 定稿入口前置条件 5）。
 
@@ -1148,13 +1148,22 @@ const result = await extractChapterFacts({
 run 标为 `failed`；新版本重新定稿后再次提取会创建新的 run。
 **幂等**：同一版本重复提取返回既有 run（`created=false`），不新增候选与审计；
 并发同版本只产生一个 run（`UNIQUE(source_version_id)`）。
-**running 租约**：`started_at` 记录本次尝试开始时间，租约 10 分钟。未到期 → 409
-`CONTINUITY_EXTRACTION_IN_PROGRESS`；到期（进程崩溃）→ 后到的请求用 CAS 接管同一条 run
-（先标 `failed` 再复用同一行），两个并发接管只有一个成功。
-**失败**：Provider 失败 → run `failed`，不写候选，可重试（复用同一 run）；
-模型输出不合法 → `CONTINUITY_FACTS_INVALID`（不可重试）。
-**重试元数据**：每次尝试记录当次的 provider / model，成功后以 `AgentRunResult` 的
-实际 `provider` / `model` 落库并写入审计（不是第一次失败 attempt 的配置）。
+**running 租约 + attempt fencing**：`started_at` 记录本次尝试开始时间，租约 10 分钟。
+未到期 → 409 `CONTINUITY_EXTRACTION_IN_PROGRESS`；到期（进程崩溃）→ 后到的请求用 CAS
+接管同一条 run（先标 `failed` 再复用同一行），两个并发接管只有一个成功。
+
+租约只决定"何时允许接管"，**不保证旧进程立即停止**，因此每次尝试还有独立的
+`attempt_token`（`failed → running` 必须轮换，数据库生成）：
+
+- 成功写入是 CAS：`WHERE id = ? AND status = 'running' AND attempt_token = ?`；
+- 失败标记同样带 token：旧 attempt 抛错影响 0 行，不会把新 attempt 标成 failed；
+- 旧 attempt 的模型调用即使晚返回，也只会得到 409
+  `CONTINUITY_EXTRACTION_LEASE_LOST`（「该连续性提取任务已由新的尝试接管」），
+  不写候选、不写审计、不覆盖 provider / model。
+  **失败**：Provider 失败 → run `failed`，不写候选，可重试（复用同一 run）；
+  模型输出不合法 → `CONTINUITY_FACTS_INVALID`（不可重试）。
+  **重试元数据**：每次尝试记录当次的 provider / model，成功后以 `AgentRunResult` 的
+  实际 `provider` / `model` 落库并写入审计（不是第一次失败 attempt 的配置）。
 
 **上下文截断**：人物 / 物品 / 境界 / 势力**分别查询**，每类最多 100 条，
 顺序固定 `orderIndex asc → createdAt asc → id asc`；避免大量人物把物品 / 势力整类挤掉。

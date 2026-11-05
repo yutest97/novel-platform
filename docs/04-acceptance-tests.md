@@ -787,3 +787,22 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-175 | 上下文截断 | 420 个人物（orderIndex 小）+ 物品 / 势力（orderIndex 大）：`characters` 恰为 100 条，物品与势力仍完整出现（按类型独立查询，每类 ≤100，顺序 `orderIndex → createdAt → id`） | 同上 |
 | AT-WF-176 | 迁移 | 空库仍为 **11** 个迁移 / **20** 张表 / **10** 个触发器（同一未推送迁移内升级，不新增第 12 个迁移） | `pnpm db:deploy` + 直连计数 |
 | AT-WF-177 | 测试数 | 全量单测 **849**（842 + 7）；浏览器 E2E 仍 **118**（本轮无 UI / API 变更） | 全量 `pnpm test` |
+
+### A2-A-REV-02 追加：attempt fencing
+
+> **根因**：租约接管复用同一个 run id，commit 阶段只校验 `run.id` + `status = 'running'`。
+> 旧 attempt A 的模型调用若在新 attempt B 接管后才返回，A 会看到 B 留下的 running，
+> 写入候选、覆盖 provider/model 并把 run 标 succeeded；同理 A 抛错时
+> `markRunFailed` 会把正在运行的 B 标成 failed。
+> 租约只决定"何时允许接管"，**不保证旧进程立即停止**。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-178 | attempt_token | `chapter_fact_runs.attempt_token UUID NOT NULL DEFAULT gen_random_uuid()`；新建由数据库生成；每次 `failed → running` **必须轮换**（沿用旧值被触发器拒绝）；`running → succeeded` 与 `succeeded` 之后不可变 | `packages/workflow/test/chapter-facts-service.test.ts` |
+| AT-WF-179 | 提交 CAS | commit 事务内校验 `current.attemptToken === 本次 attemptToken`，不一致 → 409 `CONTINUITY_EXTRACTION_LEASE_LOST`；成功 UPDATE 为 `WHERE id = ? AND status = 'running' AND attempt_token = ?`，更新数必须为 1，否则整个事务回滚（候选一并撤销） | 同上 |
+| AT-WF-180 | 旧 attempt 成功返回 | A 进入模型 → 租约推到过期 → B 接管（新 token）→ 放行 A：A 得到 `LEASE_LOST`；候选 0 / 审计 0；run 仍 running 且 token 属于 B；provider/model 未被 A 覆盖；放行 B 后 B 成功，候选与审计只来自 B | 同上 |
+| AT-WF-181 | 旧 attempt 抛错 | A 的 Provider 抛错 → `markRunFailed` 因 token 不匹配更新 0 行 → A 返回 `LEASE_LOST`；run 仍 running、token 属于 B、errorCode 为 null；B 后返回成功，审计 1 条、候选 3 条、run 仍只有 1 条 | 同上 |
+| AT-WF-182 | 失败标记 CAS | `markRunFailed` 带 attempt_token 且 `WHERE status='running' AND attempt_token = ?`；0 行时不覆盖任何新 attempt，调用方返回 `LEASE_LOST`；写库异常（`unknown`）保留原始错误，run 由租约兜底 | 同上 |
+| AT-WF-183 | 回归 | 首次提取成功、同版本幂等命中、普通 `failed → running` 重试均不回归；复合 run 外键在 token 轮换后仍然生效（版本不一致的候选被 23503 拒绝） | 同上（原有 22 个服务用例） |
+| AT-WF-184 | 迁移 | 空库仍为 **11** 个迁移 / **20** 张表 / **10** 个触发器；`attempt_token` 为 `NOT NULL DEFAULT gen_random_uuid()` | `pnpm db:deploy` + 直连计数 |
+| AT-WF-185 | 测试数 | 全量单测 **852**（849 + 3）；浏览器 E2E 仍 **118**（本轮无 UI / API 变更） | 全量 `pnpm test` |

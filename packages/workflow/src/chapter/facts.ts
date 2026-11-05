@@ -424,11 +424,19 @@ export interface ExtractChapterFactsInput {
  * `running` 未超出租约时第二个请求得到 `CONTINUITY_EXTRACTION_IN_PROGRESS`，
  * 超过租约（进程崩溃）则由后到的请求原子接管同一条 run。
  *
+ * **双层 fencing**（租约 + attempt token）：
+ * - 租约只决定"什么时候允许接管"，**不保证旧进程立即停止**；
+ * - 每次尝试有独立的 `attempt_token`，成功写入与失败标记都以它做 CAS；
+ * - 旧 attempt 即使模型调用稍后才返回，commit 会因 token 不匹配被拒
+ *   （`CONTINUITY_EXTRACTION_LEASE_LOST`），不会写候选、不会覆盖 provider / model、
+ *   也不会把新 attempt 标成 failed 或 succeeded。
+ *
  * @throws AuthError
  * - `NOT_FOUND`：作品 / 章节不属于当前作者；
  * - `CONTINUITY_CHAPTER_NOT_FINALIZED`：章节未定稿（含提交时已不再是定稿）；
  * - `CONTINUITY_SOURCE_VERSION_STALE`：章节最新版本已变化（含模型调用期间的新 revision）；
  * - `CONTINUITY_EXTRACTION_IN_PROGRESS`：同一版本已有进行中的提取（租约未到期）；
+ * - `CONTINUITY_EXTRACTION_LEASE_LOST`：本次尝试已被新的尝试接管，结果被丢弃；
  * - `CONTINUITY_FACTS_INVALID`：模型输出不合法（不可重试，不写候选）；
  * - `CONTINUITY_EXTRACTION_FAILED`：Provider / 内部失败（可重试）。
  */
@@ -542,6 +550,8 @@ export async function extractChapterFacts(
   }
 
   const { run, context, sourceVersionNo } = prepared;
+  // 本次尝试的身份：所有写入都必须带上它做 CAS
+  const attemptToken = run.attemptToken;
 
   // ---- 2. 调用 Agent（事务外：不持锁、不占连接） ----
   let facts: ChapterFact[];
@@ -555,7 +565,11 @@ export async function extractChapterFacts(
     actualModel = result.model;
   } catch (error) {
     const code = mapExtractionError(error);
-    await markRunFailed(input.db, run.id, code);
+    // 旧 attempt 的失败不得改写已经被接管的新 attempt
+    const mark = await markRunFailed(input.db, run.id, attemptToken, code);
+    if (mark === 'lease-lost') {
+      throw new AuthError('CONTINUITY_EXTRACTION_LEASE_LOST');
+    }
     throw error instanceof AuthError ? error : new AuthError(code);
   }
 
@@ -576,6 +590,10 @@ export async function extractChapterFacts(
       }
       if (current.status !== 'running') {
         throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+      }
+      // 双层 fencing 的第二层：本次尝试必须仍是 run 的当前 attempt
+      if (current.attemptToken !== attemptToken) {
+        throw new AuthError('CONTINUITY_EXTRACTION_LEASE_LOST');
       }
 
       // ---- 提交阶段二次校验：模型调用期间的写入必须被看到 ----
@@ -619,7 +637,8 @@ export async function extractChapterFacts(
         created.push({ ...fact, id: row.id });
       }
 
-      // 终态 + 本次实际 provider / model；时间戳统一走数据库时钟
+      // 终态 + 本次实际 provider / model；时间戳统一走数据库时钟。
+      // 必须是 CAS：旧 attempt 即使在 token 校验之后、写库之前被接管，也更新不到。
       const updated = await tx.$executeRaw`
         UPDATE "chapter_fact_runs"
         SET "status" = 'succeeded',
@@ -627,10 +646,13 @@ export async function extractChapterFacts(
             "finished_at" = clock_timestamp(),
             "provider" = ${actualProvider},
             "model" = ${actualModel}
-        WHERE "id" = ${run.id}::uuid AND "status" = 'running'
+        WHERE "id" = ${run.id}::uuid
+          AND "status" = 'running'
+          AND "attempt_token" = ${attemptToken}::uuid
       `;
       if (updated !== 1) {
-        throw new AuthError('CONTINUITY_EXTRACTION_IN_PROGRESS');
+        // 整个事务回滚（候选一并撤销），由外层转成 LEASE_LOST
+        throw new AuthError('CONTINUITY_EXTRACTION_LEASE_LOST');
       }
 
       const factTypeCounts = countFactTypes(created);
@@ -672,7 +694,10 @@ export async function extractChapterFacts(
     };
   } catch (error) {
     const code = mapExtractionError(error);
-    await markRunFailed(input.db, run.id, code);
+    const mark = await markRunFailed(input.db, run.id, attemptToken, code);
+    if (mark === 'lease-lost') {
+      throw new AuthError('CONTINUITY_EXTRACTION_LEASE_LOST');
+    }
     throw error instanceof AuthError ? error : new AuthError(code);
   }
 }
@@ -825,19 +850,38 @@ function mapExtractionError(error: unknown): AuthErrorCode {
   return 'CONTINUITY_EXTRACTION_FAILED';
 }
 
-/** 把 run 标记为失败（best-effort；失败不掩盖原始错误）。 */
-async function markRunFailed(db: PrismaClient, runId: string, errorCode: string): Promise<void> {
+/**
+ * 把 run 标记为失败（best-effort）。
+ *
+ * **必须带 attempt_token**：旧 attempt 抛错时，run 可能已经被新 attempt 接管，
+ * 无条件按 id 更新会把正在运行的新 attempt 杀掉。
+ *
+ * @returns
+ * - `marked`：本次 attempt 仍是当前 attempt，已标记 failed（保留原始错误）；
+ * - `lease-lost`：0 行受影响，说明已被接管（调用方改为返回 LEASE_LOST）；
+ * - `unknown`：写库本身失败，无法确认（保留原始错误；run 由租约兜底恢复）。
+ */
+async function markRunFailed(
+  db: PrismaClient,
+  runId: string,
+  attemptToken: string,
+  errorCode: string,
+): Promise<'marked' | 'lease-lost' | 'unknown'> {
   try {
     // 时间戳走数据库时钟，避免应用 / 数据库时区或时钟偏移
-    await db.$executeRaw`
+    const updated = await db.$executeRaw`
       UPDATE "chapter_fact_runs"
       SET "status" = 'failed',
           "error_code" = ${errorCode},
           "finished_at" = clock_timestamp()
-      WHERE "id" = ${runId}::uuid AND "status" = 'running'
+      WHERE "id" = ${runId}::uuid
+        AND "status" = 'running'
+        AND "attempt_token" = ${attemptToken}::uuid
     `;
+    return updated === 1 ? 'marked' : 'lease-lost';
   } catch {
     // 忽略：原始错误更重要；run 会停在 running，租约到期后可被后续请求接管
+    return 'unknown';
   }
 }
 
@@ -868,9 +912,12 @@ async function takeOverExpiredRun(
 /**
  * failed → running：复用**同一条 run** 开始新一次尝试。
  *
+ * - 轮换 `attempt_token`（旧 attempt 从此失去写入资格）；
  * - 刷新 `started_at`（新租约起点）；
  * - 清空 `error_code` / `finished_at`；
  * - 记录本次尝试的 provider / model（成功后会被实际返回值覆盖）。
+ *
+ * token 由数据库 `gen_random_uuid()` 生成，调用方无法传入旧值。
  */
 async function restartRun(
   tx: Prisma.TransactionClient,
@@ -884,6 +931,7 @@ async function restartRun(
         "error_code" = NULL,
         "finished_at" = NULL,
         "started_at" = clock_timestamp(),
+        "attempt_token" = gen_random_uuid(),
         "provider" = ${provider},
         "model" = ${model}
     WHERE "id" = ${runId}::uuid AND "status" = 'failed'
@@ -909,6 +957,8 @@ interface ChapterFactRunRow {
   readonly errorCode: string | null;
   readonly createdAt: Date;
   readonly startedAt: Date;
+  /** 本次尝试的身份；所有写入都以它做 CAS。 */
+  readonly attemptToken: string;
   readonly finishedAt: Date | null;
 }
 
