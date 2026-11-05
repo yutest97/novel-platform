@@ -826,3 +826,21 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-194 | 客户端 | `apps/web/src/lib/api.ts` 提供 `extractChapterFactsFromApi` / `fetchChapterFacts` / `fetchChapterFactCandidate` / `fetchChapterFactRun` 与对应类型；CONTINUITY 错误码登记到 `ApiErrorCode` 与文案表 | 同上（类型检查） |
 | AT-WF-195 | 迁移 | 本轮**不新增 migration**：空库仍为 11 迁移 / 20 表 / 10 触发器 | `pnpm db:deploy` |
 | AT-WF-196 | 测试数 | 全量单测 **865**（852 + A2-B API 13）；浏览器 E2E 仍 **118**（本轮无 UI） | 全量 `pnpm test` |
+
+### A2-B-REV-01 追加：默认 Mock Provider、配置错误映射与列表快照
+
+> **三个缺口**：
+> 1. `MODEL_PROVIDER=mock`（默认值）走通用 `MockProvider`，输出 `{ok:true}` 过不了
+>    `factOutputSchema` → 默认配置下提取稳定 422，与"本地 / CI 无网络可运行"矛盾；
+> 2. Provider 配置非法时 `ModelProviderError` 冒到 `authErrorResponse`，被当成未知异常 → 500；
+> 3. 列表用 `count()` + `findMany()` 两条查询，可能落在不同快照 → `total < facts.length`、
+>    `truncated` 与集合自相矛盾。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-197 | 默认 Mock | `MODEL_PROVIDER=mock` 使用**事实专用** Mock（`{"facts": []}`，`name=mock / model=mock-model`）：经真实 POST 路由首次 **201**、`factCount=0`、run `succeeded`、0 候选、1 条成功审计；同版本再次 POST **200** `created=false` 且仍只有 1 个 run | `apps/web/test/chapter-facts-api.test.ts` |
+| AT-WF-198 | Mock 不读 Key / 不联网 | 即使设置了 `MODEL_API_KEY` 与不可达的 `MODEL_BASE_URL`，mock 仍 201 成功 | 同上 |
+| AT-WF-199 | 配置错误映射 | `MODEL_PROVIDER=openai-compatible` 且缺 Base URL / 模型名 → **502 `CONTINUITY_EXTRACTION_FAILED`**；run / 候选 / 成功审计均为 0；响应不含 API Key、`MODEL_` 变量名、URL 或底层异常文案 | 同上 |
+| AT-WF-200 | 列表快照 | 列表用**单条 SQL**（`COUNT(*) OVER()` + JOIN 成功 run + LIMIT 200）返回 total 与集合；并发提交新候选期间连续读取 40 次，每次 `total >= facts.length` 且 `truncated === total > facts.length`；205 条时 total 仍在 LIMIT 之前计算为 205 | 同上 |
+| AT-WF-201 | 回归 | 201/200 幂等、四种 409、400/401/403/404、六类过滤、跨章节跨作品 404、脱敏、GET 只读、200 条硬上限全部不变 | 同上（既有 13 个用例） |
+| AT-WF-202 | 测试数 | 全量单测 **868**（865 + 3）；浏览器 E2E 仍 **118**（本轮无 UI） | 全量 `pnpm test` |

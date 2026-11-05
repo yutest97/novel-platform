@@ -2,7 +2,7 @@
 
 - 版本：v1.6
 - 日期：2026-11-05
-- 当前基线：`b7c51c7`（A2-A 已验收）+ A2-B（本地提交）
+- 当前基线：`2feb72d`（A2-B 已验收）+ A2-B-REV-01（本地提交）
 - 状态：执行中
 
 ---
@@ -125,3 +125,4 @@
 | 2026-11-05 | A2-A-REV-01：提交阶段二次校验（版本 / 定稿 / run 归属）、候选与 run 复合外键、running 租约 CAS 接管、重试元数据以本次实际 provider / model 为准、上下文按类型截断；同一未推送迁移内升级，不新增迁移 |
 | 2026-11-05 | A2-A-REV-02：attempt fencing（`attempt_token` 每次重试轮换）；commit 成功写入与 `markRunFailed` 都以 token 做 CAS，旧 attempt 即使晚返回也不能提交、更不能把新 attempt 标 failed；新增 `CONTINUITY_EXTRACTION_LEASE_LOST` |
 | 2026-11-05 | A2-B：连续性事实 API（提取 201/200 幂等、列表 factType 过滤 + 200 条上限 truncated、候选详情、run 状态）；显式 DTO + 只读，不新增 migration、不做 UI / 采纳 / 写回 |
+| 2026-11-05 | A2-B-REV-01：`MODEL_PROVIDER=mock` 改用事实专用 Mock（`{"facts": []}`）；Provider 配置错误稳定映射 502 `CONTINUITY_EXTRACTION_FAILED`；列表改为单条 SQL（`COUNT(*) OVER()`），统计与集合同快照 |

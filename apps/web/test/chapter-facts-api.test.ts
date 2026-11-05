@@ -785,3 +785,202 @@ describe('GET 候选详情与 run', () => {
     expect(view).not.toHaveProperty('error');
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* A2-B-REV-01：默认 Mock Provider、配置错误映射、列表快照一致性                  */
+/* -------------------------------------------------------------------------- */
+
+const MODEL_ENV_KEYS = [
+  'MODEL_PROVIDER',
+  'MODEL_BASE_URL',
+  'MODEL_API_KEY',
+  'MODEL_NAME',
+  'MODEL_TIMEOUT_MS',
+] as const;
+
+type ModelEnvKey = (typeof MODEL_ENV_KEYS)[number];
+
+function snapshotModelEnv(): Map<ModelEnvKey, string | undefined> {
+  return new Map(MODEL_ENV_KEYS.map((key) => [key, process.env[key]]));
+}
+
+function setModelEnv(values: Partial<Record<ModelEnvKey, string>>): void {
+  for (const key of MODEL_ENV_KEYS) {
+    const value = values[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+function restoreModelEnv(snapshot: Map<ModelEnvKey, string | undefined>): void {
+  for (const key of MODEL_ENV_KEYS) {
+    const value = snapshot.get(key);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+describe('默认 Mock Provider（A2-B-REV-01）', () => {
+  it('MODEL_PROVIDER=mock 走真实路由：201、run=mock/mock-model、facts 合法且为空、同版本 200', async () => {
+    const fixture = await createFixture();
+    const { versionId } = await seedVersion(fixture, 1, { finalize: true });
+    const snapshot = snapshotModelEnv();
+    setChapterFactProvider(null);
+    // 同时给出会被误用的 Key / Base URL：mock 绝不能读取或联网
+    setModelEnv({
+      MODEL_PROVIDER: 'mock',
+      MODEL_API_KEY: 'sk-mock-must-not-be-read',
+      MODEL_BASE_URL: 'http://127.0.0.1:1',
+    });
+
+    try {
+      const first = await extract(fixture, { sourceVersionId: versionId });
+      expect(first.status).toBe(201);
+      const extraction = first.json['extraction'] as Record<string, unknown>;
+      expect(extraction).toMatchObject({
+        created: true,
+        sourceVersionId: versionId,
+        sourceVersionNo: 1,
+        provider: 'mock',
+        model: 'mock-model',
+        factCount: 0,
+      });
+      expect(extraction['factTypeCounts']).toEqual({});
+
+      const run = await db.chapterFactRun.findFirstOrThrow({
+        where: { workId: fixture.workId },
+      });
+      expect(run).toMatchObject({
+        provider: 'mock',
+        model: 'mock-model',
+        agentName: 'continuity.extractor',
+        status: 'succeeded',
+      });
+      expect(run.errorCode).toBeNull();
+
+      // Mock 输出 {"facts": []} 合法：0 候选、成功审计 1 条
+      expect(await db.chapterFactCandidate.count({ where: { workId: fixture.workId } })).toBe(0);
+      expect(
+        await db.auditLog.count({
+          where: { action: 'continuity.facts_extracted', targetId: fixture.chapterId },
+        }),
+      ).toBe(1);
+
+      const second = await extract(fixture, { sourceVersionId: versionId });
+      expect(second.status).toBe(200);
+      expect((second.json['extraction'] as { created: boolean }).created).toBe(false);
+      expect(await db.chapterFactRun.count({ where: { workId: fixture.workId } })).toBe(1);
+    } finally {
+      restoreModelEnv(snapshot);
+      setChapterFactProvider(null);
+    }
+  });
+});
+
+describe('Provider 配置错误（A2-B-REV-01）', () => {
+  it('配置不完整 → 502 CONTINUITY_EXTRACTION_FAILED，不建 run / 候选 / 审计，不泄露配置', async () => {
+    const fixture = await createFixture();
+    const { versionId } = await seedVersion(fixture, 1, { finalize: true });
+    const snapshot = snapshotModelEnv();
+    setChapterFactProvider(null);
+    setModelEnv({
+      MODEL_PROVIDER: 'openai-compatible',
+      MODEL_BASE_URL: '',
+      MODEL_NAME: '',
+      MODEL_API_KEY: 'sk-should-not-leak-9f3c',
+    });
+
+    try {
+      const response = await extract(fixture, { sourceVersionId: versionId });
+      expect(response.status).toBe(502);
+      expect((response.json['error'] as { code: string }).code).toBe(
+        'CONTINUITY_EXTRACTION_FAILED',
+      );
+
+      // 配置错误发生在任何数据库写入之前
+      expect(await db.chapterFactRun.count({ where: { workId: fixture.workId } })).toBe(0);
+      expect(await db.chapterFactCandidate.count({ where: { workId: fixture.workId } })).toBe(0);
+      expect(
+        await db.auditLog.count({
+          where: { action: 'continuity.facts_extracted', targetId: fixture.chapterId },
+        }),
+      ).toBe(0);
+
+      // 不回显 Key / 环境变量名 / URL / 底层异常
+      expect(response.text).not.toContain('sk-should-not-leak-9f3c');
+      expect(response.text).not.toContain('MODEL_');
+      expect(response.text).not.toContain('http');
+      expect(response.text).not.toContain('模型服务');
+    } finally {
+      restoreModelEnv(snapshot);
+      setChapterFactProvider(null);
+    }
+  });
+});
+
+describe('列表快照一致性（A2-B-REV-01）', () => {
+  it('并发提交新候选时，total / facts / truncated 始终自洽', async () => {
+    const fixture = await createFixture();
+    const { versionId } = await seedVersion(fixture, 1, { finalize: true });
+    setChapterFactProvider(stubProvider([]));
+    const created = await extract(fixture, { sourceVersionId: versionId });
+    expect(created.status).toBe(201);
+    const runId = (created.json['extraction'] as { runId: string }).runId;
+
+    const seed = (index: number) => ({
+      runId,
+      workId: fixture.workId,
+      chapterId: fixture.chapterId,
+      sourceVersionId: versionId,
+      factType: 'plot_thread',
+      payload: { factType: 'plot_thread', summary: `并发线索 ${index}`, reason: '快照测试' },
+    });
+
+    // 起始 150 条：并发插入期间 total 会跨越 200 的截断边界
+    await db.chapterFactCandidate.createMany({
+      data: Array.from({ length: 150 }, (_, index) => seed(index)),
+    });
+
+    let closed = false;
+    let inserted = 0;
+    const writer = (async () => {
+      for (let index = 150; index < 210 && !closed; index += 1) {
+        await db.chapterFactCandidate.create({ data: seed(index) });
+        inserted += 1;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    })();
+
+    try {
+      // 多轮读取：每一次响应内统计与集合必须自洽
+      for (let round = 0; round < 40; round += 1) {
+        const listed = await listFacts(fixture);
+        expect(listed.status).toBe(200);
+        const facts = listed.json['facts'] as unknown[];
+        const total = listed.json['total'] as number;
+        const truncated = listed.json['truncated'] as boolean;
+        expect(facts.length).toBeLessThanOrEqual(200);
+        expect(total).toBeGreaterThanOrEqual(facts.length);
+        expect(truncated).toBe(total > facts.length);
+      }
+    } finally {
+      closed = true;
+      await writer;
+    }
+
+    expect(inserted).toBeGreaterThan(0);
+    // 收尾：最终总量与返回集合一致
+    const final = await listFacts(fixture);
+    const finalTotal = final.json['total'] as number;
+    const finalFacts = final.json['facts'] as unknown[];
+    expect(finalTotal).toBe(150 + inserted);
+    expect(finalFacts.length).toBe(Math.min(200, finalTotal));
+    expect(final.json['truncated']).toBe(finalTotal > finalFacts.length);
+  });
+});

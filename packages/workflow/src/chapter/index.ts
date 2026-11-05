@@ -50,6 +50,8 @@ export {
   type ExtractChapterFactsInput,
   type FactEntityRef,
 } from './facts.js';
+export { CONTINUITY_FACTS_MOCK_OUTPUT, createContinuityFactsMockProvider } from './facts-mock.js';
+export { createChapterFactProviderFromEnv } from './facts-provider.js';
 export {
   MAX_CHAPTER_FACT_LIST,
   getChapterFactCandidate,

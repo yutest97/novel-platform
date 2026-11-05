@@ -883,8 +883,9 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **A1-4B-C-C** 再补 16 个（定稿服务 / API）；**REV-01** 再补 5 个浏览器用例（编辑器 / 加载竞态）；
 **A2-A** 再补 37 个（事实校验 22、事实服务 15）；**A2-A-REV-01** 再补 7 个
 （提交竞态 / 复合归属 / 租约 / 重试元数据 / 截断）；**A2-A-REV-02** 再补 3 个
-（attempt fencing）；**A2-B** 再补 13 个（事实 API），
-全量单测 **865** 个（web 306 / workflow 244 / worker 63 / shared 15 / db 10 /
+（attempt fencing）；**A2-B** 再补 13 个（事实 API）；**A2-B-REV-01** 再补 3 个
+（默认 Mock / 配置错误 / 列表快照），
+全量单测 **868** 个（web 309 / workflow 244 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **118**（96 + 版本对比与恢复 7 +
 REV-01 并发隔离 4 + 定稿 6 + 定稿入口前置条件 5）。
 
@@ -1215,6 +1216,18 @@ GET /api/works/:workId/chapters/:chapterId/fact-runs/:runId
 
 **客户端**：`apps/web/src/lib/api.ts` 提供 `extractChapterFactsFromApi` /
 `fetchChapterFacts` / `fetchChapterFactCandidate` / `fetchChapterFactRun`。
+
+**Mock 模式**：`MODEL_PROVIDER=mock`（默认）使用**事实专用** Mock，固定输出
+`{"facts": []}`（对任意章节 / 实体上下文都合法），身份为 `mock / mock-model`；
+它不联网、不读 Key。通用 MockProvider 的 `{ok:true}` 过不了 fact 输出 Schema，
+因此不能用于事实提取。生产仍走 OpenAI 兼容 Provider。
+
+**配置错误**：Provider 配置缺失 / 非法（如 `openai-compatible` 缺 Base URL 或模型名）
+会稳定返回 **502 `CONTINUITY_EXTRACTION_FAILED`**，不建 run、不写候选与审计，
+也不回显 Key / URL / 环境变量名。
+
+**列表统计**：`total` 与 `facts` 来自**同一条 SQL**（`COUNT(*) OVER()` 在 LIMIT 之前
+计算），不会出现 `total < facts.length` 或 `truncated` 与集合矛盾。
 
 ### 浏览器 E2E（Playwright Chromium）
 

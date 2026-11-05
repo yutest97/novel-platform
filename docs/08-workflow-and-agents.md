@@ -1540,3 +1540,48 @@ HTTP API、候选审阅 / 采纳 UI、Worker 常驻注册、事实写回人物/�
 
 候选列表 / 采纳 UI、事实采纳与拒绝、写回人物 / 物品 / 势力 / 关系 / 境界、
 冲突检测、批量提取、Worker 常驻任务、RAG / embedding / 图谱。
+
+### 22.8 默认 Mock 与配置错误（A2-B-REV-01）
+
+**Mock 模式必须能跑通提取**：通用 `MockProvider` 的默认输出是 `{ok:true}`，
+过不了 `factOutputSchema`（`MODEL_PROVIDER=mock` 是默认值，本地与 CI 都不联网）。
+因此 `createChapterFactProviderFromEnv()` 在 mock 分支使用
+`createContinuityFactsMockProvider()`：
+
+- 固定输出 `{"facts": []}`（对任意章节 / 实体上下文都合法，表示"本章无变化"）；
+- 身份仍是 `name=mock / defaultModel=mock-model`；
+- 不联网、不读 Key、不读系统时钟。
+
+`setChapterFactProvider()` 仍可注入替身，优先级高于环境变量。
+
+**配置错误的稳定映射**：`readProviderConfig` / `OpenAICompatibleProvider` 构造会抛
+`ModelProviderError`（`MODEL_NOT_CONFIGURED`）。Provider 在**任何数据库事务之前**创建，
+因此 `chapterFactProvider()` 在构造边界把它映射为
+502 `CONTINUITY_EXTRACTION_FAILED`：
+
+- 不建 run、不写候选、不写成功审计；
+- 不回显 Key、Base URL、环境变量名或底层异常文案；
+- 生产路径不把 Provider 构造塞进事务（否则配置错误会变成事务内异常）。
+
+### 22.9 列表统计与集合的快照一致性
+
+`listChapterFacts` 用**一条 SQL** 同时取行与总数，而不是 `count()` + `findMany()`：
+
+```sql
+SELECT c.id, c.run_id, c.source_version_id, c.fact_type, c.payload, c.created_at,
+       COUNT(*) OVER() AS total
+FROM chapter_fact_candidates c
+JOIN chapter_fact_runs r ON r.id = c.run_id
+WHERE c.work_id = $1::uuid AND c.chapter_id = $2::uuid
+  [AND c.fact_type = $3]
+  AND r.status = 'succeeded'
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT 200
+```
+
+- `COUNT(*) OVER()` 在 LIMIT **之前**计算，`total` 是过滤后的完整数量；
+- 窗口计数与返回集合来自同一语句、同一快照：不会出现 `total < facts.length`；
+- 空结果没有窗口行 → `total = 0`；
+- `truncated = total > facts.length`；
+- 全部参数化（work / chapter / fact_type / limit），不拼接用户输入；
+- 仍只读，不写审计、不改任何表。

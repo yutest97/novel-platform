@@ -9,7 +9,7 @@
  */
 
 import { AuthError } from '@novel/auth';
-import type { Prisma, PrismaClient } from '@novel/db';
+import type { PrismaClient } from '@novel/db';
 import { normalizeUuid, requireOwnedWork } from '@novel/works';
 
 import type { ChapterFactType } from './facts.js';
@@ -95,6 +95,11 @@ interface FactQueryInput {
  * - 默认 `createdAt desc → id desc`；
  * - 可按 `factType` 过滤（白名单由 HTTP 层与服务层共同保证）；
  * - 最多 `MAX_CHAPTER_FACT_LIST` 条，超出时 `truncated=true`。
+ *
+ * **统计与集合必须来自同一快照**：`total` 用 `COUNT(*) OVER()` 在同一条 SQL 里
+ * 计算（在 LIMIT 之前），否则 `count()` 与 `findMany()` 落在不同快照时会出现
+ * `total < facts.length`、`truncated` 与集合自相矛盾。整条查询全参数化，
+ * 不拼接任何用户输入。
  */
 export async function listChapterFacts(
   input: FactQueryInput & { readonly factType?: ChapterFactType },
@@ -104,43 +109,81 @@ export async function listChapterFacts(
   await requireOwnedWork(input.db, workId, input.authorId);
   await requireChapterInWork(input.db, workId, chapterId);
 
-  const where: Prisma.ChapterFactCandidateWhereInput = {
-    workId,
-    chapterId,
-    ...(input.factType === undefined ? {} : { factType: input.factType }),
-    // 候选只在成功的 run 上产生；这里再约束一次，避免将来出现历史脏数据
-    run: { status: 'succeeded' },
-  };
+  // 过滤分支各自是一条完整 SQL（不拼接字符串，fact_type 走参数）
+  const rows =
+    input.factType === undefined
+      ? await input.db.$queryRaw<FactListRow[]>`
+          SELECT
+            c."id" AS "id",
+            c."run_id" AS "run_id",
+            c."source_version_id" AS "source_version_id",
+            c."fact_type" AS "fact_type",
+            c."payload" AS "payload",
+            c."created_at" AS "created_at",
+            COUNT(*) OVER() AS "total"
+          FROM "chapter_fact_candidates" c
+          JOIN "chapter_fact_runs" r ON r."id" = c."run_id"
+          WHERE c."work_id" = ${workId}::uuid
+            AND c."chapter_id" = ${chapterId}::uuid
+            AND r."status" = 'succeeded'
+          ORDER BY c."created_at" DESC, c."id" DESC
+          LIMIT ${MAX_CHAPTER_FACT_LIST}
+        `
+      : await input.db.$queryRaw<FactListRow[]>`
+          SELECT
+            c."id" AS "id",
+            c."run_id" AS "run_id",
+            c."source_version_id" AS "source_version_id",
+            c."fact_type" AS "fact_type",
+            c."payload" AS "payload",
+            c."created_at" AS "created_at",
+            COUNT(*) OVER() AS "total"
+          FROM "chapter_fact_candidates" c
+          JOIN "chapter_fact_runs" r ON r."id" = c."run_id"
+          WHERE c."work_id" = ${workId}::uuid
+            AND c."chapter_id" = ${chapterId}::uuid
+            AND c."fact_type" = ${input.factType}
+            AND r."status" = 'succeeded'
+          ORDER BY c."created_at" DESC, c."id" DESC
+          LIMIT ${MAX_CHAPTER_FACT_LIST}
+        `;
 
-  const [total, rows] = await Promise.all([
-    input.db.chapterFactCandidate.count({ where }),
-    input.db.chapterFactCandidate.findMany({
-      where,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: MAX_CHAPTER_FACT_LIST,
-      select: {
-        id: true,
-        runId: true,
-        sourceVersionId: true,
-        factType: true,
-        payload: true,
-        createdAt: true,
-      },
-    }),
-  ]);
+  // 空结果没有窗口行 → total = 0
+  const total = rows.length === 0 ? 0 : Number(rows[0]?.total ?? 0n);
 
   const versionNos = await loadVersionNos(
     input.db,
     workId,
     chapterId,
-    rows.map((row) => row.sourceVersionId),
+    rows.map((row) => row.source_version_id),
   );
 
-  return {
-    facts: rows.map((row) => toFactView(row, versionNos)),
-    total,
-    truncated: total > rows.length,
-  };
+  const facts = rows.map((row) =>
+    toFactView(
+      {
+        id: row.id,
+        runId: row.run_id,
+        sourceVersionId: row.source_version_id,
+        factType: row.fact_type,
+        payload: row.payload,
+        createdAt: row.created_at,
+      },
+      versionNos,
+    ),
+  );
+
+  return { facts, total, truncated: total > facts.length };
+}
+
+/** 列表查询的原始行（`total` 是窗口计数，pg 的 int8 → bigint）。 */
+interface FactListRow {
+  readonly id: string;
+  readonly run_id: string;
+  readonly source_version_id: string;
+  readonly fact_type: string;
+  readonly payload: unknown;
+  readonly created_at: Date;
+  readonly total: bigint;
 }
 
 /**
