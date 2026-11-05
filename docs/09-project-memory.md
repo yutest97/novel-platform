@@ -199,22 +199,23 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B（含 REV-01）、A2-D-A、A2-D-B 均已在本地完成，等待负责人复审：
+A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C 均已在本地完成，
+等待负责人复审：
 
 - `docs/tasks/A2-C-B-REV-01-review-integrity.md`（已完成修复的追溯记录，不再派发）
 - `docs/tasks/A2-D-A-summarizer-agent.md`（契约层）
 - `docs/tasks/A2-D-B-summarizer-workflow.md`（工作流与落库）
 - `docs/tasks/A2-D-B-REV-01-finalize-resilience.md`（定稿不被摘要配置阻断）
+- `docs/tasks/A2-D-C-prior-summaries.md`（Reviewer 前章摘要接线）
 
-A2-D-B 复审发现一个阻塞项：finalize 路由在模型配置缺失时会被 Provider 构造阻断。
-修复卡：`docs/tasks/A2-D-B-REV-01-finalize-resilience.md`。
+A2-D-B-REV-01 与 A2-D-C 的本地实现已通过代码复审；当前等待整体复审 / CI。
 
 复审通过前不推送。复审通过后的候选顺序：
 
-1. Reviewer `priorSummaries` 接线（卡已备：
-   `docs/tasks/A2-D-C-prior-summaries.md`）：只在有摘要的已定稿前序章节上填充，
-   仍不跨作品、不猜测缺失摘要；
-2. 摘要 / Reviewer 结果的读取 API 与只读 UI（两者都已落库但作者看不到）；
+1. Reviewer 结果只读 API（卡已备：
+   `docs/tasks/A2-C-D-review-results-api.md`）：读取候选对应 task / run / issues，
+   只读、无 UI；
+2. 摘要读取 API / UI（摘要已落库但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
 4. 是否给 high severity 加采纳门禁——仍需产品确认。
 
