@@ -1705,8 +1705,7 @@ load_review_input → run_reviewer → persist_review_result
 
 - `UNIQUE(candidate_id)` + `UNIQUE(generation_task_id)`；
 - issue 的 `(run_id, candidate_id, chapter_id, work_id)` 是**复合外键**；
-- issues append-only；只有 `running` run 可 INSERT，进入 `succeeded / failed`
-  终态后不能再追加；run 成功后不可改、不可删；
+- issues append-only；run 成功后不可改、不可删；
 - 表里没有正文副本 / prompt / 模型原始响应 / 密钥列。
 
 ### 24.4 失败隔离与重试

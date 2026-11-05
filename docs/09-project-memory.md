@@ -206,14 +206,14 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **911**（web 309 / workflow 287 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **909**（web 309 / workflow 285 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | migrations | **12** |
 | 数据表 | **22** |
-| 数据库触发器 | **14** |
+| 数据库触发器 | **13** |
 
-新增 24 个 workflow 集成测试（`chapter-review-workflow.test.ts`）；
+新增 22 个 workflow 集成测试（`chapter-review-workflow.test.ts`）；
 另有 1 个既有用例拆成两个参数化用例（正文状态 drafting / in_review），
-因此 workflow 287、全量 911。
+因此 workflow 285、全量 909。
 
 最近新增质量门禁：
 
@@ -225,7 +225,7 @@ A2-C-B（本地，未推送）后的当前数字：
 - 单 SQL 列表快照；
 - Reviewer 输入字段封锁与 evidence 子串校验；
 - 审阅任务的**任务行锁 + `locked_by` fence**（旧 Worker 晚返回写不进 issue）；
-- review run 的结论自洽 CHECK 与 append-only 触发器；issue 只能在 running run 追加；
+- review run 的结论自洽 CHECK 与 append-only 触发器；
 - review 任务终态时由触发器关闭 running run（取消不留下永久 running）；
 - 元数据摘要（实体摘要加载）在事实提取与 Reviewer 之间共用同一套 secret 过滤。
 

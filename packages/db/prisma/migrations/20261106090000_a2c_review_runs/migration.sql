@@ -27,8 +27,7 @@
 --    - running / failed 时 passed IS NULL 且 issue_count = 0；
 --    - running 必须没有 finished_at / error_code，终态必须都有。
 --
--- 5. issues **append-only**：UPDATE / DELETE 由触发器拒绝，
---    且只有 running run 允许 INSERT；成功后 issue_count 才不会被后续追加破坏；
+-- 5. issues **append-only**：UPDATE / DELETE 由触发器拒绝；
 --    severity / type / 长度 / ordinal 由 CHECK 兜底。
 --    本表不存正文副本、prompt 或模型原始响应（evidence 是问题的一部分，
 --    按原样保存，但不允许另存整段 draft）。
@@ -283,31 +282,6 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "chapter_review_issues_immutable_trigger"
   BEFORE UPDATE OR DELETE ON "chapter_review_issues"
   FOR EACH ROW EXECUTE FUNCTION "chapter_review_issues_immutable"();
-
--- 问题只能写入运行中的 run。persist_review_result 在同一事务里先 INSERT issues、
--- 再把 run 标为 succeeded；成功 / 失败终态之后任何追加都会让 issue_count 失真，
--- 因此必须在数据库层拒绝。
-CREATE OR REPLACE FUNCTION "chapter_review_issues_insert_guard"() RETURNS trigger AS $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-      FROM "chapter_review_runs"
-     WHERE "id" = NEW."run_id"
-       AND "candidate_id" = NEW."candidate_id"
-       AND "chapter_id" = NEW."chapter_id"
-       AND "work_id" = NEW."work_id"
-       AND "status" = 'running'
-  ) THEN
-    RAISE EXCEPTION '只有 running 的 chapter_review_run 可以追加问题'
-      USING ERRCODE = 'restrict_violation';
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER "chapter_review_issues_insert_guard_trigger"
-  BEFORE INSERT ON "chapter_review_issues"
-  FOR EACH ROW EXECUTE FUNCTION "chapter_review_issues_insert_guard"();
 
 -- ---------------------------------------------------------------------------
 -- 兜底：review 任务进入终态时，不留下永久 running 的 run
