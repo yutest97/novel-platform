@@ -679,3 +679,19 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-127 | 审计与回滚 | 审计 `chapter.version_restored` 的 detail 只有 `workId / chapterId / versionId / versionNo / sourceVersionId / parentVersionId / wordCount` 7 个字段、不含正文；审计写入失败 → 版本与章节状态整体回滚 | 同上 |
 | AT-WF-128 | 恢复 UI | 选中历史版本时出现「恢复此版本为新版本」；点击弹二次确认，明确「创建新版本、不删除历史」；取消不产生版本且保持选中；确认后提示「已从版本 N 恢复为版本 M」、关闭对比、刷新列表并自动选中最新；恢复中按钮禁用；冲突保留页面状态并提供「载入最新版本」；已是最新直接刷新；不提供覆盖 / 删除历史版本的操作 | 用例 33/34/35/36 |
 | AT-WF-129 | 测试数 | 全量单测 **789**（756 + 恢复服务/API 18 + diff 视图纯逻辑 15）；浏览器 E2E **103**（96 + 7） | 全量 `pnpm test`、`playwright test` |
+
+### A1-4B-C-B-REV-01 追加：diff 请求身份隔离
+
+> **根因**：原实现只用"选择器组合"判断响应是否过期。但收起后重新展开会产生
+> **完全相同**的 `fromVersionId` / `toVersionId`，选择器无法区分"相同组合的旧请求"
+> 与"当前请求"：旧请求可能覆盖新结果 / 新错误，并在 `finally` 中无条件关闭
+> loading，导致新请求仍在进行时加载态提前消失。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-130 | 请求身份 | 单调递增的请求序号是唯一身份：`openCompare` / `changeCompareFrom` / `changeCompareTo` / `closeCompare` 每次都使之前请求失效；只有当前序号可以写 `compareDiff` / `compareError` / 关闭 `compareLoading`；旧请求（成功或失败）完全静默——不显示旧 diff、不显示旧错误、不提前关闭 loading、不改选择器；旧请求的会话错误也不触发跳转 | `e2e/chapter-workbench.spec.ts` 用例 37–40 |
+| AT-WF-131 | 相同选择器旧请求失败 | 请求 A 挂起 → 收起 → 同选择器再展开（请求 B）→ A 返回 `CHAPTER_DIFF_TOO_LARGE`：不显示错误、B 的 loading 不消失 → B 成功后才显示结果 | 用例 37 |
+| AT-WF-132 | 旧请求成功 | 请求 A 挂起 → 切换选择器（请求 B）→ A 成功返回：不显示旧 diff、loading 保持 → B 失败后只显示当前错误，旧 diff 不出现 | 用例 38 |
+| AT-WF-133 | 收起使请求失效 | 请求挂起时收起再展开：迟到响应不恢复 loading / result / error | 用例 39 |
+| AT-WF-134 | loading 生命周期 | 当前请求完成前 loading 持续存在（观察窗内不消失），完成后才关闭并显示结果 | 用例 40 |
+| AT-WF-135 | 测试数 | 全量单测仍 **789**（本轮无服务 / 纯逻辑改动）；浏览器 E2E **107**（103 + 4） | 全量 `pnpm test`、`playwright test` |

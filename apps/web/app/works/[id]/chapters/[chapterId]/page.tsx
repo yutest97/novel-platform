@@ -1,10 +1,10 @@
 'use client';
 
 /**
- * 章节工作台（A1-4A / A1-4B-B）。
+ * 章节工作台（A1-4A / A1-4B-B / A1-4B-C-B）。
  *
  * 作者在这里完成：提交生成 → 查看进度/取消 → 预览候选 → 采纳 → 阅读正式正文
- * → 手工编辑 Markdown 并保存为新的 human 版本。
+ * → 手工编辑 Markdown 并保存为新的 human 版本 → 对比版本差异 / 恢复历史版本。
  *
  * 边界：
  * - 只读正文用 `pre-wrap` 纯文本渲染，Markdown 编辑器是 textarea，
@@ -15,7 +15,8 @@
  * - 编辑草稿只存在组件内存：不写 URL / localStorage / sessionStorage，
  *   有未保存修改时取消需二次确认，离开页面有 beforeunload 提示；
  * - 只允许编辑**最新**正式版本：旧版本只读，不能把旧版本 id 当作 baseVersionId；
- * - 仍不提供版本 diff 与历史版本恢复（A1-4B-C）。
+ * - 版本对比只读、按需展开；历史版本恢复只新增版本，不修改 / 删除旧版本；
+ * - 仍不提供定稿流程（A1-4B-C-C）。
  */
 
 import Link from 'next/link';
@@ -162,11 +163,15 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [compareDiff, setCompareDiff] = useState<ChapterVersionDiff | null>(null);
   const [compareLoading, setCompareLoading] = useState(false);
   const [compareError, setCompareError] = useState<ApiError | null>(null);
-  /** 最近一次请求的选择器组合：响应回来时用它丢弃过期结果。 */
-  const compareSelectionRef = useRef<{ readonly from: string; readonly to: string }>({
-    from: '',
-    to: '',
-  });
+  /**
+   * diff 请求的单调序号（请求身份）。
+   *
+   * 选择器组合**不是**请求身份：收起后再展开会产生完全相同的 from/to，
+   * 仅靠它无法区分"相同选择器的旧请求"和"当前请求"。
+   * 每次展开 / 切换 / 收起都自增，只有拿到最新序号的那次请求可以落盘；
+   * 旧请求（哪怕先发后到）必须完全静默，也不能提前关闭 loading。
+   */
+  const compareRequestSeqRef = useRef(0);
   // 历史版本恢复（A1-4B-C-B）
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -224,15 +229,29 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   );
 
   /**
-   * 请求一次 diff。
+   * 开始一次新的 diff 请求：自增序号，使所有在途请求立即失效。
+   *
+   * 返回的 token 是这次请求的**唯一身份**，只有它能在响应 / 异常 / finally 中落地。
+   */
+  const beginCompareRequest = useCallback((): number => {
+    compareRequestSeqRef.current += 1;
+    return compareRequestSeqRef.current;
+  }, []);
+
+  /**
+   * 请求一次 diff（`token` 由 `beginCompareRequest` 分配）。
    *
    * - 请求前立即清空旧结果：切换选择器时绝不显示上一次的过期 diff；
-   * - 响应回来时比对 `compareSelectionRef`，被后发请求顶掉的结果直接丢弃；
-   * - 会话错误走统一跳转；`CHAPTER_DIFF_TOO_LARGE` 等只展示稳定文案。
+   * - 响应 / 错误 / finally 都先比对 token：不是当前请求就**完全静默**
+   *   —— 不写 diff、不写 error、不关闭 loading、不改选择器；
+   * - 会话错误只在当前请求上处理；旧请求的 401 不触发跳转。
    */
   const loadDiff = useCallback(
-    async (fromId: string, toId: string): Promise<void> => {
+    async (token: number, fromId: string, toId: string): Promise<void> => {
       if (fromId === '' || toId === '') {
+        return;
+      }
+      if (token !== compareRequestSeqRef.current) {
         return;
       }
       setCompareLoading(true);
@@ -240,22 +259,23 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       setCompareDiff(null);
       try {
         const diff = await fetchChapterVersionDiff(workId, chapterId, fromId, toId);
-        const current = compareSelectionRef.current;
-        if (current.from === fromId && current.to === toId) {
-          setCompareDiff(diff);
+        if (token !== compareRequestSeqRef.current) {
+          return;
         }
+        setCompareDiff(diff);
       } catch (caught) {
+        if (token !== compareRequestSeqRef.current) {
+          return;
+        }
         if (handleSessionError(caught, router)) {
           return;
         }
-        const current = compareSelectionRef.current;
-        if (current.from === fromId && current.to === toId) {
-          setCompareError(
-            caught instanceof ApiError ? caught : new ApiError('INTERNAL_ERROR', 500),
-          );
-        }
+        setCompareError(caught instanceof ApiError ? caught : new ApiError('INTERNAL_ERROR', 500));
       } finally {
-        setCompareLoading(false);
+        // 只有当前请求可以关闭 loading：旧请求的 finally 不能提前结束新请求的加载态。
+        if (token === compareRequestSeqRef.current) {
+          setCompareLoading(false);
+        }
       }
     },
     [workId, chapterId, router],
@@ -267,37 +287,38 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     if (selection === null) {
       return;
     }
-    compareSelectionRef.current = { from: selection.fromVersionId, to: selection.toVersionId };
+    const token = beginCompareRequest();
     setCompareOpen(true);
     setCompareFromId(selection.fromVersionId);
     setCompareToId(selection.toVersionId);
-    void loadDiff(selection.fromVersionId, selection.toVersionId);
-  }, [versions, loadDiff]);
+    void loadDiff(token, selection.fromVersionId, selection.toVersionId);
+  }, [versions, beginCompareRequest, loadDiff]);
 
   const closeCompare = useCallback((): void => {
-    compareSelectionRef.current = { from: '', to: '' };
+    // 收起同样使在途请求失效：迟到的响应不能把面板重新点亮。
+    beginCompareRequest();
     setCompareOpen(false);
     setCompareDiff(null);
     setCompareError(null);
     setCompareLoading(false);
-  }, []);
+  }, [beginCompareRequest]);
 
   const changeCompareFrom = useCallback(
     (value: string): void => {
-      compareSelectionRef.current = { from: value, to: compareToId };
+      const token = beginCompareRequest();
       setCompareFromId(value);
-      void loadDiff(value, compareToId);
+      void loadDiff(token, value, compareToId);
     },
-    [compareToId, loadDiff],
+    [compareToId, beginCompareRequest, loadDiff],
   );
 
   const changeCompareTo = useCallback(
     (value: string): void => {
-      compareSelectionRef.current = { from: compareFromId, to: value };
+      const token = beginCompareRequest();
       setCompareToId(value);
-      void loadDiff(compareFromId, value);
+      void loadDiff(token, compareFromId, value);
     },
-    [compareFromId, loadDiff],
+    [compareFromId, beginCompareRequest, loadDiff],
   );
 
   /** 打开恢复确认（只在选中历史版本时可用）。 */
