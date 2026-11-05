@@ -1585,3 +1585,65 @@ LIMIT 200
 - `truncated = total > facts.length`；
 - 全部参数化（work / chapter / fact_type / limit），不拼接用户输入；
 - 仍只读，不写审计、不改任何表。
+
+## 23. A2-C-A：Reviewer Agent 契约（本地完成，待复审）
+
+> 本轮只建立 Agent 契约、语义校验、Mock 和纯单测。
+> **没有接入 `chapter.draft`**，不写数据库，不新增 API / UI / Worker，
+> 不自动重写正文，也不自动阻止作者采纳。
+
+### 23.1 Agent
+
+`reviewer.chapter@1.0.0`（`packages/workflow/src/chapter/reviewer.ts`）：
+
+- 输入：`chapter{id,chapterNo,title}`、冻结合同
+  `{goal,mustInclude,mustNotInclude,scenes[]}`、`draft`、
+  `characters[] / items[] / realms[] / factions[]`、`priorSummaries[]`；
+- 实体只含 `{id,name,summary}`，id 必须是 UUID；不传 `secret` / `secretKnownBy`；
+- `draft ≤ 200000` 字符；四类实体各 ≤100 条；前章摘要 ≤20 条、每条 ≤1000 字符；
+- 顶层和嵌套对象都拒绝未声明字段（prompt、原始响应、Key 等不会进入契约）；
+- `agent.model` 为空，由 Provider 决定实际模型。
+
+### 23.2 输出与语义校验
+
+```json
+{
+  "passed": false,
+  "issues": [
+    {
+      "severity": "high",
+      "type": "setting_contradiction",
+      "evidence": "正文中的原句",
+      "suggestion": "修改建议"
+    }
+  ]
+}
+```
+
+- `issues ≤ 20`；severity 只允许 `high / medium / low`；
+- type 只允许：
+  `contract_violation / setting_contradiction / timeline_conflict /
+  item_state_conflict / plot_thread_conflict / character_consistency / prose_quality`；
+- evidence / suggestion trim 后非空；evidence ≤300、suggestion ≤500；
+- evidence trim 后必须是本次 `draft` 的连续子串，防止模型编造引文；
+- `passed` 必须严格等于 `issues.length === 0`；
+- 重复 `type + evidence` 直接拒绝；不在本阶段静默去重或修复；
+- 所有失败统一为 `AGENT_OUTPUT_INVALID`，错误只带路径 / 固定原因，
+  不含正文、引文、建议、prompt 或原始响应。
+
+`runChapterReviewer()` 是纯内存包装：先经 `AgentRunner` 做输入 / Schema 校验，
+再强制调用专用语义校验；不记录日志、不写数据库、不决定下一步。
+
+### 23.3 专用 Mock
+
+`createChapterReviewerMockProvider()`：
+
+- `name=mock`、`defaultModel=mock-model`；
+- 默认输出 `{"passed":true,"issues":[]}`；
+- 可通过 `issues` 构造参数注入固定问题；
+- 不联网、不读 Key、不读系统时钟；通用 `MockProvider` 未被修改。
+
+### 23.4 未做
+
+Writer 后自动运行、Reviewer run / issue 持久化、HTTP API、UI、采纳门禁、
+作者手动重检、失败回滚策略、RAG / embedding。

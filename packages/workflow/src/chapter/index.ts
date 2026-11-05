@@ -53,6 +53,32 @@ export {
 export { CONTINUITY_FACTS_MOCK_OUTPUT, createContinuityFactsMockProvider } from './facts-mock.js';
 export { createChapterFactProviderFromEnv } from './facts-provider.js';
 export {
+  CHAPTER_REVIEWER_MOCK_OUTPUT,
+  createChapterReviewerMockProvider,
+  type ChapterReviewerMockOptions,
+} from './reviewer-mock.js';
+export {
+  CHAPTER_REVIEW_ISSUE_TYPES,
+  CHAPTER_REVIEW_SEVERITIES,
+  MAX_REVIEW_DRAFT_CHARS,
+  MAX_REVIEW_ENTITIES_PER_TYPE,
+  MAX_REVIEW_EVIDENCE_CHARS,
+  MAX_REVIEW_ISSUES,
+  MAX_REVIEW_PRIOR_SUMMARIES,
+  MAX_REVIEW_PRIOR_SUMMARY_CHARS,
+  MAX_REVIEW_SUGGESTION_CHARS,
+  REVIEWER_CHAPTER_AGENT,
+  runChapterReviewer,
+  validateReviewerOutput,
+  type ChapterReviewEntity,
+  type ChapterReviewIssue,
+  type ChapterReviewIssueType,
+  type ChapterReviewPriorSummary,
+  type ChapterReviewSeverity,
+  type ChapterReviewerInput,
+  type ChapterReviewerOutput,
+} from './reviewer.js';
+export {
   MAX_CHAPTER_FACT_LIST,
   getChapterFactCandidate,
   getChapterFactRun,

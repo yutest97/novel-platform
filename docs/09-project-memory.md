@@ -3,7 +3,7 @@
 - 更新日期：2026-11-05
 - 最后已验收产品基线：`0f23683`
 - 对应 CI：A2-B-CI-FIX-01，CI #23 绿色
-- 当前产品阶段：A1 已完成；A2-A / A2-B 已完成；准备进入 A2-C
+- 当前产品阶段：A1 已完成；A2-A / A2-B 已完成；A2-C-A 契约本地完成，待复审
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -48,6 +48,17 @@
 - 事实提取 API、候选列表/详情、run 状态；
 - 默认 Mock 可成功提取空事实；
 - 列表使用单条 SQL 保证 `total` 与集合同快照。
+
+### A2-C-A Reviewer Agent 契约（本地完成，待复审）
+
+- `reviewer.chapter@1.0.0`：严格输入 / 输出 Schema，正文上限 20 万字符；
+- 输入只含章节标识、冻结合同、正文候选、四类安全实体摘要与前章摘要；
+- `secret*`、prompt、模型原始响应、Key 等未声明字段一律拒绝；
+- 输出为 `passed + issues[]`，问题只允许固定 severity / type 白名单；
+- 代码语义校验拒绝空白、超长、非正文子串 evidence、重复 `type + evidence`
+  以及 `passed` 与 issues 数量矛盾，统一为 `AGENT_OUTPUT_INVALID`；
+- `createChapterReviewerMockProvider()` 默认无问题，可注入固定问题；
+- 尚未接入 `chapter.draft`、数据库、API、UI 或 Worker。
 
 ---
 
@@ -123,22 +134,17 @@ Agent 产出候选
 
 ---
 
-## 4. 当前下一步：A2-C Reviewer Agent
+## 4. 当前下一步：A2-C-A 复审
 
-目标：Writer 完成后增加受工作流约束的 Reviewer Agent。
+本轮已完成 `docs/tasks/A2-C-A-reviewer-agent.md` 的 Agent 契约层：
 
-当前可执行任务卡：`docs/tasks/A2-C-A-reviewer-agent.md`。
+- `reviewer.chapter@1.0.0` 严格输入 / 输出 Schema；
+- 专用代码语义校验与稳定 `AGENT_OUTPUT_INVALID`；
+- 确定性 `createChapterReviewerMockProvider()`；
+- 18 个纯单测，未连数据库、未联网。
 
-初步边界：
-
-- 输入：冻结合同、正文候选、必要上下文与已有连续性摘要；
-- 输出：严格 JSON；
-- 问题字段至少包含：`severity`、`type`、`evidence`、`suggestion`；
-- Reviewer 不重写正文；
-- Reviewer 不直接决定采纳；
-- 工作流决定如何保存和展示结构化问题；
-- 无 API/UI 的新增需要单独阶段或同一任务内明确边界；
-- 不引入 RAG。
+当前等待复审。Reviewer 接入 Writer 之后的工作流、问题持久化、展示和采纳门禁
+都不在本轮，必须另立任务卡；不根据本任务卡推导自动阻断或自动重写。
 
 尚待产品确认：
 
@@ -179,6 +185,15 @@ Agent 产出候选
 | 数据表 | 20 |
 | 数据库触发器 | 10 |
 | deploy 版本守卫行为测试 | 22 |
+
+本轮 A2-C-A 未验收本地增量：
+
+| 项目 | 数量 / 结果 |
+| --- | --- |
+| workflow 测试 | 262 / 262 通过（244 + 18） |
+| 全仓单测声明数 | 886（已验收 868 + 18） |
+| 本地单测执行 | 884 通过；2 个既有 secret-ledger 用例因本机无 `bash` 无法执行 |
+| migrations / 数据表 / 触发器 | 11 / 20 / 10（未变） |
 
 最近新增质量门禁：
 
