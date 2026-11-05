@@ -150,11 +150,16 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B 已在本地完成并通过全量单测（详见 §6），等待负责人复审后再决定是否推送。
+A2-C-B 已完成主体实现，但复审发现终态 run 仍可追加 issue；当前修复卡：
+
+`docs/tasks/A2-C-B-REV-01-review-integrity.md`
+
+WorkBuddy 修复并通过复审前，不进入推送或下一阶段实现。
 
 复审通过后的候选顺序：
 
-1. A2-D Summarizer（正式定稿版本摘要），完成后 `priorSummaries` 才能真正非空；
+1. A2-D-A Summarizer Agent 契约（卡已备：
+   `docs/tasks/A2-D-A-summarizer-agent.md`）；
 2. Reviewer 结果读取 API / UI（当前 run 与 issues 已落库，但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
 4. 是否给 high severity 加采纳门禁——仍需产品确认。
