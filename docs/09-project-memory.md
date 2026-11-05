@@ -173,6 +173,7 @@ A2-C-B 主体与复审修复均已在本地完成，等待负责人复审：
 
 1. A2-D-B：`chapter.summarize` 工作流与 `chapter_summaries` 落库（把已完成的
    `summarizer.chapter@1.0.0` 接入定稿版本，才可能让 Reviewer 的 `priorSummaries` 非空）；
+   任务卡已备：`docs/tasks/A2-D-B-summarizer-workflow.md`；
 2. Reviewer 结果读取 API / UI（当前 run 与 issues 已落库，但作者看不到）；
 3. A2-E 事实候选只读审阅 UI；
 4. 是否给 high severity 加采纳门禁——仍需产品确认。
