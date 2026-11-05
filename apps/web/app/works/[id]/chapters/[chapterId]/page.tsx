@@ -387,13 +387,23 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   /**
    * 打开定稿确认。
    *
-   * 只有 `in_review` + 选中**最新**版本时才允许：历史版本只提示、不弹窗。
+   * 定稿只锁定**数据库中的当前最新正式版本**，不包含编辑器里的未保存草稿，
+   * 因此以下任一情况都必须拒绝（UI 也会隐藏入口）：
+   * - 编辑器打开（无论是否有未保存修改）；
+   * - 正在读取其它版本（`versionLoading`）——此时 `selectedVersion` 还是旧值；
+   * - 正在恢复历史版本 / 正在保存 / 正在定稿；
+   * - 选中的不是最新版本，或章节详情尚未加载完成。
    */
   const requestFinalize = useCallback((): void => {
     const latest = versions[0];
     if (
       detail === null ||
       detail.chapter.status !== 'in_review' ||
+      editor !== null ||
+      versionLoading ||
+      restoring ||
+      savingVersion ||
+      finalizing ||
       selectedVersion === null ||
       latest === undefined ||
       latest.id !== selectedVersion.id
@@ -402,7 +412,16 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     }
     setFinalizeError(null);
     setFinalizeConfirmOpen(true);
-  }, [detail, selectedVersion, versions]);
+  }, [
+    detail,
+    editor,
+    versionLoading,
+    restoring,
+    savingVersion,
+    finalizing,
+    selectedVersion,
+    versions,
+  ]);
 
   /**
    * 确认定稿：锁定当前最新版本。
@@ -1378,22 +1397,30 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
               </ul>
             )}
 
-            {detail !== null &&
-            detail.chapter.status === 'in_review' &&
-            selectedVersion !== null ? (
-              versions[0]?.id === selectedVersion.id ? (
-                <div className="row-actions">
-                  <button
-                    type="button"
-                    className="btn-primary btn-small"
-                    onClick={requestFinalize}
-                    disabled={finalizing}
-                    data-testid="finalize-open"
-                  >
-                    {finalizing ? '定稿中…' : `定稿最新版本（版本 ${selectedVersion.versionNo}）`}
-                  </button>
-                </div>
-              ) : (
+            {detail !== null && detail.chapter.status === 'in_review' ? (
+              editor !== null ? (
+                // 定稿只锁数据库里的最新正式版本，编辑器草稿不在其中：
+                // 编辑器打开时既不给按钮，也明确告诉作者该怎么做。
+                <p className="hint" data-testid="finalize-editor-hint">
+                  请先保存当前正文或关闭编辑器，再定稿。
+                </p>
+              ) : selectedVersion === null ? null : selectedVersion.id === versions[0]?.id ? (
+                // 读取版本期间 `selectedVersion` 还是上一个值：直接不渲染入口，
+                // 避免用旧版本信息发起定稿；提交中也不显示（确认弹窗里有进度）。
+                versionLoading || finalizing ? null : (
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      className="btn-primary btn-small"
+                      onClick={requestFinalize}
+                      disabled={restoring || savingVersion}
+                      data-testid="finalize-open"
+                    >
+                      定稿最新版本（版本 {selectedVersion.versionNo}）
+                    </button>
+                  </div>
+                )
+              ) : versionLoading ? null : (
                 <p className="hint" data-testid="finalize-history-hint">
                   定稿仅支持最新版本，请先选择最新版本。
                 </p>

@@ -1950,3 +1950,141 @@ test('46. 390×844 移动端完成定稿并保持无横向溢出', async ({ brow
 
   await mobileContext.close();
 });
+
+/* -------------------------------------------------------------------------- */
+/* A1-4B-C-C-REV-01：编辑器 / 版本加载中禁止定稿                                 */
+/* -------------------------------------------------------------------------- */
+
+/** 确保章节处于 `in_review`（定稿后需先保存一次 revision 才能再次定稿）。 */
+async function ensureReviewable(): Promise<void> {
+  const status = (await page.getByTestId('chapter-status').textContent())?.trim() ?? '';
+  if (status !== '已完成') {
+    return;
+  }
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  await textarea.fill(`${original}\n（REV-01 前置修订）`);
+  await page.getByTestId('editor-save').click();
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+}
+
+test('47. 编辑器打开并修改：不显示定稿入口，版本数不变', async () => {
+  await openChapterForFinalize();
+  await ensureReviewable();
+  await expect(page.getByTestId('finalize-open')).toBeVisible();
+  const versionCount = await page.getByTestId('version-item').count();
+
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  await textarea.fill(`${original}\n（尚未保存的定稿前修改）`);
+
+  // 编辑器打开 = 眼前内容可能不是数据库里的最新版本 → 不给定稿入口
+  await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+  await expect(page.getByTestId('finalize-editor-hint')).toHaveText(
+    '请先保存当前正文或关闭编辑器，再定稿。',
+  );
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  // 未保存不会产生版本
+  await expect(page.getByTestId('version-item')).toHaveCount(versionCount);
+});
+
+test('48. 编辑器保存 revision 后：编辑器关闭、新最新版本可定稿', async () => {
+  // 承接 47 的编辑器与未保存修改
+  await page.getByTestId('editor-save').click();
+
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+  await expect(page.getByTestId('editor-textarea')).toHaveCount(0);
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  await expect(page.getByTestId('finalize-editor-hint')).toHaveCount(0);
+  await expect(page.getByTestId('finalize-open')).toHaveText(/定稿最新版本（版本 \d+）/);
+
+  // 入口可正常打开确认弹窗（不真正提交，留给后续用例）
+  await page.getByTestId('finalize-open').click();
+  await expect(page.getByRole('dialog')).toContainText('会锁定当前正文');
+  await page.getByRole('dialog').getByRole('button', { name: '取消' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('49. 编辑器打开但未修改：仍无入口；放弃后恢复', async () => {
+  await page.getByTestId('editor-open').click();
+  await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+  await expect(page.getByTestId('finalize-editor-hint')).toBeVisible();
+
+  // 无修改取消：直接关闭，不弹确认
+  await page.getByTestId('editor-cancel').click();
+  await expect(page.getByTestId('chapter-editor')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  await expect(page.getByTestId('finalize-open')).toBeVisible();
+  await page.getByTestId('finalize-open').click();
+  await expect(page.getByRole('dialog')).toContainText('定稿版本');
+  await page.getByRole('dialog').getByRole('button', { name: '取消' }).click();
+});
+
+test('50. 读取历史版本期间不显示定稿入口，完成后仍按选中版本判断', async () => {
+  const pattern =
+    /\/api\/works\/[^/]+\/chapters\/[^/]+\/versions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let hits = 0;
+
+  await page.route(pattern, async (route) => {
+    hits += 1;
+    await held;
+    await route.continue();
+  });
+
+  try {
+    await expect(page.getByTestId('finalize-open')).toBeVisible();
+    const versionCount = await page.getByTestId('version-item').count();
+    expect(versionCount).toBeGreaterThanOrEqual(2);
+
+    // 点历史版本：单版本 GET 被挂起，versionLoading=true
+    await page.getByTestId('version-item').nth(1).click();
+    await expect.poll(() => hits, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+
+    // 读取中：即便 selectedVersion 还是"最新"，也不得出现入口
+    await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+    await expect(page.getByTestId('finalize-history-hint')).toHaveCount(0);
+
+    release();
+    await expect(page.getByTestId('version-reader').locator('h3')).toHaveText(/版本 \d+/);
+
+    // 加载完成：选中的是历史版本 → 只提示，不给入口
+    await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+    await expect(page.getByTestId('finalize-history-hint')).toBeVisible();
+
+    // 选回最新版本 → 入口出现
+    await page.getByTestId('version-item').first().click();
+    await expect(page.getByTestId('finalize-open')).toBeVisible();
+    await expect(page.getByTestId('finalize-history-hint')).toHaveCount(0);
+  } finally {
+    release();
+    await page.unroute(pattern);
+  }
+});
+
+test('51. 定稿成功后入口关闭；人工保存 revision 仍可回到待定稿', async () => {
+  await page.getByTestId('finalize-open').click();
+  await page.getByRole('dialog').getByRole('button', { name: '确认定稿' }).click();
+  await expect(page.getByTestId('chapter-status')).toHaveText('已完成');
+  await expect(page.getByTestId('finalize-open')).toHaveCount(0);
+  await expect(page.getByTestId('generate-submit')).toHaveCount(0);
+  await expect(page.getByTestId('chapter-closed-hint')).toBeVisible();
+
+  // 编辑器仍可用：保存 revision → 回到待定稿 → 入口重新出现
+  await page.getByTestId('version-item').first().click();
+  await page.getByTestId('editor-open').click();
+  const textarea = page.getByTestId('editor-textarea');
+  const original = await textarea.inputValue();
+  await textarea.fill(`${original}\n（定稿后再次修订）`);
+  await page.getByTestId('editor-save').click();
+
+  await expect(page.getByTestId('chapter-status')).toHaveText('待定稿');
+  await expect(page.getByTestId('finalize-open')).toBeVisible();
+  await expect(page.getByTestId('finalize-editor-hint')).toHaveCount(0);
+});

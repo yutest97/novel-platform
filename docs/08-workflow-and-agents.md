@@ -1247,3 +1247,26 @@ runWorkWrite（作品级 advisory lock）
 
 撤销定稿按钮、版本删除 / 覆盖、`final_version_id`、migration、
 定稿后禁止 diff（diff 仍只读可用）。
+
+### 20.9 定稿入口的前置条件（A1-4B-C-C-REV-01）
+
+定稿锁定的是**数据库中的当前最新正式版本**，不包含编辑器里的未保存草稿。
+因此「定稿最新版本」必须同时满足：
+
+```
+detail.chapter.status === 'in_review'
+&& selectedVersion !== null
+&& selectedVersion.id === versions[0].id      // 当前最新
+&& editor === null                            // 编辑器未打开（含未修改）
+&& !versionLoading                            // 未在读取其它版本
+&& !restoring && !savingVersion && !finalizing
+&& 详情与版本列表已加载
+```
+
+- `editor !== null`：不渲染按钮，显示「请先保存当前正文或关闭编辑器，再定稿。」
+  （`data-testid="finalize-editor-hint"`），无论草稿是否有未保存修改；
+- `versionLoading === true`：不渲染按钮也不显示历史版本提示 —— 此时
+  `selectedVersion` 还是上一个版本，不能据此发起定稿；
+- `requestFinalize` 内部重复以上全部判断（函数层防御，UI 之外无法绕过）；
+- 保存编辑器成功后编辑器关闭、章节回到 `in_review`，入口按新版本重新出现；
+- 放弃编辑器（无修改直接关闭 / 有修改确认放弃）后入口重新出现。

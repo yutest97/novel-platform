@@ -118,3 +118,4 @@
 | 2026-11-05 | A1-4B-C-B：版本对比 UI（按需展开、双选择器、行级标签、移动端）与历史版本恢复（`CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`）；定稿流程独立为 C-C，仍未实现 |
 | 2026-11-05 | A1-4B-C-B-REV-01：diff 请求身份改为单调序号（选择器组合无法区分相同组合的旧请求），收起 / 切换 / 展开均使在途请求失效，旧请求不得写结果 / 错误 / loading |
 | 2026-11-05 | A1-4B-C-C：章节定稿（只锁当前最新版本、同版本幂等、审计 chapter.finalized）；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到待定稿；不新增 final_version_id / migration |
+| 2026-11-05 | A1-4B-C-C-REV-01：定稿入口增加编辑器 / 版本读取 / 恢复 / 保存 / 提交中的前置条件（编辑器打开时改提示），requestFinalize 同步防御；不改服务与 API |
