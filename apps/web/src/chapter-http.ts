@@ -89,6 +89,27 @@ export function requireBaseVersionId(body: Record<string, unknown>): string | nu
   return value;
 }
 
+/** 恢复历史版本的允许字段（只有基线版本，正文由 sourceVersion 提供）。 */
+export const RESTORE_VERSION_FIELDS = ['baseVersionId'] as const;
+
+/**
+ * 读取恢复请求的 `baseVersionId`：**必须显式出现且不允许 null**。
+ *
+ * 与 `requireBaseVersionId` 的差异：
+ * - 恢复永远基于"当前最新版本"创建新版本，`null` 没有语义（章节必须已有版本）；
+ * - 漏传 / null / 空串 / 非字符串一律 400，不做任何隐式兜底。
+ */
+export function requireRestoreBaseVersionId(body: Record<string, unknown>): string {
+  if (!Object.prototype.hasOwnProperty.call(body, 'baseVersionId')) {
+    throw new AuthError('VALIDATION_FAILED', '缺少字段 baseVersionId');
+  }
+  const value = body['baseVersionId'];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new AuthError('VALIDATION_FAILED', 'baseVersionId 必须是版本 id（不允许 null）');
+  }
+  return value;
+}
+
 /** 版本 diff 的允许 query 参数：每个都必须且只能出现一次。 */
 export const DIFF_QUERY_PARAMS = ['fromVersionId', 'toVersionId'] as const;
 

@@ -1231,3 +1231,233 @@ test('29. dirty 后退并确认：到达上一页且不会迟到的第二次弹�
     await context.close();
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* A1-4B-C-B：版本对比与历史版本恢复                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 打开章节 1（此时版本倒序：版本 3、版本 2、版本 1）。
+ *
+ * 前面的「离开保护」用例会为每个场景新建上下文并重新登录同一账号；
+ * 服务端只保留有限个活跃会话，主上下文的 Cookie 可能已被挤掉，
+ * 因此这里先清 Cookie 再登录，避免落到登录页。
+ */
+async function openChapterOne(): Promise<void> {
+  await page.context().clearCookies();
+  await login(page, authorEmail, authorPassword);
+  await page.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(page.getByTestId('version-item')).toHaveCount(3, { timeout: 20_000 });
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 3');
+}
+
+test('30. 版本对比：默认最新与上一版，统计、行号与中文标签正确', async () => {
+  await openChapterOne();
+  // 折叠态不渲染面板，也不预取 diff
+  await expect(page.getByTestId('compare-panel')).toHaveCount(0);
+
+  await page.getByTestId('compare-toggle').click();
+  await expect(page.getByTestId('compare-panel')).toBeVisible();
+  await expect(page.getByTestId('compare-toggle')).toHaveText('收起版本对比');
+
+  // 默认：起始=版本 2，目标=版本 3
+  await expect(page.getByTestId('compare-from').locator('option:checked')).toHaveText(/版本 2/);
+  await expect(page.getByTestId('compare-to').locator('option:checked')).toHaveText(/版本 3/);
+  await expect(page.getByTestId('compare-result')).toBeVisible();
+  await expect(page.getByTestId('compare-stats')).toHaveText(
+    /新增 1 行 · 删除 0 行 · 未变化 \d+ 行/,
+  );
+
+  const added = page.locator('[data-testid="diff-line"][data-kind="added"]');
+  await expect(added).toHaveCount(1);
+  await expect(added).toContainText('移动端修订');
+  await expect(added.locator('.diff-line__label')).toHaveText('新增');
+  // 双列行号：新增行左侧占位、右侧是新版本行号
+  await expect(added.locator('.diff-line__no')).toHaveText(['·', /\d+/]);
+
+  await expect(page.locator('[data-testid="diff-line"][data-kind="removed"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="diff-line"][data-kind="equal"]').first()).toBeVisible();
+
+  // 对比是只读操作：不改选中版本
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 3');
+  await expectNoCredentials(page);
+  await page.getByTestId('compare-panel').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: shot4b('version-diff'), fullPage: true });
+});
+
+test('31. 切换目标版本后刷新出正确 diff（方向与统计随之变化）', async () => {
+  // 目标切到版本 1：v1 → v3 是"只增不删"，反向观察时用 v3 → v1 验证 removed
+  await page.getByTestId('compare-to').selectOption({ label: '版本 1（AI）' });
+  await expect(page.getByTestId('compare-stats')).toHaveText(/新增 0 行 · 删除 [1-9]\d* 行/);
+
+  const removed = page.locator('[data-testid="diff-line"][data-kind="removed"]');
+  await expect(removed.first()).toBeVisible();
+  await expect(removed.first().locator('.diff-line__label')).toHaveText('删除');
+  const removedText = (await removed.allInnerTexts()).join('\n');
+  expect(removedText).toContain('人工修订');
+  await expect(page.locator('[data-testid="diff-line"][data-kind="added"]')).toHaveCount(0);
+
+  // 起始版本也切回版本 1 → 自己比自己
+  await page.getByTestId('compare-from').selectOption({ label: '版本 1（AI）' });
+  await expect(page.getByTestId('compare-identical')).toHaveText('两个版本内容一致。');
+  await expect(page.getByTestId('compare-stats')).toHaveText(
+    /新增 0 行 · 删除 0 行 · 未变化 \d+ 行/,
+  );
+  await expect(page.locator('[data-testid="diff-line"][data-kind="added"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="diff-line"][data-kind="removed"]')).toHaveCount(0);
+});
+
+test('32. CHAPTER_DIFF_TOO_LARGE 用替身响应显示稳定中文错误', async () => {
+  const pattern = '**/api/works/**/versions/diff*';
+  await page.route(pattern, async (route) => {
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'CHAPTER_DIFF_TOO_LARGE', message: '章节正文规模超出对比上限' },
+      }),
+    });
+  });
+
+  try {
+    await page.getByTestId('compare-from').selectOption({ label: '版本 2（人工）' });
+    await expect(page.getByTestId('compare-error')).toHaveText('章节正文规模超出对比上限');
+    await expect(page.getByTestId('compare-result')).toHaveCount(0);
+    // 旧结果立刻清空，不残留上一次的 diff
+    await expect(page.getByTestId('diff-line')).toHaveCount(0);
+  } finally {
+    await page.unroute(pattern);
+  }
+
+  // 解除替身后重新对比可恢复
+  await page.getByTestId('compare-from').selectOption({ label: '版本 3（人工）' });
+  await page.getByTestId('compare-to').selectOption({ label: '版本 3（人工）' });
+  await expect(page.getByTestId('compare-identical')).toBeVisible();
+  await expect(page.getByTestId('compare-error')).toHaveCount(0);
+});
+
+test('33. 历史版本恢复：取消不产生版本，确认后新增版本并保留历史', async () => {
+  await expect(page.getByTestId('version-item')).toHaveCount(3);
+  // 选中版本 1（历史）
+  await page.getByTestId('version-item').nth(2).click();
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 1');
+  await expect(page.getByTestId('version-restore')).toHaveText('恢复此版本为新版本');
+
+  // 取消分支
+  await page.getByTestId('version-restore').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('从版本 1 恢复');
+  await expect(dialog).toContainText('创建');
+  await expect(dialog).toContainText('不会被删除');
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('version-item')).toHaveCount(3);
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 1');
+
+  // 确认分支
+  await page.getByTestId('version-restore').click();
+  await page.getByRole('dialog').getByRole('button', { name: '确认恢复' }).click();
+  await expect(page.getByTestId('workbench-notice')).toContainText('已从版本 1 恢复为版本 4');
+  await expect(page.getByTestId('version-item')).toHaveCount(4);
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 4');
+  await expect(page.getByTestId('version-source')).toHaveText('人工');
+  // 正文来自版本 1
+  await expect(page.getByTestId('version-content')).toContainText('风从演武场');
+  // 对比面板随恢复关闭
+  await expect(page.getByTestId('compare-panel')).toHaveCount(0);
+  await expectNoCredentials(page);
+});
+
+test('34. 恢复后刷新：新版本仍在，历史版本原样保留', async () => {
+  await page.reload();
+  await expect(page.getByTestId('version-item')).toHaveCount(4);
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 4');
+  await expect(page.getByTestId('version-content')).toContainText('风从演武场');
+
+  // 版本 1 仍是 AI 原文
+  await page.getByTestId('version-item').nth(3).click();
+  await expect(page.getByTestId('version-source')).toHaveText('AI');
+  await expect(page.getByTestId('version-content')).toContainText('风从演武场');
+  // 版本 2 / 3 也仍在
+  await expect(page.getByTestId('version-item')).toHaveCount(4);
+});
+
+test('35. 恢复冲突：保留页面状态并可用「载入最新版本」恢复', async () => {
+  const pattern = '**/api/works/**/versions/*/restore';
+  await page.route(pattern, async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: { code: 'CHAPTER_VERSION_CONFLICT', message: '章节版本发生冲突，请刷新后重试' },
+      }),
+    });
+  });
+
+  try {
+    await page.getByTestId('version-item').nth(2).click();
+    await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 2');
+    await page.getByTestId('version-restore').click();
+    await page.getByRole('dialog').getByRole('button', { name: '确认恢复' }).click();
+
+    await expect(page.getByTestId('restore-error')).toContainText('章节版本发生冲突');
+    // 页面状态保留：仍选中版本 2，版本数不变
+    await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 2');
+    await expect(page.getByTestId('version-item')).toHaveCount(4);
+    await expect(page.getByTestId('restore-reload-latest')).toBeVisible();
+  } finally {
+    await page.unroute(pattern);
+  }
+
+  await page.getByTestId('restore-reload-latest').click();
+  await expect(page.getByTestId('restore-error')).toHaveCount(0);
+  await expect(page.getByTestId('version-reader').locator('h3')).toHaveText('版本 4');
+});
+
+test('36. 390×844 移动端浏览 diff 并恢复，不撑破视口', async ({ browser }) => {
+  const mobileContext = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  const mobile = await mobileContext.newPage();
+  await login(mobile, authorEmail, authorPassword);
+  await mobile.goto(`/works/${workId}/chapters/${chapter1Id}`);
+  await expect(mobile.getByTestId('version-item')).toHaveCount(4, { timeout: 20_000 });
+
+  await mobile.getByTestId('compare-toggle').click();
+  await expect(mobile.getByTestId('compare-panel')).toBeVisible();
+  await expect(mobile.getByTestId('diff-line').first()).toBeVisible();
+
+  const browsing = await mobile.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(browsing.scrollWidth).toBeLessThanOrEqual(browsing.viewportWidth + 1);
+  await expectNoCredentials(mobile);
+  await mobile.screenshot({ path: shot4b('version-diff-mobile'), fullPage: false });
+
+  // 移动端恢复：选中版本 1 → 新版本 5
+  await mobile.getByTestId('version-item').nth(3).click();
+  await mobile.getByTestId('version-restore').click();
+  await mobile.getByRole('dialog').getByRole('button', { name: '确认恢复' }).click();
+  await expect(mobile.getByTestId('workbench-notice')).toContainText('已从版本 1 恢复为版本 5');
+  await expect(mobile.getByTestId('version-item')).toHaveCount(5);
+
+  const afterRestore = await mobile.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(afterRestore.scrollWidth).toBeLessThanOrEqual(afterRestore.viewportWidth + 1);
+
+  const cookies = await mobileContext.cookies();
+  const body = await mobile.locator('body').innerText();
+  for (const value of cookies.map((cookie) => cookie.value).filter((v) => v.length > 0)) {
+    expect(body).not.toContain(value);
+  }
+  expect(body).not.toContain('Bearer ');
+  expect(body).not.toContain(ADMIN_EMAIL);
+  await expectNoCredentials(mobile);
+
+  await mobileContext.close();
+});

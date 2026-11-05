@@ -1,5 +1,5 @@
 /**
- * 人工章节版本保存（A1-4B-A）。
+ * 人工章节版本保存与历史恢复（A1-4B-A / A1-4B-C-B）。
  *
  * 人工保存 = 作者把一段正式正文写成**新的人类版本**：
  *
@@ -8,6 +8,9 @@
  *                  parent_version_id=baseVersionId, version_no=max+1)
  *   └─ 章节 status → in_review（finalized 也回到 in_review）
  * ```
+ *
+ * 历史恢复 = 把某个旧版本的正文**原样复制**成一个新的 human 版本，
+ * 旧版本不被修改或删除（append-only）；并发语义与人工保存完全一致。
  *
  * 与"采纳候选"不同：
  * - 不写候选表（`chapter_candidates` 只有 AI 生成物）；
@@ -151,6 +154,31 @@ function translateSaveError(error: unknown): unknown {
 }
 
 /**
+ * 把章节推进到 `in_review`（人工保存 / 历史恢复共用）。
+ *
+ * `finalized` 也会被拉回 `in_review`（定稿后修订的既有语义）；
+ * 用 `updateMany + status` 做条件更新，避免覆盖并发修改后的状态。
+ */
+async function advanceChapterToInReview(
+  tx: Prisma.TransactionClient,
+  workId: string,
+  chapterId: string,
+  currentStatus: string,
+): Promise<string> {
+  if (currentStatus === SAVED_CHAPTER_STATUS) {
+    return currentStatus;
+  }
+  const moved = await tx.chapter.updateMany({
+    where: { id: chapterId, workId, status: currentStatus },
+    data: { status: SAVED_CHAPTER_STATUS },
+  });
+  if (moved.count !== 1) {
+    throw new AuthError('CONCURRENT_MODIFICATION', '章节状态已被其它操作修改');
+  }
+  return SAVED_CHAPTER_STATUS;
+}
+
+/**
  * 保存人工章节版本。
  *
  * @throws AuthError
@@ -216,17 +244,7 @@ export async function saveHumanChapterVersion(
       });
 
       // ---- 章节状态：推进或保持 in_review（finalized 也回到 in_review）----
-      let chapterStatus = chapter.status;
-      if (chapterStatus !== SAVED_CHAPTER_STATUS) {
-        const moved = await tx.chapter.updateMany({
-          where: { id: chapterId, workId, status: chapterStatus },
-          data: { status: SAVED_CHAPTER_STATUS },
-        });
-        if (moved.count !== 1) {
-          throw new AuthError('CONCURRENT_MODIFICATION', '章节状态已被其它操作修改');
-        }
-        chapterStatus = SAVED_CHAPTER_STATUS;
-      }
+      const chapterStatus = await advanceChapterToInReview(tx, workId, chapterId, chapter.status);
 
       // ---- 审计：只记 ids / 版本号 / 来源 / 字数 / 父版本，**不含正文** ----
       await writeAuditLog(tx, {
@@ -251,6 +269,146 @@ export async function saveHumanChapterVersion(
         wordCount: version.wordCount,
         source: 'human' as const,
         parentVersionId: baseVersionId,
+        chapterStatus,
+      };
+    });
+  } catch (error) {
+    throw translateSaveError(error);
+  }
+}
+
+/** 历史版本恢复的输入。 */
+export interface RestoreChapterVersionInput {
+  readonly db: PrismaClient;
+  readonly workId: string;
+  readonly chapterId: string;
+  /** 只能来自会话；管理员不是作者，作品归属校验会 404。 */
+  readonly authorId: string;
+  /** 准备恢复的历史版本：只读取，不会被修改或删除。 */
+  readonly sourceVersionId: string;
+  /**
+   * 恢复前的最新版本 id。**必须显式给出且非空**：
+   * 恢复永远基于"当前最大版本"创建新版本，用它与实际 latest 比对做乐观并发。
+   */
+  readonly baseVersionId: string;
+}
+
+/** 恢复结果（**不含正文**）。 */
+export interface RestoredChapterVersion {
+  readonly versionId: string;
+  readonly versionNo: number;
+  readonly wordCount: number;
+  readonly source: 'human';
+  /** 新版本的父版本 = 恢复时的最新版本。 */
+  readonly parentVersionId: string;
+  /** 正文来源的历史版本 id（原版本保持不变）。 */
+  readonly restoredFromVersionId: string;
+  readonly chapterStatus: string;
+}
+
+/**
+ * 把历史版本恢复为**新的**人工正式版本（A1-4B-C-B）。
+ *
+ * 语义：
+ * - `sourceVersionId` 只读：正文 / 字数原样复制，旧版本永远不会被修改或删除；
+ * - 新版本 `source='human'`、`parentVersionId=baseVersionId`、`versionNo=latest+1`；
+ * - 章节状态按人工保存的既有语义推进 / 保持 `in_review`；
+ * - 作品级 advisory lock + 章节行锁，同一章节的恢复与保存互相串行；
+ * - 并发同 base：恰好一个成功，另一个 `CHAPTER_VERSION_CONFLICT`；
+ * - 恢复目标已是当前最新 → `CHAPTER_VERSION_ALREADY_LATEST`（不产生无意义的新版本）。
+ *
+ * @throws AuthError
+ * - `VALIDATION_FAILED`：任一 id 不是合法 UUID / `baseVersionId` 为空；
+ * - `NOT_FOUND`：作品 / 章节不属于当前作者，或历史版本不属于该作品 + 章节；
+ * - `CHAPTER_STATE_INVALID_FOR_SAVE`：章节已废弃；
+ * - `CHAPTER_VERSION_CONFLICT`：`baseVersionId` 不是当前最大版本（含章节尚无版本）；
+ * - `CHAPTER_VERSION_ALREADY_LATEST`：`sourceVersionId` 就是当前最新版本；
+ * - `CONCURRENT_MODIFICATION`：数据库层死锁 / 序列化失败（可重试）。
+ */
+export async function restoreChapterVersion(
+  input: RestoreChapterVersionInput,
+): Promise<RestoredChapterVersion> {
+  const workId = normalizeUuid(input.workId, '作品 id');
+  const chapterId = normalizeUuid(input.chapterId, '章节 id');
+  const sourceVersionId = normalizeUuid(input.sourceVersionId, '历史版本 id');
+  const baseVersionId = normalizeUuid(input.baseVersionId, 'baseVersionId');
+
+  try {
+    return await runWorkWrite(input.db, workId, async (tx) => {
+      await requireOwnedWork(tx, workId, input.authorId);
+
+      const chapter = await lockChapter(tx, workId, chapterId);
+      if (!isChapterOpenForSave(chapter.status)) {
+        throw new AuthError('CHAPTER_STATE_INVALID_FOR_SAVE', '章节已废弃，不能恢复历史版本');
+      }
+
+      // 历史版本必须同时属于该作品与章节：跨作品 / 跨章节 / 不存在统一 404。
+      const source = await tx.chapterVersion.findFirst({
+        where: { id: sourceVersionId, workId, chapterId },
+        select: { id: true, content: true, wordCount: true },
+      });
+      if (source === null) {
+        throw new AuthError('NOT_FOUND', '版本不存在');
+      }
+
+      // ---- 基线比对：必须基于当前最大版本，绝不做 last-write-wins ----
+      const latest = await tx.chapterVersion.findFirst({
+        where: { workId, chapterId },
+        orderBy: { versionNo: 'desc' },
+        select: { id: true, versionNo: true },
+      });
+      if (latest === null || baseVersionId !== latest.id) {
+        throw new AuthError('CHAPTER_VERSION_CONFLICT');
+      }
+      if (sourceVersionId === latest.id) {
+        // 恢复最新版本只会产生一份内容相同的新版本：拒绝，避免无意义重复。
+        throw new AuthError('CHAPTER_VERSION_ALREADY_LATEST');
+      }
+
+      const versionNo = latest.versionNo + 1;
+
+      // ---- 新版本：正文 / 字数原样复制，父版本=恢复时的最新版本 ----
+      const version = await tx.chapterVersion.create({
+        data: {
+          workId,
+          chapterId,
+          versionNo,
+          content: source.content,
+          wordCount: source.wordCount,
+          source: 'human',
+          sourceCandidateId: null,
+          parentVersionId: baseVersionId,
+          createdBy: input.authorId,
+        },
+        select: { id: true, versionNo: true, wordCount: true },
+      });
+
+      const chapterStatus = await advanceChapterToInReview(tx, workId, chapterId, chapter.status);
+
+      // ---- 审计：只记 ids / 版本号 / 字数，**不含正文** ----
+      await writeAuditLog(tx, {
+        action: AUDIT_ACTIONS.CHAPTER_VERSION_RESTORED,
+        actorId: input.authorId,
+        targetType: 'chapter',
+        targetId: chapterId,
+        detail: {
+          workId,
+          chapterId,
+          versionId: version.id,
+          versionNo: version.versionNo,
+          sourceVersionId: source.id,
+          parentVersionId: baseVersionId,
+          wordCount: version.wordCount,
+        },
+      });
+
+      return {
+        versionId: version.id,
+        versionNo: version.versionNo,
+        wordCount: version.wordCount,
+        source: 'human' as const,
+        parentVersionId: baseVersionId,
+        restoredFromVersionId: source.id,
         chapterStatus,
       };
     });

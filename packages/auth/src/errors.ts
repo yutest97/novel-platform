@@ -40,6 +40,8 @@ export type AuthErrorCode =
   | 'CHAPTER_STATE_INVALID_FOR_SAVE'
   // 版本 diff（A1-4B-C-A）：正文规模超出对比上限
   | 'CHAPTER_DIFF_TOO_LARGE'
+  // 历史版本恢复（A1-4B-C-B）：准备恢复的版本已经是当前最新
+  | 'CHAPTER_VERSION_ALREADY_LATEST'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -94,6 +96,8 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   CHAPTER_STATE_INVALID_FOR_SAVE: 409,
   // diff：正文行数 / 长度超出对比上限（规模保护）
   CHAPTER_DIFF_TOO_LARGE: 400,
+  // 恢复目标已是当前最新版本：拒绝创建无意义的新版本
+  CHAPTER_VERSION_ALREADY_LATEST: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -142,6 +146,7 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   CHAPTER_CONTENT_INVALID: '章节正文不合法，请检查字数和内容',
   CHAPTER_STATE_INVALID_FOR_SAVE: '章节当前状态不允许保存人工版本',
   CHAPTER_DIFF_TOO_LARGE: '章节正文规模超出对比上限',
+  CHAPTER_VERSION_ALREADY_LATEST: '该版本已是最新版本，无需恢复',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

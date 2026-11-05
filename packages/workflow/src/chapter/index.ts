@@ -33,7 +33,10 @@ export {
 } from './adoption.js';
 export {
   normalizeHumanContent,
+  restoreChapterVersion,
   saveHumanChapterVersion,
+  type RestoreChapterVersionInput,
+  type RestoredChapterVersion,
   type SaveHumanChapterVersionInput,
   type SavedHumanChapterVersion,
 } from './human.js';

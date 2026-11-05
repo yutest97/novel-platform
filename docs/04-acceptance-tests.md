@@ -656,3 +656,26 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-113 | 规模保护 | 两侧任一侧字符数 > 200000 或行数超上限 → 400 `CHAPTER_DIFF_TOO_LARGE`（「章节正文规模超出对比上限」）；中间段编辑距离超上限时**退化为整段替换**（仍为确定结果，不报错、不挂起） | `test/chapter-diff.test.ts`；错误码登记见 `packages/auth/src/errors.ts`、`apps/web/src/lib/api.ts` |
 | AT-WF-114 | 只读语义 | 单次 `findMany` 读取，不写审计、不新增 / 修改版本行、不改章节状态；调用前后版本行数与 `updatedAt` 不变 | `test/chapter-diff-api.test.ts` |
 | AT-WF-115 | 既有测试不减少 | 全量单测 **756**（A1-4B-B 725 + diff 纯函数 17 + diff API 14）；浏览器 E2E 仍 **96**（本轮无 UI 变更） | 全量 `pnpm test`、`playwright test` |
+
+## 25. 版本对比 UI 与历史版本恢复验收（A1-4B-C-B）
+
+> 对应 `docs/07-master-roadmap.md` A1-4B-C-B、`docs/08` 第 19 节、`README`「版本对比与历史恢复」。
+> 本轮**不实现**定稿流程（独立为 A1-4B-C-C）、不删除 / 覆盖历史版本、
+> 不做 diff 内局部编辑、不修改 `chapter_versions` 表结构、不新增 migration。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-116 | 对比入口与默认选择 | 正式版本区「版本对比」按需展开：折叠态不渲染面板、不请求 diff；展开时默认目标=最新版本、起始=上一版；只有一个版本时自己比自己（起始=目标=该版本） | `e2e/chapter-workbench.spec.ts` 用例 30、`test/chapter-diff-view.test.ts` |
+| AT-WF-117 | 对比结果 | 展示两侧版本元信息（版本号 · 来源 · 字数）、`stats` 中文统计、行列表；双列行号（无对应侧 `·` 占位）；`added` / `removed` 有「新增」「删除」中文标签（不只靠颜色）；行文本以 React 纯文本渲染，不使用 `dangerouslySetInnerHTML`；`added===0 && removed===0` 显示「两个版本内容一致。」 | 用例 30/31、`test/chapter-diff-view.test.ts` |
+| AT-WF-118 | 切换与竞态 | 切换任一选择器立即清空旧结果并重新请求；响应按最近一次选择校验，被后发请求顶掉的结果不落盘；交换方向后 `added` / `removed` 互换；重复执行同一组合结果一致 | 用例 31、`test/chapter-diff-view.test.ts` |
+| AT-WF-119 | 对比错误 | `CHAPTER_DIFF_TOO_LARGE` 显示「章节正文规模超出对比上限」且不渲染结果；404 / 会话错误走既有统一处理；形状不合法的响应按 `INTERNAL_ERROR` 拒绝（缺字段 / 类型错 / 行号与 kind 不自洽 / stats 与行数矛盾） | 用例 32、`test/chapter-diff-view.test.ts` |
+| AT-WF-120 | 对比只读 | 对比前后选中版本不变、编辑器状态不变；不写 URL / localStorage / sessionStorage；不触发任何写接口 | 用例 30、`test/chapter-diff-view.test.ts` |
+| AT-WF-121 | 对比移动端 | 390×844 下选择器竖排、可完成对比；长行换行、diff 区纵向滚动；`scrollWidth <= viewport + 1` | 用例 36 |
+| AT-WF-122 | 恢复语义 | `POST /versions/:versionId/restore`：新版本 `versionNo=latest+1`、`source=human`、`parentVersionId=baseVersionId`、`restoredFromVersionId=来源版本`；正文与字数**原样复制**来源版本；旧版本（来源与中间版本）内容 / 字数完全不变；章节状态进入 `in_review`（`finalized` 也被拉回） | `test/chapter-restore-api.test.ts` |
+| AT-WF-123 | 已是最新 | 恢复当前最新版本 → 409 `CHAPTER_VERSION_ALREADY_LATEST`（「该版本已是最新版本，无需恢复」），不新增版本 | 同上 |
+| AT-WF-124 | 冲突与并发 | `baseVersionId` 过期 / 章节尚无版本 → 409 `CHAPTER_VERSION_CONFLICT`，不新增版本；同 base 并发恢复恰好 201 + 409，只新增一个版本且版本号连续 | 同上 |
+| AT-WF-125 | 归属与权限 | 跨章节 / 跨作品 / 随机版本 id → 404「版本不存在」（HTTP 与服务层直调一致）；未登录 401；管理员 403；他人作品 404 | 同上 |
+| AT-WF-126 | 请求校验 | 缺 `baseVersionId` / `null` / 空串 / 非字符串 / 未知字段 / 非法 UUID → 400 `VALIDATION_FAILED`；缺 Origin → 403；响应不含正文与作者 id | 同上 |
+| AT-WF-127 | 审计与回滚 | 审计 `chapter.version_restored` 的 detail 只有 `workId / chapterId / versionId / versionNo / sourceVersionId / parentVersionId / wordCount` 7 个字段、不含正文；审计写入失败 → 版本与章节状态整体回滚 | 同上 |
+| AT-WF-128 | 恢复 UI | 选中历史版本时出现「恢复此版本为新版本」；点击弹二次确认，明确「创建新版本、不删除历史」；取消不产生版本且保持选中；确认后提示「已从版本 N 恢复为版本 M」、关闭对比、刷新列表并自动选中最新；恢复中按钮禁用；冲突保留页面状态并提供「载入最新版本」；已是最新直接刷新；不提供覆盖 / 删除历史版本的操作 | 用例 33/34/35/36 |
+| AT-WF-129 | 测试数 | 全量单测 **789**（756 + 恢复服务/API 18 + diff 视图纯逻辑 15）；浏览器 E2E **103**（96 + 7） | 全量 `pnpm test`、`playwright test` |

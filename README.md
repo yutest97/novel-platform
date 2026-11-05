@@ -1,13 +1,13 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-4B-C-A（章节正式版本 diff 服务与只读 API）**。
+> 当前阶段：**A1-4B-C-B（版本对比 UI 与历史版本恢复）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
 A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
-A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器、A1-4B-C-A 版本 diff API
-（**仍无 diff UI / 历史版本恢复 / 定稿**）。
+A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器、A1-4B-C-A 版本 diff API、
+A1-4B-C-B 版本对比 UI 与历史版本恢复（**定稿流程仍未实现**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -877,9 +877,10 @@ workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展�
 **REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；
 **A1-4B-A** 再补 18 个（人工版本保存 API）；**A1-4B-B** 再补 13 个（编辑器纯逻辑）；
 **REV-01** 再补 5 个（离开保护 / 冲突重载确认）；**REV-02** 再补 4 个（哨兵生命周期）；
-**A1-4B-C-A** 再补 31 个（diff 纯函数 17、diff API 14），
-全量单测 **756** 个（web 244 / workflow 197 / worker 63 / shared 15 / db 10 /
-auth 95 / works 132）；浏览器 E2E 合计 **96**（80 + 编辑器 7 + 离开保护 4 + 哨兵 5）。
+**A1-4B-C-A** 再补 31 个（diff 纯函数 17、diff API 14）；
+**A1-4B-C-B** 再补 33 个（恢复服务 / API 18、diff 视图纯逻辑 15），
+全量单测 **789** 个（web 277 / workflow 197 / worker 63 / shared 15 / db 10 /
+auth 95 / works 132）；浏览器 E2E 合计 **103**（96 + 版本对比与恢复 7）。
 
 ### 人工章节版本保存（A1-4B-A）
 
@@ -985,7 +986,58 @@ curl -sS \
   中间段编辑距离 > 500 时不报错，退化为「整段删除 + 整段新增」；
 - **只读**：不写审计、不改版本行与章节状态，响应不含完整正文。
 
-**仍不提供**：diff 视图 UI、历史版本恢复、定稿流程（A1-4B-C-B）。
+**仍不提供**：定稿流程、版本删除 / 覆盖、diff 内局部编辑（A1-4B-C-C）。
+
+### 版本对比与历史版本恢复（A1-4B-C-B）
+
+**版本对比**（正式版本区，只读）：
+
+- 「版本对比」按钮按需展开 —— 折叠时不渲染面板、不请求 diff；
+- 默认 目标=最新版本、起始=上一版；只有一个版本时自己比自己；
+- 结果含两侧版本元信息、`新增 X 行 · 删除 Y 行 · 未变化 Z 行`、行列表：
+  双列行号（无对应侧显示 `·`）+ 中文标签（`新增` / `删除`）+ 纯文本行内容；
+- 切换任一选择器会**立即清空旧结果**再请求，响应按最近一次选择校验，
+  过期结果不会画到界面上；
+- `added === 0 && removed === 0` → 「两个版本内容一致。」；
+- `CHAPTER_DIFF_TOO_LARGE` 显示「章节正文规模超出对比上限」；
+- 对比不改变当前选中版本、不打开编辑器、不写 URL / localStorage / sessionStorage；
+- 390×844 下选择器竖排、长行换行、diff 区纵向滚动，不横向撑破。
+
+**历史版本恢复**（选中历史版本时）：
+
+```bash
+POST /api/works/:workId/chapters/:chapterId/versions/:versionId/restore
+{ "baseVersionId": "<当前最大版本 id>" }
+```
+
+```jsonc
+// 201（**不含正文**）
+{
+  "version": {
+    "versionId": "…",
+    "versionNo": 3,
+    "wordCount": 2181,
+    "source": "human",
+    "parentVersionId": "…",
+    "restoredFromVersionId": "…",
+    "chapterStatus": "in_review"
+  }
+}
+```
+
+- 恢复**只新增版本**：正文与字数原样复制来源版本，`parentVersionId` 指向恢复前最新版；
+  来源版本与中间版本完全不变（`chapter_versions` append-only）；
+- `baseVersionId` 必须显式出现且**不允许 null**；作品级 advisory lock + 章节行锁，
+  同 base 并发恰好一个 201、一个 409；
+- 恢复当前最新版本 → 409 `CHAPTER_VERSION_ALREADY_LATEST`（「该版本已是最新版本，无需恢复」）；
+- 基线过期 → 409 `CHAPTER_VERSION_CONFLICT`；章节已废弃 → 409
+  `CHAPTER_STATE_INVALID_FOR_SAVE`；跨章节 / 跨作品 / 不存在 → 404；
+- 审计 `chapter.version_restored` 只记 7 个字段（`workId / chapterId / versionId /
+versionNo / sourceVersionId / parentVersionId / wordCount`），不含正文；审计失败整体回滚；
+- UI：二次确认明确「创建新版本、不删除历史」→ 成功提示「已从版本 N 恢复为版本 M」、
+  关闭对比、刷新列表并选中最新；冲突保留页面状态并提供「载入最新版本」。
+
+**仍不提供**：定稿流程、版本删除 / 覆盖、diff 内局部编辑。
 
 ### 浏览器 E2E（Playwright Chromium）
 
@@ -1055,7 +1107,12 @@ processing + cancelRequestedAt（已请求取消生成）；刷新已完成任�
 确认替换并归零 dirty →
 **A1-4B-B-REV-02**：撤销回原文 / 载入最新版后 dirty 归零会释放后退哨兵（后退一次即离开）；
 确认「返回章节列表」后历史不再残留同 URL 哨兵（后退两次依次回章节、回更早列表）；
-dirty 时退出登录取消保持登录与草稿、确认才退出；后退并确认到达真实上一页且无迟到弹窗。
+dirty 时退出登录取消保持登录与草稿、确认才退出；后退并确认到达真实上一页且无迟到弹窗 →
+**A1-4B-C-B**：按需展开版本对比（默认最新 vs 上一版）→ 统计与双列行号、`新增`/`删除`
+中文标签 → 切换选择器后方向与统计随之变化、自己比自己显示「两个版本内容一致」→
+替身注入 `CHAPTER_DIFF_TOO_LARGE` 显示稳定文案且清空旧结果 → 恢复历史版本（取消不产生版本、
+确认后新增并保留历史、刷新后仍在）→ 替身注入冲突保留页面状态并可「载入最新版本」→
+390×844 移动端浏览 diff 并恢复、不撑破视口。
 
 > Playwright 按**文件名字母序**执行，因此 `z-account-limit.spec.ts`（会故意把账号
 > 补齐到 10 个）排在最后；管理员改密后的口令通过 `apps/web/.e2e-admin-password`

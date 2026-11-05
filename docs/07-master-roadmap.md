@@ -1,8 +1,8 @@
 # 07 总路线（个人可用版优先）
 
-- 版本：v1.2
+- 版本：v1.3
 - 日期：2026-11-05
-- 当前基线：`1bc489c`（A1-4B-B-REV-02 已验收）+ A1-4B-C-A（本地提交）
+- 当前基线：`49cc75a`（A1-4B-C-A 已验收）+ A1-4B-C-B（本地提交）
 - 状态：执行中
 
 ---
@@ -46,8 +46,9 @@
 | **A1-4A** | 章节工作台（生成 / 轮询 / 候选采纳 / 正式阅读） | 章节列表与创建、章节工作台、Mock/真实 Worker 生成、1s→5s 轮询、取消、候选预览、采纳、正式版本阅读、3 个只读 API、E2E；**无人工编辑**；REV-01 修取消后重新生成、目标字数默认值与终态步骤文案；REV-02 修生成提示与任务状态一致性 | 已完成 + REV-01/02（本地提交） |
 | **A1-4B-A** | 人工章节版本保存（服务 + API） | `POST /chapters/:chapterId/versions`、`saveHumanChapterVersion`（`baseVersionId` 乐观并发 + 章节行锁）、`source='human'` 追加版本、`finalized → in_review`、`CHAPTER_CONTENT_INVALID` / `CHAPTER_STATE_INVALID_FOR_SAVE`、审计 `chapter.version_created`；**无 UI** | **本轮完成** |
 | **A1-4B-B** | Markdown 人工编辑器与 human 版本保存 UI | 正式版本区编辑入口（首版 / 最新版本）、textarea 纯文本编辑、实时字数下限提示、dirty 状态、`Ctrl/Cmd+S` 保存、取消二次确认与 `beforeunload`、冲突后「载入最新版本」、旧版本只读、移动端可用；**无 diff / 恢复** | 已完成 + REV-01/02（本地提交） |
-| **A1-4B-C-A** | 章节版本 diff（服务 + 只读 API） | `GET /chapters/:chapterId/versions/diff?fromVersionId=&toVersionId=`、`diffChapterVersions`（归属校验 + 行级 LCS diff）、`equal/added/removed` + 双侧行号 + `stats`、换行归一化、`CHAPTER_DIFF_TOO_LARGE`（20 万字符 / 行数 / 编辑距离上限，超编辑距离退化为整段替换）、只读不写审计；**无 UI、无恢复、无迁移** | **本轮完成** |
-| **A1-4B-C-B** | 版本 diff UI、历史恢复与定稿 | 版本间差异对比视图（并列 / 行级高亮）、历史版本恢复为新版本、恢复前确认、定稿流程与定稿后只读 | 待开始 |
+| **A1-4B-C-A** | 章节版本 diff（服务 + 只读 API） | `GET /chapters/:chapterId/versions/diff?fromVersionId=&toVersionId=`、`diffChapterVersions`（归属校验 + 行级 LCS diff）、`equal/added/removed` + 双侧行号 + `stats`、换行归一化、`CHAPTER_DIFF_TOO_LARGE`（20 万字符 / 行数 / 编辑距离上限，超编辑距离退化为整段替换）、只读不写审计；**无 UI、无恢复、无迁移** | 已完成（本地提交） |
+| **A1-4B-C-B** | 版本对比 UI 与历史版本恢复 | 正式版本区按需展开的对比面板（双选择器、双列行号、added/removed 中文标签、空 diff / 超大 / 冲突提示、移动端不撑破）、`GET /versions/diff` 前端严格解析、`POST /versions/:versionId/restore`、新错误码 `CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`；**不含定稿流程** | **本轮完成** |
+| **A1-4B-C-C** | 章节定稿流程 | 定稿按钮与确认、定稿后只读、定稿状态流转 | 待开始 |
 | **A2** | 连续性与事实（个人版） | 章节事实提取、人物/资源状态回写、跨章一致性提示 | 待开始 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
@@ -114,3 +115,4 @@
 | 2026-11-05 | A1-4B-B-REV-01：应用内离开保护（返回 / 后退 / 退出登录先确认，保留 `beforeunload`）与冲突「载入最新版本」二次确认 |
 | 2026-11-05 | A1-4B-B-REV-02：后退哨兵生命周期（dirty 归零即释放、确认离开先消费哨兵再导航），补齐撤销 / 冲突重载 / 退出登录 / 后退确认的 E2E |
 | 2026-11-05 | A1-4B-C 拆分为 C-A（diff 服务 + 只读 API，本轮完成）与 C-B（diff UI / 历史恢复 / 定稿） |
+| 2026-11-05 | A1-4B-C-B：版本对比 UI（按需展开、双选择器、行级标签、移动端）与历史版本恢复（`CHAPTER_VERSION_ALREADY_LATEST`、审计 `chapter.version_restored`）；定稿流程独立为 C-C，仍未实现 |

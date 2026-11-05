@@ -1012,3 +1012,127 @@ findMany({ where: { workId, chapterId, id: { in: [from, to] } } })
 A1-4B-C-B 承接：diff 视图 UI（并列 / 行级高亮）、历史版本恢复为新版本、
 恢复前确认、定稿流程。本节的服务契约即为 UI 的唯一数据来源，
 **恢复不得原地改写旧版本**（`chapter_versions` append-only）。
+
+## 19. A1-4B-C-B：版本对比 UI 与历史版本恢复
+
+> 本轮完成 diff 的**前端消费**与**历史版本恢复**（服务 + API + UI）。
+> 不实现定稿流程、不删除 / 覆盖历史版本、不做 diff 内局部编辑、
+> 不修改 `chapter_versions` 表结构、不新增 migration。
+
+### 19.1 版本对比 UI（只读）
+
+正式版本区的「版本对比」按钮**按需展开**：折叠态不渲染面板、不预取 diff，
+点击后才用默认组合请求一次。
+
+| 行为 | 规则 |
+| --- | --- |
+| 默认选择 | 目标 = 列表第一个（最新版本）；起始 = 第二个（上一版）；**只有一个版本时自己比自己** |
+| 切换选择器 | 立即清空旧结果并重新请求；响应按"最近一次选择"校验，被后发请求顶掉的结果直接丢弃 |
+| 结果 | 两侧版本元信息（版本号 · 来源 · 字数）、`stats` 中文统计、行列表 |
+| 行展示 | 双列行号（`·` 占位）+ 中文标签（`新增` / `删除`）+ 文本；`equal` 无标签 |
+| 空 diff | `stats.added === 0 && stats.removed === 0` → 「两个版本内容一致。」 |
+| 错误 | `CHAPTER_DIFF_TOO_LARGE` 显示稳定文案；404 / 会话错误走既有统一处理 |
+| 只读 | 不改当前选中版本、不打开编辑器、不写 URL / localStorage / sessionStorage |
+| 渲染安全 | 行文本用 React 文本节点（`{line.text}`），**不使用** `dangerouslySetInnerHTML` |
+| 移动端 | 390×844 选择器竖排、行内文本 `pre-wrap + overflow-wrap: anywhere`、diff 区纵向滚动；不横向撑破 |
+
+**严格解析**（`apps/web/src/lib/chapter-diff-view.ts`）：
+逐字段校验版本元信息 / 行 / 统计；`kind` 与两侧行号必须自洽
+（`equal` 两侧都有、`removed` 只有旧侧、`added` 只有新侧）；
+`stats` 必须与 `lines` 实际条数一致。任何不一致都按 `INTERNAL_ERROR` 拒绝，
+**不渲染半截结果**。
+
+### 19.2 恢复契约（服务）
+
+`restoreChapterVersion({ db, authorId, workId, chapterId, sourceVersionId, baseVersionId })`
+
+```
+runWorkWrite（作品级 advisory lock）
+  → requireOwnedWork
+  → SELECT … FROM chapters WHERE id=? AND work_id=? FOR UPDATE
+  → 读 sourceVersion（必须同 workId + chapterId，否则 404）
+  → 读 latest（versionNo desc）
+  → baseVersionId !== latest.id → 409 CHAPTER_VERSION_CONFLICT
+  → sourceVersionId === latest.id → 409 CHAPTER_VERSION_ALREADY_LATEST
+  → 插入新版本（content / wordCount 原样复制，source='human'，
+        parent_version_id=baseVersionId，version_no=latest+1）
+  → 章节 status → in_review（复用人工保存的推进逻辑）
+  → 审计 chapter.version_restored
+```
+
+- **旧版本只读**：恢复只新增一行，`chapter_versions` 的不可变触发器照常生效；
+- **不重算字数**：`word_count` 与 `content` 一起从来源版本复制（来源已通过保存校验）；
+- **baseVersionId 必须非空**：恢复永远基于"当前最大版本"，`null` 在 HTTP 层直接 400；
+- 同一章节的保存 / 恢复 / 采纳共用同一把作品锁与章节行锁，因此并发恢复
+  **恰好一个 201 + 一个 409**，版本号连续、不跳号。
+
+### 19.3 恢复 HTTP API
+
+| 方法 | 路径 | 成功 |
+| --- | --- | --- |
+| POST | `/api/works/:workId/chapters/:chapterId/versions/:versionId/restore` | 201 `{ version }` |
+
+请求体**严格白名单**：只有 `baseVersionId`（string，**不允许 null**）。
+
+```jsonc
+// 请求
+{ "baseVersionId": "<当前最大版本 id>" }
+// 响应 201（**不含正文**）
+{
+  "version": {
+    "versionId": "…",
+    "versionNo": 3,
+    "wordCount": 2181,
+    "source": "human",
+    "parentVersionId": "…",
+    "restoredFromVersionId": "…",
+    "chapterStatus": "in_review"
+  }
+}
+```
+
+- 写接口校验 Origin；未登录 401、非作者（含管理员）403；
+- 他人作品 404；跨章节 / 跨作品 / 随机版本 id 统一 404「版本不存在」；
+- 未知字段 / 缺 `baseVersionId` / null / 空串 / 非法 UUID → 400；
+- 响应不含正文、作者 id、数据库错误。
+
+### 19.4 审计
+
+`chapter.version_restored`，detail **只有 7 个字段**：
+
+`workId / chapterId / versionId / versionNo / sourceVersionId / parentVersionId / wordCount`
+
+不含正文；审计写入失败 → 版本、章节状态整体回滚（同一事务）。
+
+### 19.5 错误码
+
+| 错误码 | HTTP | 触发 |
+| --- | --- | --- |
+| `VALIDATION_FAILED` | 400 | 缺 / null / 非法 `baseVersionId`，未知字段，非法 UUID |
+| `CHAPTER_VERSION_ALREADY_LATEST` | 409 | `sourceVersionId` 已是当前最新版本 |
+| `CHAPTER_VERSION_CONFLICT` | 409 | `baseVersionId` 不是当前最大版本（含章节尚无版本 / 唯一约束冲突） |
+| `CHAPTER_STATE_INVALID_FOR_SAVE` | 409 | 章节已废弃 |
+| `CONCURRENT_MODIFICATION` | 409 | 数据库死锁 / 序列化失败（可重试） |
+| `NOT_FOUND` | 404 | 作品 / 章节不属于当前作者，或历史版本不属于该章节 + 作品 |
+| `UNAUTHORIZED` / `FORBIDDEN` | 401 / 403 | 未登录 / 非作者 |
+
+### 19.6 恢复 UI
+
+选中**历史版本**（非最新）时，只读提示区出现「恢复此版本为新版本」：
+
+1. 点击 → 二次确认：「确认从版本 N 恢复为新版本？这会基于当前最新版本创建一个新版本，
+   版本 N 不会被删除或修改。」
+2. 确认 → 用**当前最大版本 id** 作为 `baseVersionId` 提交；恢复中按钮禁用；
+3. 成功 → 关闭对比面板、提示「已从版本 N 恢复为版本 M」、
+   刷新版本列表并自动选中最新版本；
+4. 失败保留原状态：
+   - `CHAPTER_VERSION_CONFLICT` → 稳定提示 + 「载入最新版本」（刷新列表并选中最新）；
+   - `CHAPTER_VERSION_ALREADY_LATEST` → 直接刷新列表（恢复入口对最新版本本来就不显示）；
+   - 会话错误 → 统一跳转。
+
+**不提供**覆盖 / 删除历史版本的操作；恢复永远产生新版本。
+
+### 19.7 未做
+
+定稿流程（章节定稿按钮、定稿后只读）、diff 内局部编辑、版本删除 / 覆盖、
+AI 候选采纳逻辑改动、`chapter_versions` 表结构变更、第三方 diff 依赖。

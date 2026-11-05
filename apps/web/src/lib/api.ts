@@ -7,6 +7,20 @@
  * - 不把任何响应写入 localStorage / sessionStorage。
  */
 
+import {
+  DiffPayloadError,
+  parseChapterVersionDiff,
+  type ChapterVersionDiff,
+} from './chapter-diff-view';
+
+export type {
+  ChapterDiffLine,
+  ChapterDiffLineKind,
+  ChapterDiffStats,
+  ChapterDiffVersionRef,
+  ChapterVersionDiff,
+} from './chapter-diff-view';
+
 /** 后端稳定错误码。 */
 export type ApiErrorCode =
   | 'UNAUTHENTICATED'
@@ -45,6 +59,8 @@ export type ApiErrorCode =
   | 'CHAPTER_STATE_INVALID_FOR_SAVE'
   // 版本 diff（A1-4B-C-A）：正文规模超出对比上限
   | 'CHAPTER_DIFF_TOO_LARGE'
+  // 历史版本恢复（A1-4B-C-B）：目标版本已是当前最新
+  | 'CHAPTER_VERSION_ALREADY_LATEST'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -82,6 +98,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CHAPTER_CONTENT_INVALID: '章节正文不合法，请检查字数和内容',
   CHAPTER_STATE_INVALID_FOR_SAVE: '章节当前状态不允许保存人工版本',
   CHAPTER_DIFF_TOO_LARGE: '章节正文规模超出对比上限',
+  CHAPTER_VERSION_ALREADY_LATEST: '该版本已是最新版本，无需恢复',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -923,4 +940,76 @@ export async function fetchChapterVersion(
     )}/versions/${encodeURIComponent(versionId)}`,
   );
   return (body as { version: ChapterVersionDetail }).version;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 版本对比与历史恢复（A1-4B-C）                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 读取两个正式版本之间的行级 diff（只读）。
+ *
+ * - `fromVersionId` / `toVersionId` 各传一次；服务端严格白名单校验；
+ * - 响应**严格解析**：形状不对（缺字段 / 类型不符 / 行号与 kind 不自洽 /
+ *   stats 与实际行数矛盾）按 `INTERNAL_ERROR` 处理，绝不渲染半截结果；
+ * - `CHAPTER_DIFF_TOO_LARGE` 由统一错误映射给出稳定中文文案；
+ * - 不写 URL / localStorage / sessionStorage。
+ */
+export async function fetchChapterVersionDiff(
+  workId: string,
+  chapterId: string,
+  fromVersionId: string,
+  toVersionId: string,
+): Promise<ChapterVersionDiff> {
+  const query = new URLSearchParams({ fromVersionId, toVersionId });
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/versions/diff?${query.toString()}`,
+  );
+  try {
+    return parseChapterVersionDiff(body);
+  } catch (error) {
+    if (error instanceof DiffPayloadError) {
+      throw new ApiError('INTERNAL_ERROR', 500);
+    }
+    throw error;
+  }
+}
+
+/** 历史版本恢复结果（**不含正文**；正文由 `fetchChapterVersion` 读取）。 */
+export interface RestoredChapterVersionSummary {
+  readonly versionId: string;
+  readonly versionNo: number;
+  readonly wordCount: number;
+  readonly source: 'human';
+  /** 新版本的父版本 = 恢复时的最新版本。 */
+  readonly parentVersionId: string;
+  /** 正文来源的历史版本 id（原版本保持不变）。 */
+  readonly restoredFromVersionId: string;
+  readonly chapterStatus: string;
+}
+
+/**
+ * 把历史版本恢复为**新的**人工正式版本。
+ *
+ * - `baseVersionId` 必须是**当前最大版本 id**（用于乐观并发）；
+ * - 正文与字数由服务端从历史版本原样复制，客户端不提交正文；
+ * - 版本已是最新 → 409 `CHAPTER_VERSION_ALREADY_LATEST`；
+ * - 基线过期 → 409 `CHAPTER_VERSION_CONFLICT`；章节废弃 → 409
+ *   `CHAPTER_STATE_INVALID_FOR_SAVE`；历史版本不属于该章节 / 作品 → 404。
+ */
+export async function restoreChapterVersion(
+  workId: string,
+  chapterId: string,
+  versionId: string,
+  input: { readonly baseVersionId: string },
+): Promise<RestoredChapterVersionSummary> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/versions/${encodeURIComponent(versionId)}/restore`,
+    { method: 'POST', body: { baseVersionId: input.baseVersionId } },
+  );
+  return (body as { version: RestoredChapterVersionSummary }).version;
 }

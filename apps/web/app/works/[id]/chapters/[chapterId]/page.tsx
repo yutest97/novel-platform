@@ -30,19 +30,33 @@ import {
   fetchChapter,
   fetchChapterCandidate,
   fetchChapterVersion,
+  fetchChapterVersionDiff,
   fetchChapterVersions,
   fetchGenerationTask,
   fetchWork,
   formatDateTime,
   messageOf,
+  restoreChapterVersion,
   saveHumanChapterVersion,
   startChapterGeneration,
   type ChapterCandidateDetail,
   type ChapterDetail,
   type ChapterVersionDetail,
+  type ChapterVersionDiff,
   type ChapterVersionListItem,
   type WorkDetail,
 } from '@/lib/api';
+import {
+  defaultDiffSelection,
+  diffLineClass,
+  diffLineLabel,
+  diffStatsLabel,
+  diffVersionLabel,
+  isIdenticalDiff,
+  lineNoPlaceholder,
+  restoreConfirmMessage,
+  restoredNotice,
+} from '@/lib/chapter-diff-view';
 import {
   MAX_CHAPTER_TARGET_WORDS,
   MIN_CHAPTER_TARGET_WORDS,
@@ -105,7 +119,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [pacing, setPacing] = useState('');
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState('');
-  const [adoptionNotice, setAdoptionNotice] = useState('');
+  const [actionNotice, setActionNotice] = useState('');
 
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState('');
@@ -141,6 +155,23 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   /** 已确认的离开正在执行：期间任何 popstate 都不再弹窗。 */
   const leavingRef = useRef(false);
 
+  // 版本对比（A1-4B-C-B）：默认折叠，展开后才请求 diff；只读，不改选中版本 / 编辑器。
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareFromId, setCompareFromId] = useState('');
+  const [compareToId, setCompareToId] = useState('');
+  const [compareDiff, setCompareDiff] = useState<ChapterVersionDiff | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<ApiError | null>(null);
+  /** 最近一次请求的选择器组合：响应回来时用它丢弃过期结果。 */
+  const compareSelectionRef = useRef<{ readonly from: string; readonly to: string }>({
+    from: '',
+    to: '',
+  });
+  // 历史版本恢复（A1-4B-C-B）
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreError, setRestoreError] = useState<ApiError | null>(null);
+
   const targetInitialized = useRef(false);
   const selectedVersionIdRef = useRef<string | null>(null);
   const requestIdRef = useRef<{ readonly key: string; readonly id: string } | null>(null);
@@ -153,6 +184,8 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
         const version = await fetchChapterVersion(workId, chapterId, versionId);
         setSelectedVersion(version);
         selectedVersionIdRef.current = version.id;
+        // 换版本后，上一条恢复错误不再对应当前选择。
+        setRestoreError(null);
       } catch (caught) {
         if (handleSessionError(caught, router)) {
           return;
@@ -189,6 +222,138 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     },
     [workId, chapterId, openVersion],
   );
+
+  /**
+   * 请求一次 diff。
+   *
+   * - 请求前立即清空旧结果：切换选择器时绝不显示上一次的过期 diff；
+   * - 响应回来时比对 `compareSelectionRef`，被后发请求顶掉的结果直接丢弃；
+   * - 会话错误走统一跳转；`CHAPTER_DIFF_TOO_LARGE` 等只展示稳定文案。
+   */
+  const loadDiff = useCallback(
+    async (fromId: string, toId: string): Promise<void> => {
+      if (fromId === '' || toId === '') {
+        return;
+      }
+      setCompareLoading(true);
+      setCompareError(null);
+      setCompareDiff(null);
+      try {
+        const diff = await fetchChapterVersionDiff(workId, chapterId, fromId, toId);
+        const current = compareSelectionRef.current;
+        if (current.from === fromId && current.to === toId) {
+          setCompareDiff(diff);
+        }
+      } catch (caught) {
+        if (handleSessionError(caught, router)) {
+          return;
+        }
+        const current = compareSelectionRef.current;
+        if (current.from === fromId && current.to === toId) {
+          setCompareError(
+            caught instanceof ApiError ? caught : new ApiError('INTERNAL_ERROR', 500),
+          );
+        }
+      } finally {
+        setCompareLoading(false);
+      }
+    },
+    [workId, chapterId, router],
+  );
+
+  /** 展开对比面板：此时才发第一次请求（页面加载不预取 diff）。 */
+  const openCompare = useCallback((): void => {
+    const selection = defaultDiffSelection(versions);
+    if (selection === null) {
+      return;
+    }
+    compareSelectionRef.current = { from: selection.fromVersionId, to: selection.toVersionId };
+    setCompareOpen(true);
+    setCompareFromId(selection.fromVersionId);
+    setCompareToId(selection.toVersionId);
+    void loadDiff(selection.fromVersionId, selection.toVersionId);
+  }, [versions, loadDiff]);
+
+  const closeCompare = useCallback((): void => {
+    compareSelectionRef.current = { from: '', to: '' };
+    setCompareOpen(false);
+    setCompareDiff(null);
+    setCompareError(null);
+    setCompareLoading(false);
+  }, []);
+
+  const changeCompareFrom = useCallback(
+    (value: string): void => {
+      compareSelectionRef.current = { from: value, to: compareToId };
+      setCompareFromId(value);
+      void loadDiff(value, compareToId);
+    },
+    [compareToId, loadDiff],
+  );
+
+  const changeCompareTo = useCallback(
+    (value: string): void => {
+      compareSelectionRef.current = { from: compareFromId, to: value };
+      setCompareToId(value);
+      void loadDiff(compareFromId, value);
+    },
+    [compareFromId, loadDiff],
+  );
+
+  /** 打开恢复确认（只在选中历史版本时可用）。 */
+  const requestRestore = useCallback((): void => {
+    if (selectedVersion === null || versions.length < 2) {
+      return;
+    }
+    setRestoreError(null);
+    setRestoreConfirmOpen(true);
+  }, [selectedVersion, versions.length]);
+
+  /**
+   * 确认恢复：基于**当前最大版本**创建新版本。
+   *
+   * - 成功后关闭对比状态、提示「已从版本 N 恢复为版本 M」、刷新并选中最新版本；
+   * - 冲突保留原状态（页面不动），提示 + 「载入最新版本」；
+   * - 已是当前最新 → 直接刷新列表，让恢复按钮自然消失。
+   */
+  const confirmRestore = useCallback(async (): Promise<void> => {
+    const source = selectedVersion;
+    const latest = versions[0];
+    if (source === null || latest === undefined) {
+      setRestoreConfirmOpen(false);
+      return;
+    }
+    setRestoring(true);
+    setRestoreError(null);
+    try {
+      const restored = await restoreChapterVersion(workId, chapterId, source.id, {
+        baseVersionId: latest.id,
+      });
+      setRestoreConfirmOpen(false);
+      closeCompare();
+      setActionNotice(restoredNotice(source.versionNo, restored.versionNo));
+      await refreshDetailAndVersions({ selectLatest: true });
+    } catch (caught) {
+      setRestoreConfirmOpen(false);
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      const apiError = caught instanceof ApiError ? caught : new ApiError('INTERNAL_ERROR', 500);
+      setRestoreError(apiError);
+      if (apiError.code === 'CHAPTER_VERSION_ALREADY_LATEST') {
+        // 页面上的"最新版本"已经变了：刷新列表，恢复入口对最新版本本来就不显示。
+        await refreshDetailAndVersions();
+      }
+    } finally {
+      setRestoring(false);
+    }
+  }, [workId, chapterId, selectedVersion, versions, closeCompare, refreshDetailAndVersions]);
+
+  /** 冲突后「载入最新版本」：刷新列表并选中最新（不覆盖任何历史版本）。 */
+  const reloadLatestAfterRestoreConflict = useCallback(async (): Promise<void> => {
+    setRestoreError(null);
+    await refreshDetailAndVersions({ selectLatest: true });
+  }, [refreshDetailAndVersions]);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -235,7 +400,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const latestTask = detail?.latestTask ?? null;
   // 采纳提示优先于生成提示；生成提示完全由任务状态推导，不保留提交时的旧文案。
   const notice: WorkbenchNotice | null =
-    adoptionNotice === '' ? generationNotice(latestTask) : { text: adoptionNotice, tone: 'ok' };
+    actionNotice === '' ? generationNotice(latestTask) : { text: actionNotice, tone: 'ok' };
 
   useEffect(() => {
     if (latestTask === null || !shouldPollTask(latestTask.status)) {
@@ -532,7 +697,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       setClosingEditor(false);
       // 编辑器已关闭且没有离开页面：清掉后退哨兵
       releaseSentinel();
-      setAdoptionNotice(`已保存正式版本 ${saved.versionNo}`);
+      setActionNotice(`已保存正式版本 ${saved.versionNo}`);
       await refreshDetailAndVersions({ selectLatest: true });
       void refreshSession();
     } catch (caught) {
@@ -619,7 +784,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     setGenerating(true);
     setGenerateError('');
     setCancelError('');
-    setAdoptionNotice('');
+    setActionNotice('');
     try {
       const task = await startChapterGeneration(workId, chapterId, {
         requestId: requestIdRef.current.id,
@@ -698,7 +863,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     try {
       const adopted = await adoptChapterCandidate(workId, chapterId, adoptTargetId);
       setAdoptTargetId(null);
-      setAdoptionNotice(
+      setActionNotice(
         adopted.deduplicated
           ? `正式版本 ${adopted.versionNo} 已存在`
           : `已生成正式版本 ${adopted.versionNo}`,
@@ -1117,23 +1282,156 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
             )}
 
             {versions.length > 0 && !canEditCurrentVersion && editor === null ? (
-              <p className="hint" data-testid="version-readonly-hint">
-                历史版本只读，请先选择最新版本再编辑。
+              <>
+                <p className="hint" data-testid="version-readonly-hint">
+                  历史版本只读，请先选择最新版本再编辑。
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small"
+                    onClick={() => {
+                      const latest = versions[0];
+                      if (latest !== undefined) {
+                        void openVersion(latest.id);
+                      }
+                    }}
+                    data-testid="version-select-latest"
+                  >
+                    选择最新版本
+                  </button>
+                </p>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small"
+                    onClick={requestRestore}
+                    disabled={restoring}
+                    data-testid="version-restore"
+                  >
+                    {restoring ? '恢复中…' : '恢复此版本为新版本'}
+                  </button>
+                </div>
+              </>
+            ) : null}
+
+            {restoreError === null ? null : (
+              <div className="alert alert--error" role="alert" data-testid="restore-error">
+                <p>{restoreError.message}</p>
+                {restoreError.code === 'CHAPTER_VERSION_CONFLICT' ? (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small"
+                    onClick={() => void reloadLatestAfterRestoreConflict()}
+                    data-testid="restore-reload-latest"
+                  >
+                    载入最新版本
+                  </button>
+                ) : null}
+              </div>
+            )}
+
+            {versions.length > 0 && editor === null ? (
+              <div className="row-actions">
                 <button
                   type="button"
                   className="btn-secondary btn-small"
-                  onClick={() => {
-                    const latest = versions[0];
-                    if (latest !== undefined) {
-                      void openVersion(latest.id);
-                    }
-                  }}
-                  data-testid="version-select-latest"
+                  onClick={compareOpen ? closeCompare : openCompare}
+                  aria-expanded={compareOpen}
+                  data-testid="compare-toggle"
                 >
-                  选择最新版本
+                  {compareOpen ? '收起版本对比' : '版本对比'}
                 </button>
-              </p>
+              </div>
             ) : null}
+
+            {!compareOpen || versions.length === 0 ? null : (
+              <section className="compare-panel" aria-label="版本对比" data-testid="compare-panel">
+                <div className="compare-selectors">
+                  <label className="compare-field">
+                    <span>起始版本</span>
+                    <select
+                      value={compareFromId}
+                      onChange={(event) => changeCompareFrom(event.target.value)}
+                      disabled={compareLoading}
+                      data-testid="compare-from"
+                    >
+                      {versions.map((version) => (
+                        <option key={version.id} value={version.id}>
+                          版本 {version.versionNo}（{versionSourceLabel(version.source)}）
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="compare-field">
+                    <span>目标版本</span>
+                    <select
+                      value={compareToId}
+                      onChange={(event) => changeCompareTo(event.target.value)}
+                      disabled={compareLoading}
+                      data-testid="compare-to"
+                    >
+                      {versions.map((version) => (
+                        <option key={version.id} value={version.id}>
+                          版本 {version.versionNo}（{versionSourceLabel(version.source)}）
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                {compareLoading ? (
+                  <p className="hint" role="status" data-testid="compare-loading">
+                    正在对比…
+                  </p>
+                ) : null}
+
+                {compareError === null ? null : (
+                  <p className="alert alert--error" role="alert" data-testid="compare-error">
+                    {compareError.message}
+                  </p>
+                )}
+
+                {compareDiff === null || compareLoading ? null : (
+                  <div data-testid="compare-result">
+                    <div className="compare-meta">
+                      <span data-testid="compare-from-meta">
+                        {diffVersionLabel(compareDiff.fromVersion, versionSourceLabel)}
+                      </span>
+                      <span aria-hidden="true">→</span>
+                      <span data-testid="compare-to-meta">
+                        {diffVersionLabel(compareDiff.toVersion, versionSourceLabel)}
+                      </span>
+                    </div>
+                    <p className="hint" data-testid="compare-stats">
+                      {diffStatsLabel(compareDiff.stats)}
+                    </p>
+                    {isIdenticalDiff(compareDiff.stats) ? (
+                      <p className="alert alert--ok" data-testid="compare-identical">
+                        两个版本内容一致。
+                      </p>
+                    ) : null}
+                    <ol className="diff-view" data-testid="diff-lines">
+                      {compareDiff.lines.map((line, index) => (
+                        <li
+                          key={`${line.kind}-${line.oldLineNo ?? 'x'}-${line.newLineNo ?? 'x'}-${index}`}
+                          className={diffLineClass(line.kind)}
+                          data-kind={line.kind}
+                          data-testid="diff-line"
+                        >
+                          <span className="diff-line__no" aria-hidden="true">
+                            {lineNoPlaceholder(line.oldLineNo)}
+                          </span>
+                          <span className="diff-line__no" aria-hidden="true">
+                            {lineNoPlaceholder(line.newLineNo)}
+                          </span>
+                          <span className="diff-line__label">{diffLineLabel(line.kind)}</span>
+                          <span className="diff-line__text">{line.text}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+              </section>
+            )}
 
             {selectedVersion === null ? null : (
               <div data-testid="version-reader">
@@ -1258,6 +1556,21 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
           }}
         />
       )}
+
+      {restoreConfirmOpen && selectedVersion !== null ? (
+        <ConfirmDialog
+          title="恢复历史版本"
+          message={restoreConfirmMessage(selectedVersion.versionNo)}
+          confirmLabel={restoring ? '恢复中…' : '确认恢复'}
+          busy={restoring}
+          onConfirm={() => void confirmRestore()}
+          onCancel={() => {
+            if (!restoring) {
+              setRestoreConfirmOpen(false);
+            }
+          }}
+        />
+      ) : null}
 
       {closingEditor && editor !== null ? (
         <ConfirmDialog
