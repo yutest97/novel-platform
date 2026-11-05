@@ -637,3 +637,22 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-103 | 确认离开后历史干净 | dirty → 确认「返回章节列表」→ 后退 #1 回到章节页、后退 #2 回到更早的列表页；若残留哨兵，后退 #2 会停在同 URL 的章节页 | 用例 27 |
 | AT-WF-104 | 退出登录 / 后退确认 | 退出登录：取消后仍登录、停在编辑器、草稿完整；确认后到 `/login`。后退确认：到达真实上一页，且 500ms 观察窗内不出现第二次弹窗 | 用例 28/29 |
 | AT-WF-105 | 测试数 | 全量单测 **725**（721 + 哨兵 4）；浏览器 E2E **96**（91 + 5） | 全量 `pnpm test`、`playwright test` |
+
+## 24. 章节版本 diff 验收（A1-4B-C-A）
+
+> 对应 `docs/07-master-roadmap.md` A1-4B-C-A、`docs/08` 第 18 节。
+> 本轮只开放**diff 服务与只读 HTTP API**：**不提供** diff UI、历史版本恢复为新版本、
+> 定稿流程、局部重写；不改数据库结构（无新迁移）。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-106 | diff 契约 | `GET /api/works/:id/chapters/:chapterId/versions/diff?fromVersionId=&toVersionId=` → 200 `{ diff }`；`fromVersion` / `toVersion` 各含 `id` / `versionNo` / `source` / `wordCount`；`lines[]` 每项 `kind`（`equal` / `added` / `removed`）、`oldLineNo` / `newLineNo`（无对应侧为 `null`）、`text`；`stats` 为 `{added,removed,unchanged}` 且与 `lines` 实际条数一致，响应**不含完整正文** | `test/chapter-diff-api.test.ts` |
+| AT-WF-107 | 换行归一化 | `\r\n` / `\r` / `\n` 视为同一种换行；末尾换行不再产生额外空行（`'a\n'` 与 `'a'` 无 diff 行）；中间空行保留；空正文得到空行数组 | `test/chapter-diff.test.ts` |
+| AT-WF-108 | 行级语义 | 纯新增 / 纯删除 / 单行替换 / 多段修改各自只产生对应 `kind`，未变行保留为 `equal` 上下文；中文与 emoji 按整行比较，不拆分代理对 | 同上 |
+| AT-WF-109 | 方向与确定性 | 同一版本对比自己 → 全 `equal`、`stats.added/removed` 为 0，不是错误；交换 `from` / `to` 后 `added` 与 `removed` 互换、行号各自从 1 开始；同一请求重复执行结果完全一致；后加新版本不影响已选两个版本的 diff | `test/chapter-diff.test.ts`、`test/chapter-diff-api.test.ts` |
+| AT-WF-110 | 版本归属隔离 | 版本属于同一作者的**其它章节** → 404；属于**其它作品** → 404；随机 / 不存在的版本 id → 404；三种情况文案一致，不泄露 id 是否存在于别处（HTTP 与服务层直调均验证） | `test/chapter-diff-api.test.ts` |
+| AT-WF-111 | 权限 | 未登录 401；管理员（非作者）403；他人作品 404；响应体不含作者 id、正文片段与数据库错误 | 同上 |
+| AT-WF-112 | query 校验 | 缺 `fromVersionId` / 缺 `toVersionId` / 参数重复 / 空值 / 出现未知参数 → 400 `VALIDATION_FAILED`；非 UUID → 400；GET 不要求 `Origin`，不产生写入 | 同上 |
+| AT-WF-113 | 规模保护 | 两侧任一侧字符数 > 200000 或行数超上限 → 400 `CHAPTER_DIFF_TOO_LARGE`（「章节正文规模超出对比上限」）；中间段编辑距离超上限时**退化为整段替换**（仍为确定结果，不报错、不挂起） | `test/chapter-diff.test.ts`；错误码登记见 `packages/auth/src/errors.ts`、`apps/web/src/lib/api.ts` |
+| AT-WF-114 | 只读语义 | 单次 `findMany` 读取，不写审计、不新增 / 修改版本行、不改章节状态；调用前后版本行数与 `updatedAt` 不变 | `test/chapter-diff-api.test.ts` |
+| AT-WF-115 | 既有测试不减少 | 全量单测 **756**（A1-4B-B 725 + diff 纯函数 17 + diff API 14）；浏览器 E2E 仍 **96**（本轮无 UI 变更） | 全量 `pnpm test`、`playwright test` |

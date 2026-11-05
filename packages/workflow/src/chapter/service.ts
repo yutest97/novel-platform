@@ -347,8 +347,12 @@ export async function listChapters(input: {
   });
 }
 
-/** 章节必须属于该作品；不存在与跨作品同样 404。 */
-async function requireChapterInWork(
+/**
+ * 章节必须属于该作品；不存在与跨作品同样 404。
+ *
+ * 对包内其它模块（如版本 diff）导出，避免各自复制归属校验导致语义漂移。
+ */
+export async function requireChapterInWork(
   db: PrismaClient,
   workId: string,
   chapterId: string,

@@ -8,6 +8,22 @@ export {
   prepareDraftText,
 } from './agents.js';
 export { buildChapterDraftContext, type BuildContextInput } from './context.js';
+export {
+  MAX_DIFF_CONTENT_CHARS,
+  MAX_DIFF_EDIT_DISTANCE,
+  MAX_DIFF_LINES_PER_SIDE,
+  diffChapterVersions,
+  diffTextLines,
+  splitDiffLines,
+  summarizeDiff,
+  type ChapterDiffLine,
+  type ChapterDiffLineKind,
+  type ChapterDiffStats,
+  type ChapterDiffVersionRef,
+  type ChapterVersionDiffView,
+  type DiffChapterVersionsInput,
+} from './diff.js';
+
 export { MOCK_CHAPTER_DRAFT, createChapterMockProvider } from './mock.js';
 export {
   adoptChapterCandidate,

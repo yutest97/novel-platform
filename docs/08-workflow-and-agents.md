@@ -897,3 +897,118 @@ textarea 纯文本编辑、实时非空白字符数、`Ctrl/Cmd+S` 保存、dirt
 
 **仍不提供**：版本 diff、历史版本恢复、局部重写、定稿流程按钮（A1-4B-C）。
 人工版本 append-only（数据库触发器兜底），旧版本永久保留。
+
+## 18. A1-4B-C-A：章节正式版本 diff
+
+> 只读服务 + 只读 HTTP API。**没有** diff UI、历史版本恢复、定稿流程、局部重写，
+> 也**没有**新迁移（沿用 `20261104030000_a1_chapter_versions`）。
+
+### 18.1 路由与 DTO
+
+| 方法 | 路径 | 说明 | 成功 |
+| --- | --- | --- | --- |
+| GET | `/api/works/:workId/chapters/:chapterId/versions/diff?fromVersionId=&toVersionId=` | 两个正式版本的行级差异 | 200 `{ diff }` |
+
+- **query 白名单**：只允许 `fromVersionId` / `toVersionId`，出现其它参数 → 400；
+- 两个参数都必须**恰好出现一次**：漏传、空值、重复传参一律 400
+  `VALIDATION_FAILED`（不做"取第一个 / 取最后一个"的隐式兜底）；
+- UUID 形态由服务层 `normalizeUuid` 校验（非法 → 400）；
+- GET 只读，**不校验 `Origin`**（写接口才需要）；
+- 两个 id 可以相同（对比自己），不是错误。
+
+```jsonc
+// 响应（200，**不含完整正文**）
+{
+  "diff": {
+    "fromVersion": { "id", "versionNo", "source", "wordCount" },
+    "toVersion":   { "id", "versionNo", "source", "wordCount" },
+    "lines": [
+      { "kind": "equal",   "oldLineNo": 1,    "newLineNo": 1,    "text": "第一行" },
+      { "kind": "removed", "oldLineNo": 2,    "newLineNo": null, "text": "旧句子" },
+      { "kind": "added",   "oldLineNo": null, "newLineNo": 2,    "text": "新句子" }
+    ],
+    "stats": { "added": 1, "removed": 1, "unchanged": 1 }
+  }
+}
+```
+
+**行模型**（方向 `from → to`）：
+
+| `kind` | `oldLineNo` | `newLineNo` | 含义 |
+| --- | --- | --- | --- |
+| `equal` | 有 | 有 | 两侧同一行（行号可能因前文增删而不同） |
+| `removed` | 有 | `null` | 只在旧版本 |
+| `added` | `null` | 有 | 只在新版本 |
+
+- 行号从 1 起，按各自版本独立计数；
+- `text` 不含换行符；
+- `stats` 由 `lines` 统计得出：`unchanged` 是 `equal` 条数，不是"相同字符数"。
+
+### 18.2 算法与确定性
+
+```
+splitDiffLines：CRLF / CR → LF，按 \n 切分，去掉末尾换行产生的空元素
+  → 去公共前缀 / 后缀
+  → 中间段 Myers O(ND) 最短编辑脚本
+  → 回溯还原 equal / added / removed
+  → summarizeDiff 统计
+```
+
+- **换行归一化**：`"a\r\nb"`、`"a\rb"`、`"a\nb"` 视为同一组行；
+  `"a\n"` 与 `"a"` 无 diff 行（章节正文里末尾换行不是内容差异）；
+- **中间空行保留**：`"a\n\nb"` 是 3 行，中间那行是空字符串；
+- 中文与 emoji **按整行字符串比较**，不按 UTF-16 码元拆分（不会切坏代理对）；
+- **确定性**：公共前后缀 + Myers 固定 tie-break，同样输入必得同样输出，
+  与"请求次数 / 已有多少版本"无关；
+- **方向性**：交换 `from` / `to` 后 `added` 与 `removed` 互换，行号各自从 1 重新计。
+
+### 18.3 规模边界
+
+| 常量 | 值 | 超限行为 |
+| --- | --- | --- |
+| `MAX_DIFF_CONTENT_CHARS` | 200000 | 400 `CHAPTER_DIFF_TOO_LARGE` |
+| `MAX_DIFF_LINES_PER_SIDE` | 20000 | 400 `CHAPTER_DIFF_TOO_LARGE` |
+| `MAX_DIFF_EDIT_DISTANCE` | 500 | **不报错**，中间段退化为"整段删除 + 整段新增" |
+
+- 20 万字符与数据库 `chapter_versions_content_length_check` 一致，
+  即正常保存过的正文不会因为字符数被 diff 拒绝；
+- 行数上限防的是"20 万字符塞进极多短行"导致的行数组膨胀；
+- 退化策略保证**有界**：编辑距离超限时不再追求最小脚本，但结果仍然确定、
+  仍然可解释（该段标为全删 + 全增），不会挂起或耗尽内存；
+- 以上均为内存计算，不落库、不写日志、不截断正文。
+
+### 18.4 归属、权限与信息隐藏
+
+```
+requireOwnedWork(workId, authorId)          -- 他人作品 → 404
+requireChapterInWork(workId, chapterId)     -- 章节不属于该作品 → 404
+findMany({ where: { workId, chapterId, id: { in: [from, to] } } })
+```
+
+- 版本查询**同时**带 `workId + chapterId`：跨作品、跨章节、不存在的 id
+  统一 404「版本不存在」，不泄露"这个 id 是否存在于别处"；
+- 先校验作品归属再查版本，因此他人作品不会走到版本层；
+- 未登录 401；管理员（非作者）403；
+- 响应与错误体都不含正文片段、作者 id、数据库错误信息。
+
+### 18.5 只读语义
+
+- 单次 `findMany`，只 `select` `id / versionNo / source / wordCount / content`；
+- 不写审计、不新增 / 修改 `chapter_versions`、不改章节状态、不动 `updated_at`；
+- 正文只在内存中参与比较，不进入日志、不进入响应。
+
+### 18.6 错误码
+
+| 错误码 | HTTP | 触发 |
+| --- | --- | --- |
+| `VALIDATION_FAILED` | 400 | query 缺参 / 重复 / 空值 / 未知参数 / 非法 UUID |
+| `CHAPTER_DIFF_TOO_LARGE` | 400 | 字符数 > 200000 或单侧行数 > 20000 |
+| `NOT_FOUND` | 404 | 作品 / 章节不属于当前作者，或版本不属于该章节 / 作品 / 不存在 |
+| `UNAUTHORIZED` | 401 | 未登录 |
+| `FORBIDDEN` | 403 | 非作者（含管理员）访问他人作品 |
+
+### 18.7 后续阶段
+
+A1-4B-C-B 承接：diff 视图 UI（并列 / 行级高亮）、历史版本恢复为新版本、
+恢复前确认、定稿流程。本节的服务契约即为 UI 的唯一数据来源，
+**恢复不得原地改写旧版本**（`chapter_versions` append-only）。

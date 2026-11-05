@@ -43,6 +43,8 @@ export type ApiErrorCode =
   // 人工版本保存（A1-4B-A）：正文不合法 / 章节已废弃
   | 'CHAPTER_CONTENT_INVALID'
   | 'CHAPTER_STATE_INVALID_FOR_SAVE'
+  // 版本 diff（A1-4B-C-A）：正文规模超出对比上限
+  | 'CHAPTER_DIFF_TOO_LARGE'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -79,6 +81,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CHAPTER_STATE_INVALID_FOR_GENERATION: '章节当前状态不允许生成候选',
   CHAPTER_CONTENT_INVALID: '章节正文不合法，请检查字数和内容',
   CHAPTER_STATE_INVALID_FOR_SAVE: '章节当前状态不允许保存人工版本',
+  CHAPTER_DIFF_TOO_LARGE: '章节正文规模超出对比上限',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',

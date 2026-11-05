@@ -1,12 +1,13 @@
 # AI 小说写作平台
 
 > 封闭源码的中文 AI 小说写作 Web 系统。当前方向：**个人可用版优先**（单作者、单实例）。
-> 当前阶段：**A1-4B-B（Markdown 人工编辑器与 human 版本保存 UI）**。
+> 当前阶段：**A1-4B-C-A（章节正式版本 diff 服务与只读 API）**。
 
 已交付：账号/会话/审计、作品与设定中心、物品事件流水与时间线、A1-1 工作流内核、
 A1-2 单章候选流水线（合同 + 正文候选）、A1-3A 候选采纳与 `chapter_versions`、
 A1-3B 章节与生成任务 HTTP API、A1-3C Worker 常驻循环、A1-4A 章节工作台、
-A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器（**仍无版本 diff / 恢复**）。
+A1-4B-A 人工版本保存 API、A1-4B-B Markdown 编辑器、A1-4B-C-A 版本 diff API
+（**仍无 diff UI / 历史版本恢复 / 定稿**）。
 暂停：资源余额流水（M2-B4，不删除）；多用户运营后置。路线见 `docs/07-master-roadmap.md`，
 工作流设计见 `docs/08-workflow-and-agents.md`。产品范围以 `docs/00-product-brief.md` 为准。
 
@@ -875,8 +876,9 @@ Planner 输出合法合同、Writer 输出 1600 字确定性正文，因此无�
 workflow 章节 Mock 4）；**A1-4A-REV-01** 再补 9 个（只读 API 1、展示纯函数 6、浏览器 E2E 2）；
 **REV-02** 再补 7 个（展示纯函数 6、浏览器 E2E 1：终态提示一致性）；
 **A1-4B-A** 再补 18 个（人工版本保存 API）；**A1-4B-B** 再补 13 个（编辑器纯逻辑）；
-**REV-01** 再补 5 个（离开保护 / 冲突重载确认）；**REV-02** 再补 4 个（哨兵生命周期），
-全量单测 **725** 个（web 230 / workflow 180 / worker 63 / shared 15 / db 10 /
+**REV-01** 再补 5 个（离开保护 / 冲突重载确认）；**REV-02** 再补 4 个（哨兵生命周期）；
+**A1-4B-C-A** 再补 31 个（diff 纯函数 17、diff API 14），
+全量单测 **756** 个（web 244 / workflow 197 / worker 63 / shared 15 / db 10 /
 auth 95 / works 132）；浏览器 E2E 合计 **96**（80 + 编辑器 7 + 离开保护 4 + 哨兵 5）。
 
 ### 人工章节版本保存（A1-4B-A）
@@ -941,6 +943,49 @@ source / wordCount / parentVersionId`，**不含正文**；审计失败整体回
 - 编辑期间禁止切换版本；新 human 版本来源显示「人工」，AI 版本仍显示「AI」。
 
 **仍不提供**：版本 diff、历史版本恢复、局部重写（A1-4B-C）。
+
+### 章节版本 diff（A1-4B-C-A）
+
+两个正式版本之间的**只读**行级差异，供后续 diff 视图使用；本轮没有前端页面。
+
+```bash
+# 登录后带会话 Cookie；不需要 Origin（GET 只读）
+curl -sS \
+  "http://localhost:${WEB_PORT:-3000}/api/works/<workId>/chapters/<chapterId>/versions/diff?fromVersionId=<版本A>&toVersionId=<版本B>" \
+  -H "Cookie: <会话 Cookie>"
+```
+
+```jsonc
+// 200
+{
+  "diff": {
+    "fromVersion": { "id": "…", "versionNo": 1, "source": "ai", "wordCount": 2891 },
+    "toVersion": { "id": "…", "versionNo": 2, "source": "human", "wordCount": 3012 },
+    "lines": [
+      { "kind": "equal", "oldLineNo": 1, "newLineNo": 1, "text": "第一章 山雨" },
+      { "kind": "removed", "oldLineNo": 2, "newLineNo": null, "text": "他走进茶馆。" },
+      { "kind": "added", "oldLineNo": null, "newLineNo": 2, "text": "他推开茶馆的门。" },
+    ],
+    "stats": { "added": 1, "removed": 1, "unchanged": 1 },
+  },
+}
+```
+
+- `kind` 只有 `equal` / `added` / `removed`；`removed` 无 `newLineNo`，`added` 无 `oldLineNo`；
+  行号从 1 起、按各自版本独立计数；`text` 不含换行符；
+- `stats.unchanged` 是 `equal` 的**行数**，不是相同字符数；
+- 换行统一按 `\n` 比较（`CRLF` / `CR` 等价），**末尾换行不算差异**；
+- 两个 id 相同 → 全 `equal`，不是错误；交换方向 → `added` 与 `removed` 互换；
+  同一请求重复执行结果完全一致；
+- query 只接受 `fromVersionId` / `toVersionId`，且必须**各出现一次**；
+  缺参、重复、空值、未知参数、非法 UUID → 400；
+- 权限：未登录 401、非作者（含管理员）403、他人作品 / 跨作品 / 跨章节 404
+  （统一「版本不存在」，不泄露 id 是否存在于别处）；
+- 规模：单侧 > 200000 字符或 > 20000 行 → 400 `CHAPTER_DIFF_TOO_LARGE`；
+  中间段编辑距离 > 500 时不报错，退化为「整段删除 + 整段新增」；
+- **只读**：不写审计、不改版本行与章节状态，响应不含完整正文。
+
+**仍不提供**：diff 视图 UI、历史版本恢复、定稿流程（A1-4B-C-B）。
 
 ### 浏览器 E2E（Playwright Chromium）
 

@@ -89,6 +89,40 @@ export function requireBaseVersionId(body: Record<string, unknown>): string | nu
   return value;
 }
 
+/** 版本 diff 的允许 query 参数：每个都必须且只能出现一次。 */
+export const DIFF_QUERY_PARAMS = ['fromVersionId', 'toVersionId'] as const;
+
+/**
+ * 读取版本 diff 的两个 query 参数（A1-4B-C-A）。
+ *
+ * - 只接受 `fromVersionId` / `toVersionId`，出现其它参数 → 400；
+ * - 两个参数都必须**恰好出现一次**：漏传、空值、重复传参一律 400，
+ *   避免"取第一个 / 取最后一个"这类隐式行为；
+ * - UUID 形态校验交给服务层 `normalizeUuid`（非法 UUID → 400）。
+ */
+export function readDiffVersionIds(request: Request): {
+  readonly fromVersionId: string;
+  readonly toVersionId: string;
+} {
+  const url = new URL(request.url);
+  for (const key of url.searchParams.keys()) {
+    if (!(DIFF_QUERY_PARAMS as readonly string[]).includes(key)) {
+      throw new AuthError('VALIDATION_FAILED', `不支持的查询参数：${key}`);
+    }
+  }
+  const fromList = url.searchParams.getAll('fromVersionId');
+  const toList = url.searchParams.getAll('toVersionId');
+  if (fromList.length !== 1 || toList.length !== 1) {
+    throw new AuthError('VALIDATION_FAILED', 'fromVersionId 与 toVersionId 必须各提供一次');
+  }
+  const fromVersionId = fromList[0] ?? '';
+  const toVersionId = toList[0] ?? '';
+  if (fromVersionId === '' || toVersionId === '') {
+    throw new AuthError('VALIDATION_FAILED', 'fromVersionId 与 toVersionId 不能为空');
+  }
+  return { fromVersionId, toVersionId };
+}
+
 /** 读取章节标题（只校验类型；trim 与长度在服务层统一处理）。 */
 export function requireChapterTitle(body: Record<string, unknown>): string {
   const value = body['title'];
