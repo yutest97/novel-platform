@@ -130,6 +130,19 @@ test.beforeAll(async ({ browser }) => {
 });
 
 test.afterAll(async () => {
+  // 清理本 spec 故意种入的"未终态"任务（locked_by=e2e-seed）：
+  // 它们是 UI 状态的测试替身，不是真实 Worker 的在途任务，
+  // 留在库里会让"测试后无 queued / processing"的门禁失真。
+  if (workId !== '') {
+    const db = await openE2EDatabase();
+    try {
+      await db.generationTask.deleteMany({
+        where: { workId, lockedBy: 'e2e-seed', status: { in: ['queued', 'processing'] } },
+      });
+    } finally {
+      await db.$disconnect();
+    }
+  }
   await context?.close();
 });
 
@@ -1483,30 +1496,40 @@ interface DiffStub {
 interface DiffGateEntry {
   readonly from: string;
   readonly to: string;
-  /** 用指定响应结束这次挂起的请求。 */
-  readonly respond: (stub: DiffStub) => void;
-  /** 直接中断（清理用，避免 context 关闭时还挂着请求）。 */
-  readonly abort: () => void;
+  /** 用指定响应放行，并等待响应真正发出。 */
+  readonly respond: (stub: DiffStub) => Promise<void>;
+  /** 直接中断，并等待 handler 结束（清理用，避免 unroute 挂住）。 */
+  readonly abort: () => Promise<void>;
 }
+
+type DiffGateDecision =
+  { readonly kind: 'fulfill'; readonly stub: DiffStub } | { readonly kind: 'abort' };
 
 /**
  * 精确控制 diff 请求顺序：拦截后先挂起，测试决定何时、以什么响应放行。
  *
  * 这样可以在"旧请求尚未返回"时发起新请求，验证请求身份隔离，
  * 完全不需要真实 Worker 或真实 diff 计算。
+ *
+ * **必须 await 本函数**：`page.route` 注册完成前，首个请求可能打到真实接口，
+ * 那样 gate 永远收不到请求（entries 为空），测试会以超时形式偶发失败。
  */
-function installDiffGate(target: Page): {
+async function installDiffGate(target: Page): Promise<{
   readonly entries: DiffGateEntry[];
   waitFor: (count: number) => Promise<void>;
-  releaseAll: () => void;
-} {
+  releaseAll: () => Promise<void>;
+}> {
   const entries: DiffGateEntry[] = [];
 
-  void target.route(DIFF_PATTERN, async (route: Route) => {
+  await target.route(DIFF_PATTERN, async (route: Route) => {
     const url = new URL(route.request().url());
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
+    let decide!: (decision: DiffGateDecision) => void;
+    const decision = new Promise<DiffGateDecision>((resolve) => {
+      decide = resolve;
+    });
+    let markDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      markDone = resolve;
     });
     let settled = false;
 
@@ -1514,28 +1537,37 @@ function installDiffGate(target: Page): {
       from: url.searchParams.get('fromVersionId') ?? '',
       to: url.searchParams.get('toVersionId') ?? '',
       respond: (stub) => {
-        if (settled) {
-          return;
+        if (!settled) {
+          settled = true;
+          decide({ kind: 'fulfill', stub });
         }
-        settled = true;
-        release();
-        void route.fulfill({
-          status: stub.status,
-          contentType: 'application/json',
-          body: JSON.stringify(stub.body),
-        });
+        return done;
       },
       abort: () => {
-        if (settled) {
-          return;
+        if (!settled) {
+          settled = true;
+          decide({ kind: 'abort' });
         }
-        settled = true;
-        release();
-        void route.abort();
+        return done;
       },
     };
     entries.push(entry);
-    await held;
+
+    // 响应必须在 handler 内发出：decision 先由测试决定，再 await 真正的 fulfill / abort。
+    const result = await decision;
+    try {
+      if (result.kind === 'abort') {
+        await route.abort();
+      } else {
+        await route.fulfill({
+          status: result.stub.status,
+          contentType: 'application/json',
+          body: JSON.stringify(result.stub.body),
+        });
+      }
+    } finally {
+      markDone();
+    }
   });
 
   return {
@@ -1543,10 +1575,9 @@ function installDiffGate(target: Page): {
     waitFor: async (count) => {
       await expect.poll(() => entries.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(count);
     },
-    releaseAll: () => {
-      for (const entry of entries) {
-        entry.abort();
-      }
+    releaseAll: async () => {
+      // 先决定所有未处理的请求，再等它们真正结束；否则 unroute 会等挂起的 handler。
+      await Promise.all(entries.map((entry) => entry.abort()));
     },
   };
 }
@@ -1586,7 +1617,7 @@ async function openChapterForCompare(): Promise<void> {
 
 test('37. 相同选择器：旧请求失败不覆盖新请求，也不提前关闭 loading', async () => {
   await openChapterForCompare();
-  const gate = installDiffGate(page);
+  const gate = await installDiffGate(page);
   try {
     // 第一次展开 → 请求 A 挂起
     await page.getByTestId('compare-toggle').click();
@@ -1603,7 +1634,7 @@ test('37. 相同选择器：旧请求失败不覆盖新请求，也不提前关�
     await expect(page.getByTestId('compare-loading')).toBeVisible();
 
     // 旧请求 A 返回错误：必须完全静默
-    gate.entries[0]?.respond(STUB_TOO_LARGE);
+    await gate.entries[0]?.respond(STUB_TOO_LARGE);
     await page.waitForTimeout(300);
     await expect(page.getByTestId('compare-error')).toHaveCount(0);
     await expect(page.getByTestId('compare-result')).toHaveCount(0);
@@ -1611,7 +1642,7 @@ test('37. 相同选择器：旧请求失败不覆盖新请求，也不提前关�
     await expect(page.getByTestId('compare-loading')).toBeVisible();
 
     // 当前请求 B 成功：只显示 B 的结果
-    gate.entries[1]?.respond(stubDiff('当前请求新增行'));
+    await gate.entries[1]?.respond(stubDiff('当前请求新增行'));
     await expect(page.getByTestId('compare-result')).toBeVisible();
     await expect(page.getByTestId('compare-stats')).toHaveText(
       '新增 1 行 · 删除 0 行 · 未变化 1 行',
@@ -1620,14 +1651,14 @@ test('37. 相同选择器：旧请求失败不覆盖新请求，也不提前关�
     await expect(page.getByTestId('compare-error')).toHaveCount(0);
     await expect(page.getByTestId('compare-loading')).toHaveCount(0);
   } finally {
-    gate.releaseAll();
+    await gate.releaseAll();
     await page.unroute(DIFF_PATTERN);
   }
 });
 
 test('38. 旧请求成功也不得显示：当前请求失败后只显示当前错误', async () => {
   await openChapterForCompare();
-  const gate = installDiffGate(page);
+  const gate = await installDiffGate(page);
   try {
     await page.getByTestId('compare-toggle').click();
     await gate.waitFor(1);
@@ -1639,27 +1670,27 @@ test('38. 旧请求成功也不得显示：当前请求失败后只显示当前�
     await expect(page.getByTestId('compare-loading')).toBeVisible();
 
     // 旧请求 A 成功：不得把旧 diff 画到界面上
-    gate.entries[0]?.respond(stubDiff('旧请求的过期内容'));
+    await gate.entries[0]?.respond(stubDiff('旧请求的过期内容'));
     await page.waitForTimeout(300);
     await expect(page.getByTestId('compare-result')).toHaveCount(0);
     await expect(page.getByTestId('diff-line')).toHaveCount(0);
     await expect(page.getByTestId('compare-loading')).toBeVisible();
 
     // 当前请求失败：只显示当前错误，不得同时出现旧 diff
-    gate.entries[1]?.respond(STUB_TOO_LARGE);
+    await gate.entries[1]?.respond(STUB_TOO_LARGE);
     await expect(page.getByTestId('compare-error')).toHaveText('章节正文规模超出对比上限');
     await expect(page.getByTestId('compare-result')).toHaveCount(0);
     await expect(page.getByTestId('diff-line')).toHaveCount(0);
     await expect(page.getByTestId('compare-loading')).toHaveCount(0);
   } finally {
-    gate.releaseAll();
+    await gate.releaseAll();
     await page.unroute(DIFF_PATTERN);
   }
 });
 
 test('39. 收起对比使在途请求失效：迟到响应不能点亮结果或 loading', async () => {
   await openChapterForCompare();
-  const gate = installDiffGate(page);
+  const gate = await installDiffGate(page);
   try {
     await page.getByTestId('compare-toggle').click();
     await gate.waitFor(1);
@@ -1672,26 +1703,26 @@ test('39. 收起对比使在途请求失效：迟到响应不能点亮结果或 
     await expect(page.getByTestId('compare-loading')).toBeVisible();
 
     // 旧请求 A 成功返回：面板保持 B 的 loading，不出现旧结果
-    gate.entries[0]?.respond(stubDiff('收起前的旧内容'));
+    await gate.entries[0]?.respond(stubDiff('收起前的旧内容'));
     await page.waitForTimeout(300);
     await expect(page.getByTestId('compare-result')).toHaveCount(0);
     await expect(page.getByTestId('compare-error')).toHaveCount(0);
     await expect(page.getByTestId('compare-loading')).toBeVisible();
 
     // 当前请求正常完成
-    gate.entries[1]?.respond(stubDiff('当前请求内容'));
+    await gate.entries[1]?.respond(stubDiff('当前请求内容'));
     await expect(page.getByTestId('compare-result')).toBeVisible();
     await expect(page.getByTestId('diff-line')).toContainText(['当前请求内容']);
     await expect(page.getByTestId('compare-loading')).toHaveCount(0);
   } finally {
-    gate.releaseAll();
+    await gate.releaseAll();
     await page.unroute(DIFF_PATTERN);
   }
 });
 
 test('40. 当前请求完成前 loading 持续存在，完成后才关闭', async () => {
   await openChapterForCompare();
-  const gate = installDiffGate(page);
+  const gate = await installDiffGate(page);
   try {
     await page.getByTestId('compare-toggle').click();
     await gate.waitFor(1);
@@ -1702,12 +1733,12 @@ test('40. 当前请求完成前 loading 持续存在，完成后才关闭', asyn
     await expect(page.getByTestId('compare-loading')).toBeVisible();
     await expect(page.getByTestId('compare-result')).toHaveCount(0);
 
-    gate.entries[0]?.respond(stubDiff('完成后才出现'));
+    await gate.entries[0]?.respond(stubDiff('完成后才出现'));
     await expect(page.getByTestId('compare-result')).toBeVisible();
     await expect(page.getByTestId('compare-loading')).toHaveCount(0);
     await expect(page.getByTestId('diff-line')).toContainText(['完成后才出现']);
   } finally {
-    gate.releaseAll();
+    await gate.releaseAll();
     await page.unroute(DIFF_PATTERN);
   }
 });

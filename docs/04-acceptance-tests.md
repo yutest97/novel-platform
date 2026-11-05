@@ -695,3 +695,17 @@ Reviewer/Continuity/Fact、RAG/图数据库、资源流水（M2-B4 暂停）、�
 | AT-WF-133 | 收起使请求失效 | 请求挂起时收起再展开：迟到响应不恢复 loading / result / error | 用例 39 |
 | AT-WF-134 | loading 生命周期 | 当前请求完成前 loading 持续存在（观察窗内不消失），完成后才关闭并显示结果 | 用例 40 |
 | AT-WF-135 | 测试数 | 全量单测仍 **789**（本轮无服务 / 纯逻辑改动）；浏览器 E2E **107**（103 + 4） | 全量 `pnpm test`、`playwright test` |
+
+### A1-4B-C-B-REV-02 追加：E2E 夹具稳定性与全量验收
+
+> **问题**：`installDiffGate` 用 `void target.route(...)` 注册拦截，未等待注册完成；
+> 首个 diff 请求可能先打到真实接口，gate 永远收不到请求（`entries` 为空），
+> 测试会以超时形式偶发失败。另外测试种入的"已请求取消"任务留在库里，
+> 使"测试后无 queued / processing"的门禁失真。
+
+| 编号 | 用例 | 预期 | 自动化位置 |
+| --- | --- | --- | --- |
+| AT-WF-136 | 夹具注册 | `installDiffGate` 为 async 并 `await target.route(...)`：注册完成后才返回，首个请求必定被拦截；`respond` / `abort` 返回 Promise 并在 handler 内 `await route.fulfill` / `route.abort`；`releaseAll` 等待所有在途 handler 结束后，`finally` 才 `unroute` | `e2e/chapter-workbench.spec.ts` |
+| AT-WF-137 | 无残留任务 | `afterAll` 删除本 spec 用 `lockedBy='e2e-seed'` 种入的 `queued` / `processing` 任务；测试结束后 `generation_tasks` 只剩终态 | 同上；验收时直连数据库断言 |
+| AT-WF-138 | 全量 E2E | 从**全新数据库**（重建 → 10 迁移 → 初始管理员）一次运行全部 spec：**107 passed / 0 failed / 0 skipped / 0 did not run** | `npx playwright test` |
+| AT-WF-139 | 夹具灵敏度 | 临时改为"延迟注册"（`setTimeout` 500ms 后再 `route`）：用例 37 在 `waitFor(1)` 的 poll 断言处失败（`entries` 为空），证明"未等待注册"的竞态真实存在；恢复后 107 全通过 | 同上（临时改动后已还原） |
