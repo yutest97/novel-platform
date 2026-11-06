@@ -201,7 +201,7 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 动态问答壳 | 下一阶段（Trae）：严格动作、run/step/call 持久化、ask_user/finish、最小 API 与“写新小说”问答页 |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | 下一阶段（Trae）：严格动作、ToolWorkflow 状态机、run/step/call 持久化、ask_user/finish、最小 API 与“写新小说”问答页 |
 | C1-B | 故事规划与确认 | 待 C1-A：创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
@@ -233,6 +233,14 @@ Reviser、质量裁定、Summarizer、FactExtractor、Librarian、伏笔和故�
 - 上下文装配、正式资料写回和故事状态投影以确定性服务为骨架；
 - 多稿、质量裁定和高级文风能力是 C1-E 可选能力，不进入默认 MVP 主路径；
 - 除 Coordinator 外，任何 Agent 都不能选择下一步或互相自由对话。
+
+Agent 与工作流按两个维度落地：
+
+- Agent 负责“谁做”：在节点内输出结构化候选或问题；
+- Coordinator 动态编排层负责“语义上下一刀切哪里”；
+- 每个 tool 内部仍有固定 guard → execute → validate → commit 工作流；
+- PostgreSQL 状态、租约、fencing、重试、取消、回退和原子提交由确定性代码控制；
+- Reviewer 等 Agent 只给问题，是否通过、修订、等待作者或失败由工作流门禁决定。
 
 完整方案：`docs/plans/C1-coordinator-agent-runtime.md`。
 
@@ -443,6 +451,9 @@ A2-F-C 附带把 A2-E E2E 的「事实区没有任何接受 / 拒绝 / 写回入
     JSON Schema，会出现“能存不能验证”的漂移风险。每种候选仍需独立业务语义校验。
 38. 动态调度产生更多合法路径，E2E 不能只测一条固定问卷；至少覆盖先世界观、先人物、
     退回修改和确认后再写作等不同路径，并验证已确认产物不会被静默覆盖。
+39. Agent 与工作流的职责必须同时验收：只实现一个“模型调用循环”不足以称为工作流系统；
+    每个 tool 都要有 guard、允许状态、成功迁移、失败分类、重试上限、幂等提交与回退路径，
+    否则 Coordinator 仍可能绕过业务门禁。
 
 ---
 
@@ -516,6 +527,9 @@ D-037 完整 Agent 全集是能力地图，不是“所有能力都必须独立�
       属于可选能力。任何专用 Agent 都只作为 Coordinator 的受控工具，不决定下一步。
 D-038 C1 采用纵向切片交付：C1-A 起每个阶段同时交付最小 UI、服务、Schema、测试与 E2E，
       不再先堆若干后端表再集中做界面；默认产品路径可展示，但 Runtime 不写死该顺序。
+D-039 Agent 与工作流是同一系统的角色层/控制层，不是两张平行清单：
+      Coordinator 只负责动态语义路由；每个 tool 内部使用固定 guard → execute → validate
+      → commit 工作流；状态迁移、质量门禁、回退、重试、取消、幂等和事务提交由代码决定。
 ```
 
 ---

@@ -1,4 +1,4 @@
-# Trae 任务卡：C1-A Coordinator Runtime、持久化与动态问答壳
+# Trae 任务卡：C1-A Coordinator Runtime、工作流、持久化与动态问答壳
 
 ## 开始前
 
@@ -59,6 +59,91 @@ load queued run
 → persist agent call + step + state/version atomically
 → continue | waiting_user | finish | fail
 ```
+
+## 工作流定义
+
+C1-A 必须同时交付“动态路由”和“确定性工作流”，不能只实现一个调用模型的循环。
+
+### run 状态机
+
+```text
+POST start
+→ queued
+→ worker 领取
+→ running(deciding → tool_running → validating → committing)
+   ├─ ask_user 提交成功 → waiting_user
+   ├─ finish 提交成功 → completed
+   ├─ 可重试失败 → queued（attempt 未耗尽）
+   ├─ 永久失败 → failed
+   └─ author cancel / cancel_requested_at → cancelled
+
+POST answer（仅 waiting_user）
+→ queued
+→ running
+
+POST cancel（queued / running / waiting_user）
+→ cancelled
+```
+
+所有状态迁移由代码决定：
+
+- `queued → running`：领取 lease 且 run version 未变化；
+- `running → waiting_user/completed/failed`：step + state + call 在同一事务提交；
+- `waiting_user → queued`：只有作者 answer 且 `expectedVersion` 匹配；
+- 任意合法非终态 → `cancelled`：只设置取消请求或直接进入终态，之后不再执行工具；
+- 终态不得回到 `queued/running`；
+- `waiting_approval` 为后续阶段预留，C1-A 不得产生。
+
+### ToolWorkflow
+
+C1-A 的工具不能只是任意函数。每个工具注册一个最小确定性 workflow 描述：
+
+```text
+name
+allowedFromStatus
+inputSchema
+execute(context)
+successTransition
+sideEffect: read_only | create_candidate | external_cost
+maxAttempts
+timeoutMs
+```
+
+C1-A 只注册：
+
+| tool | allowed from | 成功迁移 | 副作用 |
+| --- | --- | --- | --- |
+| `ask_user` | running | waiting_user | 写 pending question，不写创作资料 |
+| `finish` | running | completed | 写终态，不写创作资料 |
+
+内部 action 工作流固定为：
+
+```text
+guard
+→ call coordinator
+→ validate action
+→ validate tool / input
+→ check budget + duplicate action
+→ execute tool
+→ persist call + step + state/version
+→ apply success transition
+```
+
+Agent 只发生在 `call coordinator`。它不能执行 guard、不能改 successTransition、不能直接写库。
+
+### 错误分类与回退
+
+- `AGENT_INPUT_INVALID` / `AGENT_OUTPUT_INVALID`：不重试同一原始输出，使用剩余 attempt
+  重新调用模型；耗尽后 failed；
+- Provider 瞬态错误 / 超时：有限重试，仍在同一 run / action 语义下；
+- `NOVEL_RUN_LEASE_LOST` / version conflict：旧 attempt 不提交，新 attempt 接管；
+- 工具白名单 / 状态迁移 / 输入冲突：不可重试，进入 failed 或版本冲突响应；
+- 重复 action 超阈值：`COORDINATOR_LOOP_DETECTED`，不继续自动调用；
+- 取消优先于重试：一旦观察到取消，未提交结果全部丢弃。
+
+C1-A 的“回退”体现为同一 run 重新执行一个合法 action，不修改已提交 step；后续阶段
+的 `review → revise → review` 等业务回退必须在各自 ToolWorkflow 中显式定义，禁止
+Coordinator 直接改表或跳过门禁。
 
 ## Coordinator Agent
 
@@ -346,8 +431,9 @@ createdAt / updatedAt
 12. API 与页面脱敏：无 prompt、stateSummary、lease、provider/model；
 13. 每次模型调用恰好一条 `novel_agent_calls`，语义失败记 success=false；
 14. migration 状态 CHECK、step/call append-only、run 终态约束；
-15. 前端轮询暂停/恢复、旧响应静默、回答冲突重新读取；
-16. 浏览器 E2E：新小说 → 动态问题 → 回答 → 下一问题 → 完成/取消。
+15. 非法状态迁移（终态恢复、非 waiting_user 回答、错误工具来源）全部拒绝；
+16. 前端轮询暂停/恢复、旧响应静默、回答冲突重新读取；
+17. 浏览器 E2E：新小说 → 动态问题 → 回答 → 下一问题 → 完成/取消。
 
 真实 PostgreSQL，不联网、不 skip、不使用 fixme。
 

@@ -1,6 +1,6 @@
 # C1：单 Coordinator Agent 小说创作运行时
 
-- 状态：方案 v2，待 C1-A 实施
+- 状态：方案 v2.1，待 C1-A 实施
 - 目标基线：A2 CI #25 已验收（`07cb346`）
 - 执行方：Trae
 - 替代方案：固定 8 步 N1 向导方案
@@ -61,7 +61,157 @@ Coordinator Agent
 现有 `WorkflowKernel`、`WorkerRunner`、PostgreSQL 任务状态和 A1/A2 章节能力继续保留。
 章节工作流可以被 Coordinator 调用，但不得反过来决定整本小说的创作路线。
 
-## 3. 运行模型
+## 3. Agent 与工作流
+
+Agent 和工作流不是两张平行清单，而是同一套系统的两个层面：
+
+```text
+Agent  = 谁来做语义工作
+工作流 = 按什么顺序、在什么条件下放行、回退、重试和提交
+```
+
+Agent 数量与工作流形态彼此独立。C1 不采用单一固定 DAG，也不采用“Coordinator 想做什么
+就做什么”的纯自由编排，而是三层组合：
+
+### 3.1 三层工作流
+
+| 层级 | 控制方式 | 职责 |
+| --- | --- | --- |
+| Coordinator 动态编排层 | 状态驱动 + LLM 语义路由 | 读取当前创作状态，选择一个合法 tool；不直接写库 |
+| Tool 领域工作流层 | 固定步骤 / 小型 DAG / 有限状态机 | guard → Agent → validate → commit；每个 tool 自己定义允许的输入、输出和成功迁移 |
+| 队列与事务层 | 确定性代码 + PostgreSQL | 租约、心跳、重试、超时、取消、幂等、fencing、原子提交与崩溃恢复 |
+
+因此：
+
+- “下一步做世界观还是人物”属于 Coordinator 的动态编排；
+- “生成世界观时必须先加载确认设定、校验输出、写候选、再等待作者确认”属于固定 tool 工作流；
+- “旧 Worker 晚返回不能覆盖新状态”属于事务/队列层；
+- Agent 只在 tool 的语义节点内工作，不能自行跳过 guard、确认或 commit。
+
+### 3.2 两层路由
+
+```text
+第一层：Coordinator 选择 tool
+  concept.generate / world.generate / outline.chapter.generate / chapter.draft / …
+
+第二层：ToolWorkflow 固定执行该 tool
+  guard → load input → call agent → semantic validation
+  → create candidate / commit approved state → checkpoint
+```
+
+第一层可以因语义状态改变路线；第二层不能由模型临时改变步骤顺序。这样既允许作者说
+“先定世界观”或“退回重做人物”，又不会让一次模型输出绕过 Schema、作者确认或事务边界。
+
+### 3.3 PostgreSQL 是唯一工作流状态源
+
+不使用 `status.md` 或文件式阶段标记。状态分布在各自有约束的表中：
+
+- `novel_runs.status`：run 当前是执行、等待作者、等待确认、完成、失败还是取消；
+- `novel_run_steps`：已经提交的决策与工具执行轨迹；
+- `novel_artifacts.status` + revisions：候选、待确认、已确认、已拒绝、已替代；
+- `chapters` / `generation_tasks` / candidate / review / summary / fact 表：
+  继续作为章节生产和记忆的权威状态；
+- `confirmed` 数据不可被静默覆盖，修改必须追加 revision。
+
+### 3.4 主状态机
+
+#### Coordinator run
+
+```text
+queued
+→ deciding
+→ tool_running
+→ validating
+→ committing
+   ├─ queued                继续下一动作
+   ├─ waiting_user          等待作者回答
+   ├─ waiting_approval      等待作者确认候选
+   ├─ completed
+   ├─ failed
+   └─ cancelled
+```
+
+`deciding / tool_running / validating / committing` 是执行内阶段，可由 run step / lease
+字段表达，不必全部扩成公开 API 状态。任何提交都必须带 run version 与 lease fence。
+
+#### 创作候选
+
+```text
+missing
+→ candidate
+→ pending_approval
+   ├─ approved
+   ├─ rejected
+   └─ superseded
+```
+
+- 作者编辑或重新生成产生新 revision；
+- 已确认 revision 不变，新 revision 通过后替换 current pointer；
+- rejected 可以触发 Coordinator 重新规划，但不能无限自动重试。
+
+#### 正文与修订单章
+
+```text
+确认章节大纲
+→ draft candidate
+→ review
+   ├─ passed → 等待作者采纳
+   └─ issues → revise → 再次 review（最多 N 轮）
+→ 作者采纳
+→ 正式 chapter version
+→ finalize
+→ summary / fact candidates
+```
+
+“是否通过”由工作流根据结构化问题、严重级别和门禁规则决定，Reviewer 只提交问题，
+不能自宣通过；作者仍是正文和事实的最终签发者。
+
+#### 记忆写回
+
+```text
+finalized version
+→ summary / fact candidates
+→ 作者接受或拒绝
+→ 校验事实仍属于当前有效版本
+→ Librarian 确定性事务写回
+→ 追加实体版本 / 物品事件 / 结构化状态
+```
+
+任何候选、失败任务或未确认 revision 都不能污染后续生成使用的权威记忆。
+
+### 3.5 门禁与回退规则
+
+| 交接点 | Agent 负责 | 工作流负责 |
+| --- | --- | --- |
+| 生成前 | 接收已装配的结构化输入 | 确认依赖产物存在且已确认；控制预算和工具可用性 |
+| Agent 输出后 | 返回严格 Schema 的候选 / 问题 | Schema、业务语义、安全字段和内容边界校验 |
+| 质量门禁 | Reviewer 返回结构化问题 | 根据严重级别、循环次数和作者策略决定放行 / 修订 / 等待 |
+| 正式提交前 | 不接触数据库 | run version、lease、作者权限、当前版本和事务内二次校验 |
+| 回退 | 接收定向问题并生成新候选 | 决定回到哪个已注册 tool；记录 revision 和 superseded 关系 |
+| 记忆写回 | 提供候选事实 | 校验作者决定、版本有效性、冲突和原子性 |
+
+回退只追加新候选 revision，不原地修改已提交数据。相同工具可重试，但 `review → revise`
+有最大轮数；连续重复 action、超预算或同一状态无进展时熔断，交回作者，不进入无限循环。
+
+### 3.6 并行边界
+
+- C1 默认一次只执行一个会改变权威状态的动作，保证可解释与可恢复；
+- 后续只有在依赖图明确、彼此只读或只产生独立候选时，才允许有限并行；
+- 任何并行分支都必须有显式 join / aggregator，不能并发写同一 run state、同一 artifact
+  current pointer 或同一正式故事资料；
+- 并行失败仍按各分支工作流回滚候选，不留下半个正式状态。
+
+### 3.7 与现有实现的映射
+
+- `AgentRunner`：执行一个语义节点；
+- `WorkflowKernel`：继续承载固定步骤的章节工具（draft / review / summarize）；
+- `WorkerRunner`：继续承载现有 generation task 的租约、重试、取消和检查点；
+- `NovelCoordinatorRuntime`：新增动态 Coordinator 路由，但每个 tool 仍调用有明确步骤的
+  ToolWorkflow；
+- `novel_runs` / `novel_run_steps`：保存动态编排状态与已提交审计；
+- PostgreSQL 约束和事务：负责最终放行与原子提交。
+
+## 4. 运行模型
 
 每次运行执行**一个动作**，完成并持久化后再决定下一次动作：
 
@@ -95,11 +245,11 @@ cancelled
 - 事实候选未经作者决定不能写回人物、物品、关系、势力或境界；
 - 作者拒绝候选时，Coordinator 可以重新规划或修改候选，但不能无限自动重试。
 
-## 4. Coordinator 动作契约
+## 5. Coordinator 动作契约
 
 Coordinator 只输出一个动作，不输出整本小说计划，也不输出 SQL、Prisma、文件路径或 shell。
 
-### 4.1 询问作者
+### 5.1 询问作者
 
 ```json
 {
@@ -113,7 +263,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 }
 ```
 
-### 4.2 调用工具
+### 5.2 调用工具
 
 ```json
 {
@@ -128,7 +278,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 }
 ```
 
-### 4.3 请求作者确认
+### 5.3 请求作者确认
 
 ```json
 {
@@ -143,7 +293,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 }
 ```
 
-### 4.4 结束
+### 5.4 结束
 
 ```json
 {
@@ -166,12 +316,12 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 - 任何 action 或工具不能携带 prompt、API Key、Cookie、任意文件路径；
 - 同一状态重复同一动作超过阈值时，Runtime 以 `COORDINATOR_LOOP_DETECTED` 终止。
 
-## 5. Agent 全集与落地性质
+## 6. Agent 全集与落地性质
 
 “Agent 全集”是产品能力地图，不等于所有条目都必须成为独立 LLM Agent。以下分类只决定
 实现方式，不改变其作为 Coordinator 受控能力的产品边界。
 
-### 5.1 规划与构建
+### 6.1 规划与构建
 
 | 能力 | 稳定工具名 | 职责 | 实现性质 | 阶段 |
 | --- | --- | --- | --- | --- |
@@ -183,7 +333,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 | 分卷大纲 Agent | `outline.volume.generate` | 拆卷并确定每卷目标、冲突、升级和高潮 | LLM Agent | C1-B |
 | 章节大纲 Agent | `outline.chapter.generate` | 拆章并确定目标、场景、冲突、结果与伏笔 | LLM Agent | C1-B |
 
-### 5.2 写作与上下文
+### 6.2 写作与上下文
 
 | 能力 | 稳定工具名 | 职责 | 实现性质 | 阶段 |
 | --- | --- | --- | --- | --- |
@@ -192,7 +342,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 | 多稿 Writer Agent | `chapter.draft_variants` | 用不同风格生成多个正文候选供作者选择 | 可选 LLM 模式，不默认开启 | C1-E |
 | 文风 Agent | `style.apply` | 按题材、节奏、视角和语言规范约束候选 | 版本化 Skill/规则包 + 可选 LLM 改写 | C1-E |
 
-### 5.3 审校与修改
+### 6.3 审校与修改
 
 | 能力 | 稳定工具名 | 职责 | 实现性质 | 阶段 |
 | --- | --- | --- | --- | --- |
@@ -203,7 +353,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 | Reviser Agent | `chapter.revise` | 根据结构化问题做定向修改，不改确认大纲 | LLM Agent | C1-C |
 | 质量裁定 Agent | `draft.judge` | 多稿写作时比较候选并给出排序和建议 | 可选 LLM Agent，不替作者采纳 | C1-E |
 
-### 5.4 记忆与状态
+### 6.4 记忆与状态
 
 | 能力 | 稳定工具名 | 职责 | 实现性质 | 阶段 |
 | --- | --- | --- | --- | --- |
@@ -213,7 +363,7 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 | 伏笔 Agent | `foreshadow.plan` | 管理伏笔开启、推进、推迟和回收 | 结构化状态 + LLM 建议 | C1-D |
 | 故事一致性 Agent | `story_state.reconcile` | 维护“当前世界真相”的唯一权威状态 | 确定性投影 + LLM 冲突解释 | C1-D |
 
-### 5.5 调度
+### 6.5 调度
 
 | 能力 | 稳定名称 | 职责 | 实现性质 | 阶段 |
 | --- | --- | --- | --- | --- |
@@ -226,9 +376,9 @@ Coordinator 只输出一个动作，不输出整本小说计划，也不输出 S
 - 每个 LLM Agent 都可以绑定版本化内部 Skill/规则包，但 Codex Skill 不是应用运行时；
 - “多稿”“文风”“质量裁定”是可选能力，不能在个人 MVP 中默认放大模型成本。
 
-## 6. 状态与数据模型
+## 7. 状态与数据模型
 
-### 6.1 `novel_runs`
+### 7.1 `novel_runs`
 
 ```text
 id
@@ -266,7 +416,7 @@ created_at / updated_at / completed_at
 完整人物、设定、章节和大纲正文从各自表读取，不把整本小说反复塞入 run JSON。
 `nextAllowedTools` 由 Runtime 每次根据数据库真实状态重新计算，不能信任模型自报。
 
-### 6.2 `novel_run_steps`
+### 7.2 `novel_run_steps`
 
 append-only：
 
@@ -286,7 +436,7 @@ UNIQUE(run_id, step_no)
 
 重试不得生成第二个成功 step；旧 attempt 晚返回时由 run version / lease fence 拒绝提交。
 
-### 6.3 `novel_agent_calls`
+### 7.3 `novel_agent_calls`
 
 每个实际模型调用一条：
 
@@ -309,7 +459,7 @@ created_at
 
 不保存 prompt、正文、模型原始响应或 API Key。
 
-### 6.4 创作候选
+### 7.4 创作候选
 
 C1-B 引入受控候选层：
 
@@ -347,7 +497,7 @@ chapter_outline
 - 分卷与章节大纲使用有序节点表；
 - 候选 revision 与正式投影之间有可追溯的确认记录。
 
-## 7. 工具执行边界
+## 8. 工具执行边界
 
 每个工具注册时必须声明：
 
@@ -384,7 +534,7 @@ Runtime 执行顺序：
 - 迟到结果不能覆盖新 run version；
 - 连续重复 action 触发熔断，交由作者重新下指令。
 
-## 8. 作者确认与写回
+## 9. 作者确认与写回
 
 作者确认分为三类，不能混成一个“同意继续”按钮：
 
@@ -412,7 +562,7 @@ decided_at
 - 事实接受仍只表示“可作为写回输入”，真正写回由 Librarian 的确定性事务执行；
 - 写回必须校验事实仍属于当前有效版本，旧事实一律拒绝。
 
-## 9. 内部 Skill / 规则包
+## 10. 内部 Skill / 规则包
 
 Agent 可以加载版本化内部 Skill：
 
@@ -436,7 +586,7 @@ Coordinator 选择工具
 Coordinator 不能自行指定文件路径、加载任意 Skill 或读取本机文件。Codex Skill 只可用于
 本项目开发过程，不是最终小说软件的 Agent 运行时。
 
-## 10. 实施阶段
+## 11. 实施阶段
 
 每个阶段都交付可被作者感知的最小纵向切片，避免再次出现“后端很完整，但软件不像写作产品”。
 
@@ -488,7 +638,7 @@ Coordinator 不能自行指定文件路径、加载任意 Skill 或读取本机�
 - 批量记忆维护；
 - 只有真实使用证明需要时才启用，不进入默认 MVP 主路径。
 
-## 11. 验收原则
+## 12. 验收原则
 
 - 至少两条不同创作路径都能完成到“章节大纲已确认”，证明 Runtime 没有写死阶段顺序；
 - 作者中途说“先改世界观”或“退回重做人物”时，Coordinator 能选择正确工具并保留已确认产物；
