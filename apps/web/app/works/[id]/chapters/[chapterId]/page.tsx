@@ -30,8 +30,10 @@ import {
   ApiError,
   adoptChapterCandidate,
   cancelGenerationTask,
+  extractChapterFactsFromApi,
   fetchChapter,
   fetchChapterCandidate,
+  fetchChapterFacts,
   fetchChapterReview,
   fetchChapterVersion,
   fetchChapterVersionDiff,
@@ -47,6 +49,7 @@ import {
   startChapterGeneration,
   type ChapterCandidateDetail,
   type ChapterDetail,
+  type ChapterFactListPage,
   type ChapterReviewView,
   type ChapterSummaryRecord,
   type ChapterVersionDetail,
@@ -103,6 +106,22 @@ import {
   type PendingLeave,
 } from '@/lib/chapter-editor';
 import {
+  FACT_FILTER_ALL,
+  FACT_FILTER_OPTIONS,
+  canExtractFacts,
+  factExtractErrorText,
+  factExtractNotice,
+  factFilterQuery,
+  factRefLabels,
+  factTypeLabel,
+  factsEmptyView,
+  factsExtractHint,
+  factsTotalLabel,
+  factsTruncatedNotice,
+  isCurrentFactRequest,
+  type FactsLoadState,
+} from '@/lib/chapter-facts-panel';
+import {
   isCurrentSummaryRequest,
   summaryBodyText,
   summaryMetaLabel,
@@ -148,6 +167,24 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
    */
   const summarySeqRef = useRef(0);
   const summaryAbortRef = useRef<AbortController | null>(null);
+
+  // 连续性事实（A2-E）：只读候选列表 + 显式提取；状态全在组件内存，不写存储。
+  const [factFilter, setFactFilter] = useState<string>(FACT_FILTER_ALL);
+  const [factPage, setFactPage] = useState<ChapterFactListPage | null>(null);
+  const [factsState, setFactsState] = useState<FactsLoadState>('idle');
+  const [factsError, setFactsError] = useState('');
+  /** 「全部」过滤下的总数：用于区分"没有任何候选"与"当前筛选为空"。 */
+  const [factsAllTotal, setFactsAllTotal] = useState<number | null>(null);
+  /**
+   * 事实列表请求的单调序号（请求身份）。
+   *
+   * 过滤值不足以区分新旧请求：「人物状态 → 全部 → 人物状态」首尾参数相同，
+   * 只有序号能识别谁才是当前请求。旧响应完全静默，不写列表 / 错误 / loading。
+   */
+  const factSeqRef = useRef(0);
+  const [extractingFacts, setExtractingFacts] = useState(false);
+  const [factExtractError, setFactExtractError] = useState('');
+  const [factExtractNoticeText, setFactExtractNoticeText] = useState('');
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -308,6 +345,95 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     },
     [workId, chapterId, router, loadVersionSummary],
   );
+
+  /** 现在是否允许提取（章节已定稿 + 选中的是最新正式版本 + 没有在读取 / 提取中）。 */
+  const canExtractFactsNow = canExtractFacts({
+    chapterStatus: detail?.chapter.status ?? null,
+    selectedVersionId: selectedVersion?.id ?? null,
+    latestVersionId: versions[0]?.id ?? null,
+    versionLoading,
+    extracting: extractingFacts,
+  });
+
+  /**
+   * 读取事实候选列表（A2-E）。
+   *
+   * - `filter` 是 `all` 或六类之一；过滤只在**服务端**做，客户端不裁剪结果；
+   * - 序号过期的响应完全静默：不写列表、不写错误、不改 loading；
+   * - 读取失败只影响事实区，不覆盖正文 / 版本 / 摘要 / Reviewer / 编辑器。
+   */
+  const loadFacts = useCallback(
+    async (filter: string): Promise<void> => {
+      const seq = ++factSeqRef.current;
+      setFactPage(null);
+      setFactsState('loading');
+      setFactsError('');
+      try {
+        const factType = factFilterQuery(filter);
+        const page = await fetchChapterFacts(
+          workId,
+          chapterId,
+          factType === undefined ? {} : { factType },
+        );
+        if (!isCurrentFactRequest(seq, factSeqRef.current)) {
+          return;
+        }
+        setFactPage(page);
+        setFactsState('ready');
+        if (filter === FACT_FILTER_ALL) {
+          setFactsAllTotal(page.total);
+        }
+      } catch (caught) {
+        if (!isCurrentFactRequest(seq, factSeqRef.current)) {
+          return;
+        }
+        if (handleSessionError(caught, router)) {
+          return;
+        }
+        setFactPage(null);
+        setFactsError(messageOf(caught));
+        setFactsState('error');
+      }
+    },
+    [workId, chapterId, router],
+  );
+
+  /** 切换过滤：先改选中态，再按新值请求（不等待上一次响应）。 */
+  const applyFactFilter = useCallback(
+    (next: string): void => {
+      setFactFilter(next);
+      void loadFacts(next);
+    },
+    [loadFacts],
+  );
+
+  /**
+   * 显式触发当前定稿最新版本的事实提取（A2-E）。
+   *
+   * - 只产生候选，不写回人物 / 物品 / 势力 / 关系 / 境界；
+   * - 成功后刷新候选列表（保持当前筛选），不自动采纳任何候选；
+   * - 失败只影响事实区，错误码转成稳定中文，不回显原始异常。
+   */
+  const requestExtractFacts = useCallback(async (): Promise<void> => {
+    if (!canExtractFactsNow || selectedVersion === null) {
+      return;
+    }
+    setExtractingFacts(true);
+    setFactExtractError('');
+    setFactExtractNoticeText('');
+    try {
+      const result = await extractChapterFactsFromApi(workId, chapterId, selectedVersion.id);
+      setFactExtractNoticeText(factExtractNotice(result.created, result.factCount));
+      await loadFacts(factFilter);
+    } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      setFactExtractError(factExtractErrorText(caught instanceof ApiError ? caught.code : null));
+    } finally {
+      setExtractingFacts(false);
+    }
+  }, [canExtractFactsNow, selectedVersion, workId, chapterId, factFilter, loadFacts, router]);
 
   /** 刷新章节详情与版本列表；`selectLatest` 用于采纳后自动选中最大版本。 */
   const refreshDetailAndVersions = useCallback(
@@ -590,6 +716,11 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       if (nextVersions[0] !== undefined) {
         await openVersion(nextVersions[0].id);
       }
+      // 事实候选是按章节读取的：进入页面就按「全部」读一次；提取成功后另行刷新。
+      setFactFilter(FACT_FILTER_ALL);
+      setFactExtractError('');
+      setFactExtractNoticeText('');
+      await loadFacts(FACT_FILTER_ALL);
     } catch (caught) {
       if (handleSessionError(caught, router)) {
         return;
@@ -602,7 +733,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  }, [workId, chapterId, openVersion, refreshSession, router]);
+  }, [workId, chapterId, openVersion, loadFacts, refreshSession, router]);
 
   useEffect(() => {
     if (state.status === 'ready') {
@@ -1256,6 +1387,14 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     errorText: reviewError,
   });
   const summaryPanel = summaryPanelView({ state: summaryState, errorText: summaryError });
+  // 事实区（A2-E）：提取入口的"为什么不能提取"与两种空态文案都由纯函数推导。
+  const factsHint = factsExtractHint({
+    chapterStatus: detail?.chapter.status ?? null,
+    selectedVersionId: selectedVersion?.id ?? null,
+    latestVersionId: versions[0]?.id ?? null,
+    versionLoading,
+  });
+  const factsEmpty = factsEmptyView({ filter: factFilter, allTotal: factsAllTotal });
   const reviewIssues = review?.run?.issues ?? [];
   const adoptCandidate =
     detail?.candidates.find((candidate) => candidate.id === adoptTargetId) ?? null;
@@ -1981,6 +2120,153 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
               </div>
             )}
           </div>
+
+          {detail === null || versions.length === 0 ? null : (
+            <div className="card" data-testid="facts-panel">
+              <div className="status-row">
+                <h2>连续性事实</h2>
+                {canExtractFactsNow || extractingFacts ? (
+                  <button
+                    type="button"
+                    className="btn-primary btn-small"
+                    onClick={() => void requestExtractFacts()}
+                    disabled={extractingFacts}
+                    data-testid="facts-extract"
+                  >
+                    {extractingFacts ? '提取中…' : '提取事实'}
+                  </button>
+                ) : null}
+              </div>
+              <p className="hint" data-testid="facts-intro">
+                从当前定稿版本提取候选供人工审阅。只产生候选，不会自动修改人物、物品、势力、关系或境界。
+              </p>
+              {factsHint === '' ? null : (
+                <p className="hint" data-testid="facts-extract-hint">
+                  {factsHint}
+                </p>
+              )}
+              {factExtractError === '' ? null : (
+                <p className="alert alert--error" role="alert" data-testid="facts-extract-error">
+                  {factExtractError}
+                </p>
+              )}
+              {factExtractNoticeText === '' ? null : (
+                <p className="alert alert--ok" data-testid="facts-extract-notice">
+                  {factExtractNoticeText}
+                </p>
+              )}
+
+              <div
+                className="facts-filters"
+                role="group"
+                aria-label="按事实类型筛选"
+                data-testid="facts-filters"
+              >
+                {FACT_FILTER_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={
+                      option.value === factFilter
+                        ? 'facts-filter facts-filter--active'
+                        : 'facts-filter'
+                    }
+                    aria-pressed={option.value === factFilter}
+                    onClick={() => {
+                      applyFactFilter(option.value);
+                    }}
+                    data-testid="facts-filter"
+                    data-fact-filter={option.value}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              {factsState === 'ready' && factPage !== null ? (
+                <>
+                  <p className="hint" data-testid="facts-total">
+                    {factsTotalLabel(factPage.total, factFilter)}
+                  </p>
+                  {factPage.truncated ? (
+                    <p className="alert alert--warn" role="status" data-testid="facts-truncated">
+                      {factsTruncatedNotice(factPage.total)}
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
+
+              {factsState === 'loading' ? (
+                <p className="hint" role="status" data-testid="facts-loading">
+                  正在读取事实候选…
+                </p>
+              ) : null}
+
+              {factsState === 'error' ? (
+                <div className="alert alert--error" role="alert" data-testid="facts-error">
+                  <p>{factsError === '' ? '事实候选读取失败，请稍后重试。' : factsError}</p>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small"
+                    onClick={() => {
+                      applyFactFilter(factFilter);
+                    }}
+                    data-testid="facts-retry"
+                  >
+                    重新读取
+                  </button>
+                </div>
+              ) : null}
+
+              {factsState === 'ready' && factPage !== null && factPage.facts.length === 0 ? (
+                <div className="facts-empty" data-testid="facts-empty">
+                  <p data-testid="facts-empty-title">{factsEmpty.title}</p>
+                  <p className="hint" data-testid="facts-empty-detail">
+                    {factsEmpty.detail}
+                  </p>
+                </div>
+              ) : null}
+
+              {factsState === 'ready' && factPage !== null && factPage.facts.length > 0 ? (
+                <ul className="facts-list" data-testid="facts-list">
+                  {factPage.facts.map((fact) => {
+                    const refs = factRefLabels(fact);
+                    return (
+                      <li className="facts-item" key={fact.id} data-testid="facts-item">
+                        <div className="facts-item__meta">
+                          {/* 全部为 React 文本节点：summary / reason 里的 HTML 只会显示成文字 */}
+                          <span className="badge" data-testid="facts-item-type">
+                            {factTypeLabel(fact.factType)}
+                          </span>
+                          <span className="hint" data-testid="facts-item-version">
+                            版本 v{fact.sourceVersionNo}
+                          </span>
+                          <span className="hint" data-testid="facts-item-created">
+                            {formatDateTime(fact.createdAt)}
+                          </span>
+                        </div>
+                        <p className="facts-item__summary" data-testid="facts-item-summary">
+                          {fact.summary}
+                        </p>
+                        {fact.reason === '' ? null : (
+                          <p className="facts-item__reason" data-testid="facts-item-reason">
+                            {fact.reason}
+                          </p>
+                        )}
+                        {refs.length === 0 ? null : (
+                          <p className="facts-item__refs" data-testid="facts-item-refs">
+                            {refs.map((label) => (
+                              <span key={label}>{label}</span>
+                            ))}
+                          </p>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+            </div>
+          )}
 
           {editor === null ? null : (
             <div className="card" data-testid="chapter-editor">

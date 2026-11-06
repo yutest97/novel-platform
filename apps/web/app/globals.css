@@ -948,6 +948,101 @@ fieldset.field legend {
   line-height: 1.7;
 }
 
+/* --------------------------------------------------------------------------
+   连续性事实候选（A2-E）
+   - 只读展示：不出现接受 / 拒绝 / 写回按钮，颜色只表达"有没有问题"；
+   - summary / reason 用 pre-wrap 纯文本，长文本自然换行，移动端不横向撑破。
+   -------------------------------------------------------------------------- */
+.facts-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.6rem 0;
+}
+
+.facts-filter {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: inherit;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.facts-filter--active {
+  border-color: #4a76a8;
+  background: #eef4fb;
+  font-weight: 600;
+}
+
+.facts-filter:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.facts-empty {
+  margin: 0.6rem 0 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.facts-empty p {
+  margin: 0;
+}
+
+.facts-list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.facts-item {
+  min-width: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.facts-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0 0.3rem;
+}
+
+.facts-item__summary {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.facts-item__reason {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.facts-item__refs {
+  margin: 0.35rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .version-list {
   list-style: none;
   margin: 0 0 1rem;

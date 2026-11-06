@@ -4,7 +4,7 @@
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
 - 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E 均本地完成，待复审**
+  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -48,7 +48,9 @@
 - 事实候选 append-only，不自动写回实体；
 - 事实提取 API、候选列表/详情、run 状态；
 - 默认 Mock 可成功提取空事实；
-- 列表使用单条 SQL 保证 `total` 与集合同快照。
+- 列表使用单条 SQL 保证 `total` 与集合同快照；
+- 章节工作台事实审阅区：定稿最新版显式提取、六类筛选、total / truncated 提示、
+  两种空态与局部重读；**只读**，无接受 / 拒绝 / 写回入口。
 
 ### A2-C-A Reviewer Agent 契约（已验收）
 
@@ -184,7 +186,7 @@ Agent 产出候选
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
 | A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 只读 API + A2-C-E 结果展示 UI 均本地完成** |
 | A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）/ A2-D-C `priorSummaries` / A2-D-D 摘要只读 API / **A2-D-E 摘要展示 UI** 均本地完成待复审 |
-| A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
+| A2-E | 事实候选只读审阅 UI | **本地完成待复审**：定稿最新版显式提取、六类筛选、total / truncated、两种空态、局部重试；无接受 / 写回 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
 说明：
@@ -199,8 +201,8 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D
-均已在本地完成，等待负责人复审：
+A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、
+A2-D-E、A2-E 均已在本地完成，等待负责人复审：
 
 - `docs/tasks/A2-C-B-REV-01-review-integrity.md`（已完成修复的追溯记录，不再派发）
 - `docs/tasks/A2-D-A-summarizer-agent.md`（契约层）
@@ -211,17 +213,19 @@ A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-
 - `docs/tasks/A2-C-E-review-ui.md`（Reviewer 结果展示 UI）
 - `docs/tasks/A2-D-D-summary-read-api.md`（章节版本摘要只读 API）
 - `docs/tasks/A2-D-E-summary-ui.md`（章节版本摘要展示 UI）
+- `docs/tasks/A2-E-fact-candidates-ui.md`（事实候选只读审阅 UI）
 
-A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E 的本地实现已通过代码复审；
+A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E 的本地实现已通过代码复审；
 当前等待整体复审 / CI。
 
-复审通过前不推送。复审通过后的候选顺序：
+复审通过前不推送。A2（连续性）系列已全部完成，复审通过后的候选顺序：
 
-1. A2-E 事实候选只读审阅 UI（卡已备：
-   `docs/tasks/A2-E-fact-candidates-ui.md`；事实候选已落库并可读取）；
+1. 事实候选的**决策**能力（接受 / 拒绝 / 写回实体与物品事件）——需要先确认
+   写回语义与冲突处理，当前只到"只读审阅"；
 2. 摘要任务状态查询（现在 404 无法区分"仍在生成"，UI 只能给统一文案）；
-3. 是否给 high severity 加采纳门禁——仍需产品确认；
-4. 是否允许作者手动重新检查（当前每次生成只审一次，UI 只提供"重新读取"）。
+3. 事实 / 摘要的批量视图（当前都必须逐章、逐版本点开）；
+4. 是否给 high severity 加采纳门禁——仍需产品确认；
+5. 是否允许作者手动重新检查（当前每次生成只审一次，UI 只提供"重新读取"）。
 
 尚待产品确认：
 
@@ -270,8 +274,8 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **1037**（web 384 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
-| 浏览器 E2E | **136** |
+| 全量单测 | **1061**（web 408 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 浏览器 E2E | **148** |
 | migrations | **13** |
 | 数据表 | **23** |
 | 数据库触发器 | **15** |
@@ -287,8 +291,9 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 （`chapter-review-panel.test.ts`）与 9 个浏览器 E2E（`chapter-review-ui.spec.ts`）；
 A2-D-D 再新增 7 个摘要只读 API 用例（`chapter-summary-api.test.ts`）与 8 个
 响应解析用例（`chapter-summary-view.test.ts`）；A2-D-E 又新增 11 个摘要卡片纯函数用例
-（`chapter-summary-panel.test.ts`）与 9 个浏览器 E2E（`chapter-summary-ui.spec.ts`），
-因此 web **384**、全量 **1037**、E2E **136**。
+（`chapter-summary-panel.test.ts`）与 9 个浏览器 E2E（`chapter-summary-ui.spec.ts`）；
+A2-E 再新增 24 个事实面板纯函数用例（`chapter-facts-panel.test.ts`）与 12 个浏览器 E2E
+（`chapter-facts-ui.spec.ts`），因此 web **408**、全量 **1061**、E2E **148**。
 
 最近新增质量门禁：
 
@@ -307,6 +312,8 @@ A2-D-D 再新增 7 个摘要只读 API 用例（`chapter-summary-api.test.ts`）
   run / issues 用 RepeatableRead 同快照读取；只回显白名单错误码与三步名；
 - UI 侧以**单调序号**（不是候选 id）作审阅请求身份，旧请求 / 旧轮询一律静默；
   evidence 与 suggestion 全程纯文本渲染，high severity 不改变采纳可用性；
+- 事实面板的过滤键是**单调序号**（不是 filter 值），截断必须显式提示，
+  提取入口同时受"定稿 + 最新版本 + 空闲"三重门禁；
 - 摘要只读接口按 `source_version_id + chapter_id + work_id` 三条件定位，
   历史版本读自己的摘要；HTTP 层只回显 8 个字段，无正文 / 任务 / provider；
 - 摘要卡片以**单调序号 + abort** 隔离旧请求，摘要正文走 React 文本节点（pre-wrap），
@@ -349,7 +356,15 @@ A2-D-D 再新增 7 个摘要只读 API 用例（`chapter-summary-api.test.ts`）
 20. 摘要接口只有 404 一种"没有"语义：UI 只能给"可能仍在生成、生成失败，或定稿时模型未配置"
     的统一说明，无法告诉作者到底属于哪种，也没有轮询；
 21. 历史版本摘要可读，但**没有列表接口**：作者必须知道版本 id 才能查询，
-    做 UI 时需要按版本逐个请求（当前没有批量能力）。
+    做 UI 时需要按版本逐个请求（当前没有批量能力）；
+22. 事实列表是**章节级**而非版本级：多次提取（不同版本）的候选会混在同一列表里，
+    只能靠卡片上的「版本 vN」区分；旧版本候选不会被隐藏，也没有"仅看当前版本"的筛选；
+23. 事实候选没有"已读 / 已处理"标记，也没有决策能力（接受 / 拒绝 / 写回）：
+    作者看完只能自己记住，重复提取也不会告知"这条是新出现的"；
+24. 提取是**同步 HTTP**：真实模型下按钮会一直显示「提取中…」直到整个提取完成，
+    期间没有进度、不能取消；超时或网络中断后需重新点击（已有 run 会幂等复用）；
+25. 事实面板不读 run 状态：只显示候选列表，看不到"上次提取失败 / 被取消"，
+    失败只体现在一次性的提取错误提示上（刷新后消失）。
 
 ---
 
@@ -396,6 +411,12 @@ D-025 摘要卡片按版本读取、只读展示：不轮询、不重试、不�
       404 一律信息态（三种成因无法区分），读取失败只给局部「重新读取」，不影响编辑器草稿。
 D-026 摘要请求以单调序号 + abort 双保险隔离旧请求：序号保证"只有最新请求可落地"，
       abort 只是提前释放连接，不能替代序号判断。
+D-027 事实提取入口必须同时满足「章节 finalized + 选中当前最新正式版本 + 空闲」；
+      历史版本、未定稿章节都不给入口，只在面板内说明原因，不做隐式回退。
+D-028 事实列表的请求身份用单调序号（不用 filter 值）：同一 filter 可能因来回切换
+      重复出现，只有序号能识别当前请求；旧响应不写列表 / 错误 / loading。
+D-029 事实面板只做只读审阅：不提供接受 / 拒绝 / 批量 / 写回；
+      截断必须显式提示完整 total，空态必须区分"没有候选"与"筛选为空"。
 ```
 
 ---
