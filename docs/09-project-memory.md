@@ -1,10 +1,10 @@
 # 09 项目记忆（当前事实快照）
 
 - 更新日期：2026-11-06
-- 最后已验收产品基线：`1482573`（A2-C-A）
-- 对应 CI：A2-C-A，CI #24 绿色
-- 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A、A2-F-B、A2-F-C 均本地完成，待复审**
+- 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
+- 对应 CI：A2-F-C-REV-01，CI #25 绿色
+- 当前产品阶段：A1 已完成；A2 的提取、Reviewer、摘要、事实审阅和决策记录均已验收；
+  下一项是事实受控写回的产品语义确认
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -76,7 +76,7 @@
 - 尚未接入 `chapter.draft`、数据库、API、UI 或 Worker。
 - CI #24 绿色；提交 `1482573` 已进入远端 `main`。
 
-### A2-C-B Reviewer 候选审阅执行与持久化（本地完成，待复审）
+### A2-C-B Reviewer 候选审阅执行与持久化（已验收）
 
 - 独立 `chapter.review` 任务：输入只有 `{ candidateId }`，requestId `review:<candidateId>`；
 - Writer 候选保存与审阅任务入队在**同一个作品锁事务**内提交，崩溃不会留下没有审阅任务的候选；
@@ -90,7 +90,7 @@
 - 作者读接口只展示 `chapter.draft` 任务，审阅任务不会成为"最新正文任务"；
 - 仍**没有**检查结果 API / UI，`priorSummaries` 固定为空（A2-D 未实现）。
 
-### A2-D-A Summarizer Agent 契约（本地完成，待复审）
+### A2-D-A Summarizer Agent 契约（已验收）
 
 - `summarizer.chapter@1.0.0`：输入只有章节标识、正式版本追溯标识与正文（1..200000 字符）；
 - 标题 trim 后必须非空（Schema 兜不住纯空白，`assertSummarizerInput` 在代码侧拒绝）；
@@ -101,7 +101,7 @@
 - **未接**数据库、`chapter.summarize` 任务、Worker、API / UI，Reviewer 的
   `priorSummaries` 仍未接线。
 
-### A2-D-B 定稿章节摘要任务与持久化（本地完成，待复审）
+### A2-D-B 定稿章节摘要任务与持久化（已验收）
 
 - 章节定稿与 `chapter.summarize` 任务入队在**同一个作品锁事务**内提交；
 - 任务输入只有 `{ sourceVersionId }`，requestId `summary:<sourceVersionId>`；
@@ -115,7 +115,7 @@
 - 失败 / 取消不修改章节、版本、候选、合同或采纳权，不写 audit_logs；
 - 仍**没有**摘要读取 API / UI，Reviewer `priorSummaries` 仍固定为空。
 
-### A2-D-B-REV-01 定稿不被摘要配置阻断（本地完成，待复审）
+### A2-D-B-REV-01 定稿不被摘要配置阻断（已验收）
 
 - finalize 路由对 summary spec 做 best-effort 解析：`MODEL_NOT_CONFIGURED` →
   `summary = null`，**定稿照常成功**，只跳过摘要任务；
@@ -125,7 +125,7 @@
   **不再比较 input_hash**：配置漂移时复用既有 task 且不覆盖其 provider / model；
   旧 task 是否可执行仍由 Worker 预检决定（`TASK_MODEL_CONFIG_MISMATCH`）。
 
-### A2-D-C Reviewer 前章摘要接线（本地完成，待复审）
+### A2-D-C Reviewer 前章摘要接线（已验收）
 
 - `buildChapterReviewContext` 新增 `loadPriorSummaries()`：一条 SQL 选出
   「同作品 + `chapter_no <` 当前章 + 前章 `finalized` + 摘要对应该章当前最新正式版本」
@@ -196,10 +196,10 @@ Agent 产出候选
 | --- | --- | --- |
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
-| A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 只读 API + A2-C-E 结果展示 UI 均本地完成** |
-| A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）/ A2-D-C `priorSummaries` / A2-D-D 摘要只读 API / **A2-D-E 摘要展示 UI** 均本地完成待复审 |
-| A2-E | 事实候选只读审阅 UI | **本地完成待复审**：定稿最新版显式提取、六类筛选、total / truncated、两种空态、局部重试；无接受 / 写回 |
-| A2-F | 事实候选决策 | A2-F-A（记录 + API）+ A2-F-B（决策读取模型）+ **A2-F-C（决策 UI）** 均**本地完成待复审**：接受 / 拒绝只记录、不写回；列表 / 详情回显 decision；UI 有接受 / 拒绝按钮与已决徽章，无批量 / 改判 / 写回 |
+| A2-C | Reviewer Agent | 已验收（CI #25）：契约、执行、持久化、结果 API 与展示 UI |
+| A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
+| A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
+| A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
 说明：
@@ -214,43 +214,17 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、
-A2-D-E、A2-E 均已在本地完成，等待负责人复审：
+A2 的 Agent 功能链已经通过 CI #25：
 
-- `docs/tasks/A2-C-B-REV-01-review-integrity.md`（已完成修复的追溯记录，不再派发）
-- `docs/tasks/A2-D-A-summarizer-agent.md`（契约层）
-- `docs/tasks/A2-D-B-summarizer-workflow.md`（工作流与落库）
-- `docs/tasks/A2-D-B-REV-01-finalize-resilience.md`（定稿不被摘要配置阻断）
-- `docs/tasks/A2-D-C-prior-summaries.md`（Reviewer 前章摘要接线）
-- `docs/tasks/A2-C-D-review-results-api.md`（Reviewer 结果只读 API）
-- `docs/tasks/A2-C-E-review-ui.md`（Reviewer 结果展示 UI）
-- `docs/tasks/A2-D-D-summary-read-api.md`（章节版本摘要只读 API）
-- `docs/tasks/A2-D-E-summary-ui.md`（章节版本摘要展示 UI）
-- `docs/tasks/A2-E-fact-candidates-ui.md`（事实候选只读审阅 UI）
-- `docs/tasks/A2-F-A-fact-decisions.md`（事实候选决策记录与 API）
-- `docs/tasks/A2-F-B-fact-decision-read.md`（事实决策状态读取模型）
-- `docs/tasks/A2-F-C-fact-decision-ui.md`（事实候选决策 UI）
+```text
+定稿 → 摘要 → Reviewer（含前章摘要）→ 事实提取 → 事实审阅 → 接受/拒绝记录
+```
 
-A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A、A2-F-B、A2-F-C 的
-本地实现已通过代码复审；当前等待整体复审 / CI。
+当前事实侧已经形成“提取 → 只读审阅 → 决策记录 → 决策回显 → 决策 UI”的闭环。
 
-A2-F-C-REV-01（`docs/tasks/A2-F-C-REV-01-remove-e2e-helper.md`）已在本地完成：
-`59bf06f` 越界新增的 E2E 口令重置脚本（`packages/auth/scripts/` 下的单个文件）已删除，
-**没有**替代脚本，事实决策 UI 与 A2-E 的“无采纳 / 写回 / 批量入口”测试更新都保持不变。
+下一步候选顺序：
 
-本地 E2E 的口令轮换仍由**既有测试流程**处理，本阶段不引入新工具：
-
-- 共享作者 `e2e-author` 的口令由 `admin-flow.spec.ts` 创建 / 改密后写入
-  `apps/web/.e2e-author.json`，`item-events-flow.spec.ts` 再经管理员重置；
-- 这两个凭据文件（`.e2e-admin-password` / `.e2e-author.json`）都在 `.gitignore` 内，
-  凭据不进仓库，也不新增读取 / 改写口令的脚本；
-- 单文件重跑必须在**干净库**上跑（完整 E2E 会改写共享口令），
-  或整库重建后重跑 `pnpm db:deploy` + `pnpm admin:create`。
-
-复审通过前不推送。事实侧"提取 → 只读审阅 → 决策记录 → 决策回显 → 决策 UI"已经闭环，
-复审通过后的候选顺序：
-
-1. 实体 / 物品事件 **写回**（A2-F-C 起）：需要先确认写回语义、冲突处理与可撤销性，
+1. 实体 / 物品事件 **写回**：需要先确认写回语义、冲突处理与可撤销性，
    当前接受只表示"可作为后续写回输入"；
 2. 摘要任务状态查询（现在 404 无法区分"仍在生成"，UI 只能给统一文案）；
 3. 事实 / 摘要的批量视图（当前都必须逐章、逐版本点开）；
@@ -286,21 +260,21 @@ A2-F-C-REV-01（`docs/tasks/A2-F-C-REV-01-remove-e2e-helper.md`）已在本地�
 
 ## 6. 当前质量基线
 
-截至最后已验收基线 `1482573`：
+截至最后已验收基线 `07cb346`：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | 886 |
-| 浏览器 E2E | 118 |
-| migrations | 11 |
-| 数据表 | 20 |
-| 数据库触发器 | 10 |
+| 全量单测 | **1128** |
+| 浏览器 E2E | **158** |
+| migrations | **14** |
+| 数据表 | **24** |
+| 数据库触发器 | **16** |
 | deploy 版本守卫行为测试 | 22 |
 
 A2-C-A 新增 18 个 workflow 纯单测，workflow 包当时 **262** 个测试。
 migrations / 数据表 / 触发器保持 **11 / 20 / 10**。
 
-A2-C-B（本地，未推送）后的当前数字：
+A2 完整 Agent 能力链通过 CI #25 后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |

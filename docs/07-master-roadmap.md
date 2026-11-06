@@ -2,7 +2,7 @@
 
 - 版本：v1.7
 - 日期：2026-11-06
-- 最后已验收基线：`1482573`（A2-C-A，CI #24 绿色）
+- 最后已验收基线：`07cb346`（A2-F-C-REV-01，CI #25 绿色）
 - 状态：执行中
 
 > 当前事实、冻结决策和即时下一步以 [`09-project-memory.md`](09-project-memory.md)
@@ -54,10 +54,10 @@
 | **A1-4B-C-C** | 章节定稿流程 | `POST /chapters/:chapterId/finalize`、`finalizeChapter`（作品锁 + 章节行锁、只锁当前最新版本、同版本幂等）、`in_review → finalized`、`CHAPTER_STATE_INVALID_FOR_FINALIZE`、审计 `chapter.finalized`；定稿后生成 / 采纳 / 恢复关闭，人工保存 revision 回到 `in_review`；**无撤销定稿、无 migration** | **本轮完成** |
 | **A2-A** | 连续性事实提取契约与候选存储 | `continuity.extractor@1.0.0`（六类事实、严格 Schema + 语义校验）、`extractChapterFacts`（定稿 + 最新版本前置、同版本幂等、失败可重试、审计 `continuity.facts_extracted`）、`chapter_fact_runs` / `chapter_fact_candidates`（复合外键 + 受控更新 + append-only）；**提交阶段二次校验**（模型调用期间的新 revision 一律拒绝）、候选 run 外键为**复合外键**、running **租约**（10 分钟，CAS 接管）+ **attempt_token fencing**（旧 attempt 晚返回也不能提交）、重试记录本次实际 provider / model、上下文**按类型**截断；**无 API / UI / Worker 注册 / RAG** | **本轮完成** |
 | **A2-B** | 连续性事实 API 与候选读取模型 | `POST /chapters/:chapterId/facts/extract`（严格白名单 `sourceVersionId`、201/200 幂等、409 四态）、`GET /facts`（factType 过滤、排序、200 条上限 + `truncated`）、`GET /facts/:candidateId`、`GET /fact-runs/:runId`；`listChapterFacts` / `getChapterFactCandidate` / `getChapterFactRun` 显式 DTO、只读不写审计；**无 UI / 采纳 / 写回** | **本轮完成** |
-| **A2-C** | Reviewer Agent | Writer 后对正文、合同和前文进行结构化检查；默认以问题提示为主，不直接重写或替代作者；严格 JSON 输出 | A2-C-A 已验收（CI #24）；**A2-C-B、A2-C-D、A2-C-E、A2-D-C 本地完成待复审** |
-| **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | **A2-D-A / A2-D-B（含 REV-01）/ A2-D-C / A2-D-D / A2-D-E 本地完成待复审** |
-| **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | **本地完成待复审**：定稿最新版显式提取、六类筛选、total / truncated、两种空态、局部重读；接受 / 拒绝入口由 A2-F-C 接管 |
-| **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | A2-F-A / A2-F-B / A2-F-C（含 REV-01 范围清理）本地完成待复审；实体写回待产品语义确认 |
+| **A2-C** | Reviewer Agent | Writer 后对正文、合同和前文进行结构化检查；默认以问题提示为主，不直接重写或替代作者；严格 JSON 输出 | 已验收（CI #25）：契约、执行、持久化、结果 API 与 UI |
+| **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | 已验收（CI #25）：契约、定稿任务、落库、前章摘要接线、API 与 UI |
+| **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 已验收（CI #25） |
+| **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | A2-F-A/B/C 已验收（CI #25）；实体写回待产品语义确认 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
 | **多人/运营** | 多作者、管理员运营、配额 | 既有账号体系扩展 | **后置** |
@@ -148,3 +148,4 @@
 | 2026-11-06 | A2-F-B（本地，未推送）：事实列表与候选详情回显 `decision: { value, decidedAt } | null` — 列表用**单条 SQL LEFT JOIN**（`candidate_id + work_id + chapter_id` 三重归属条件）带出决定，`total` / `truncated` / 排序语义不变；详情按三条件读取；`value` 只接受 accepted / rejected，异常值或缺 `decidedAt` 一律按"未决定"处理；不返回 decidedBy / payload 副本；只读、无 migration、无新写接口；新增 11 个读取集成用例（含「1 次 `$queryRaw`、0 次决定代理访问」的 N+1 守卫）与 3 个 HTTP 回显用例，全量单测 1108、E2E 148 |
 | 2026-11-06 | A2-F-C（本地，未推送）：事实候选决策 UI — ①未决定候选显示接受 / 拒绝按钮，门禁四件套：章节 `finalized`、`candidate.sourceVersionId === 当前最新正式版本 id`、`candidate.decision === null`、该候选没有在提交；章节未定稿给面板级说明「章节定稿后才能对事实候选做出决定。」，旧版本候选给候选级说明「仅当前最新定稿版本可做决定。」②已决候选显示「已接受」（成功色）/「已拒绝」（中性色）徽章 + 决定时间，隐藏接受 / 拒绝按钮，并声明「决定已记录；当前不会自动修改人物、物品、势力、关系或境界。」③成功（含同决定幂等 200 `deduplicated=true`）只更新该候选的 decision，不重载列表；冲突（`CONTINUITY_FACT_ALREADY_DECIDED`）/ 过期（`CONTINUITY_FACT_DECISION_STALE`）/ 网络错误各有稳定中文且只影响当前候选，不清空列表、不覆盖提取提示④每条候选独立 in-flight（用 ref 判定），双击与同时点两个按钮只发一个请求；事实列表有版本身份，切筛选后到达的旧响应完全静默；**没有**批量 / 撤销 / 改判 / 写回入口。新增 20 个纯函数用例与 10 个浏览器 E2E，全量单测 1128、E2E 158；无 migration |
 | 2026-11-06 | A2-F-C-REV-01（本地，未推送）：移除 A2-F-C（`59bf06f`）顺带新增的越界 E2E 口令重置脚本 — 删除 `packages/auth/scripts/` 下的该文件、**不新增替代脚本**、不改事实决策 UI、不改 A2-E 的「无采纳 / 写回 / 批量入口」测试；本地 E2E 口令轮换仍由既有流程（`admin-flow` / `item-events-flow` + gitignore 内的 `.e2e-author.json`）处理，单文件重跑以干净库为前提。新增决策 D-035：凭据处理不进入仓库工具。无代码 / 测试 / migration 变化（单测 1128、E2E 158 不变） |
+| 2026-11-06 | CI #25 绿色（提交 `07cb346`）：A2 Agent 功能链完成验收 — Reviewer 契约/执行/API/UI、Summarizer 契约/定稿任务/摘要/前章摘要/API/UI、事实提取/审阅/决策记录/回显/决策 UI；全量单测 1128、E2E 158、migrations / 表 / 触发器 14 / 24 / 16 |
