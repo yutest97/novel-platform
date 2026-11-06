@@ -3,8 +3,8 @@
 - 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；C1-A 已本地完成（待复审），产品入口转向 C1 单
-  Coordinator Agent 创作运行时；C1-B 故事规划为下一阶段；事实写回与高级审阅门禁后移
+- 当前产品阶段：A1 / A2 已验收；C1-A 首次复审不通过，`C1-A-REV-01` 为下一步；
+  C1-B 故事规划必须等待修复复审通过；事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -219,8 +219,8 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | 已本地实现（待复审）：严格动作、ToolWorkflow 状态机、run/step/call 持久化、ask_user/finish、4 个 API 与“写新小说”问答页 |
-| C1-B | 故事规划与确认 | 下一步：待 C1-A 复审后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | 首次复审不通过：超时 fencing、实际调用计量、Mock 回显、隐藏页轮询、options 与读取快照待 `C1-A-REV-01` 修复 |
+| C1-B | 故事规划与确认 | 待 C1-A-REV-01 复审通过后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
 | C1-E | 高级可选能力 | 待 C1-D：多稿、质量裁定、文风 Skill、跨卷伏笔与批量记忆 |
@@ -242,13 +242,18 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
 硬编码小说创作阶段顺序。
 
-### C1-A 现状（本地完成，待复审）
+### C1-A 现状（首次复审不通过，待 REV-01）
 
 - Runtime / 工具工作流 / 三张表 / Worker 轮询 / 4 个 API / 动态问答页与浏览器 E2E 已完成；
 - 本地验证：全新空库 15 个 migration（26 张业务表、19 个触发器）、
   全量单测 1170 全绿、E2E 159 全绿；两次灵敏度验证均先按预期暴露失败，恢复后全绿；
 - 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
-- 下一张卡：C1-B 故事规划与确认。
+- 复审发现 P1：模型硬超时与 lease signal 共用，超时会被误判为 lease-lost，
+  实际调用重复但 run 不进入终态；必须先修复；
+- 复审发现 P2：取消 / lease-lost 时实际调用日志丢失、Mock 回显作者原文、
+  隐藏页在途请求返回后继续调度、`ask_user.options` 与原卡不一致、run 与问题分两次读取；
+- 下一张卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`；
+- `C1-A-REV-01` 复审通过前不进入 C1-B。
 
 C1 方案 v2 已把完整 Agent 能力地图纳入规划：创意、世界观、人物、剧情、全书/分卷/
 章节大纲、Composer、Writer、多稿、文风、Reviewer、Continuity、设定审查、文风审查、
@@ -270,7 +275,9 @@ Agent 与工作流按两个维度落地：
 
 完整方案：`docs/plans/C1-coordinator-agent-runtime.md`。
 
-C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（已按卡完成，待用户复审）。
+C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（首次实现已提交 `a5e3707`，
+复审不通过）。
+C1-A 修复卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（下一步）。
 C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
@@ -507,6 +514,12 @@ A2-F-C 附带把 A2-E E2E 的「事实区没有任何接受 / 拒绝 / 写回入
     要等 sweep 周期才会重排；期间该 run 不会被第二个 Worker 领取，表现为短暂停滞。
 42. `novel_runs` 的状态迁移白名单目前只覆盖 C1-A 的 `ask_user` / `finish`；
     C1-B 引入 `waiting_approval` 或新工具时必须新增 migration，不允许绕过 CHECK。
+43. C1-A 的模型硬超时当前与 lease abort 混用：超时会被误判为 lease-lost，
+    且实际调用可在租约过期后反复重试；C1-A-REV-01 必须拆成独立 signal 并保证有限失败。
+44. C1-A 的调用日志当前随 step/state 事务提交，取消或 lease-lost 的真实调用成本会丢失；
+    修复前 token 预算无法覆盖所有实际模型调用。
+45. `novel_runs.work_id` 当前不可变，而 C1-B 规划需要把 run 绑定到 Work；
+    C1-B 开工前必须设计一次性受控绑定，不允许直接放开任意更新。
 
 ---
 
@@ -587,6 +600,14 @@ D-040 C1-A 只注册 ask_user / finish，且不产生 waiting_approval；
       Coordinator 输出必须同时通过 JSON Schema 与业务语义校验（ask 必须有 1–6 个不重复选项，
       finish 必须给原因）；Runtime 拒绝未注册工具、非法状态和超预算动作；
       step / call append-only，旧 Worker 的迟到结果整事务丢弃。
+D-041 模型调用超时与 lease 丢失必须使用不同信号：超时是有限 attempt 内的可重试失败，
+      lease fence 失败才是丢弃提交；任何 Provider 调用都必须有硬超时兜底。
+      本条替代 D-040 中“超时/旧 Worker 结果整事务丢弃”的笼统表述。
+D-042 `novel_agent_calls` 是实际调用遥测，不是业务状态提交：调用发生后立即脱敏追加；
+      旧 Worker 可写其真实 call 遥测，但不得写 step / state / 问题或创作资料。
+      本条替代 D-040 中“旧 Worker 一律不能写 call”的表述。
+D-043 `ask_user.options` 恢复为 0..6：空数组表示开放式问题，页面始终保留纯文本回答；
+      有选项时仍必须非空、去重且最多 6 个。本条替代 D-040 中 1–6 的下限。
 ```
 
 ---
