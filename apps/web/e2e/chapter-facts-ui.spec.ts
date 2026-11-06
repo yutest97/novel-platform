@@ -652,13 +652,14 @@ test('9. summary / reason 中的 HTML 按纯文本显示，不执行', async () 
   expect(executed).toBeUndefined();
 });
 
-test('10. 事实区没有任何接受 / 拒绝 / 写回入口', async () => {
+test('10. 事实区没有采纳 / 写回 / 批量入口', async () => {
   gate.planList('all', [{ kind: 'json', status: 200, body: listBody([factItem()], 1, false) }]);
   await openChapter();
 
   const panel = page.getByTestId('facts-panel');
   const labels = (await panel.getByRole('button').allTextContents()).map((text) => text.trim());
   // 只允许：提取 + 7 个筛选（+ 失败时的"重新读取"）
+  // A2-F-C 起事实区新增「接受 / 拒绝」（只记录决定），但**没有**采纳 / 写回 / 批量入口。
   const allowed = new Set([
     '提取事实',
     '提取中…',
@@ -670,6 +671,9 @@ test('10. 事实区没有任何接受 / 拒绝 / 写回入口', async () => {
     '境界进展',
     '情节线索',
     '人物位置',
+    '接受',
+    '拒绝',
+    '记录中…',
   ]);
   expect(labels.length).toBeGreaterThan(0);
   for (const label of labels) {
@@ -677,7 +681,7 @@ test('10. 事实区没有任何接受 / 拒绝 / 写回入口', async () => {
   }
 
   const text = (await panel.innerText()).replace(/\s/gu, '');
-  for (const forbidden of ['接受', '拒绝', '采纳', '写回', '批量']) {
+  for (const forbidden of ['采纳', '写回', '批量']) {
     expect(text).not.toContain(forbidden);
   }
 });

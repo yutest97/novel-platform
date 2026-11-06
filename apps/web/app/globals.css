@@ -1043,6 +1043,38 @@ fieldset.field legend {
   overflow-wrap: anywhere;
 }
 
+/* --------------------------------------------------------------------------
+   事实候选决策（A2-F-C）
+   - 只记录决定：徽章 / 决定时间 / 说明，不出现撤销、改判或写回入口；
+   - 决定按钮用小号次级按钮，长说明文本自然换行，移动端不横向撑破。
+   -------------------------------------------------------------------------- */
+.facts-item__decision {
+  margin: 0.4rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+}
+
+.facts-item__decision-hint {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.facts-item__actions {
+  margin: 0.45rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.facts-item__actions .btn-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .version-list {
   list-style: none;
   margin: 0 0 1rem;

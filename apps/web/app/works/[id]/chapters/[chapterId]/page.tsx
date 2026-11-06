@@ -30,6 +30,7 @@ import {
   ApiError,
   adoptChapterCandidate,
   cancelGenerationTask,
+  decideChapterFactFromApi,
   extractChapterFactsFromApi,
   fetchChapter,
   fetchChapterCandidate,
@@ -49,6 +50,7 @@ import {
   startChapterGeneration,
   type ChapterCandidateDetail,
   type ChapterDetail,
+  type ChapterFactDecisionValue,
   type ChapterFactListPage,
   type ChapterReviewView,
   type ChapterSummaryRecord,
@@ -68,6 +70,15 @@ import {
   restoreConfirmMessage,
   restoredNotice,
 } from '@/lib/chapter-diff-view';
+import {
+  FACT_DECISION_NOT_FINALIZED_HINT,
+  FACT_DECISION_RECORDED_NOTE,
+  FACT_DECISION_RECORDING_LABEL,
+  factDecisionBadgeClass,
+  factDecisionErrorText,
+  factDecisionTimeLabel,
+  factDecisionView,
+} from '@/lib/chapter-fact-decision';
 import {
   MAX_CHAPTER_TARGET_WORDS,
   MIN_CHAPTER_TARGET_WORDS,
@@ -185,6 +196,31 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [extractingFacts, setExtractingFacts] = useState(false);
   const [factExtractError, setFactExtractError] = useState('');
   const [factExtractNoticeText, setFactExtractNoticeText] = useState('');
+
+  /**
+   * 事实候选决策（A2-F-C）：只记录作者的决定，不写回任何实体 / 物品事件。
+   *
+   * - 每条候选**独立** in-flight：一条在提交不影响其它候选；
+   * - in-flight 用 **ref** 判定（不是 state）：state 更新是异步的，
+   *   同一个 tick 内的两次点击会在 state 生效前再发一次请求。
+   */
+  const factDecisionInFlightRef = useRef<Set<string>>(new Set());
+  /** 提交中的候选 id → 正在提交的决定（用于禁用按钮与「记录中…」文案）。 */
+  const [factDecisionPending, setFactDecisionPending] = useState<
+    Readonly<Record<string, ChapterFactDecisionValue>>
+  >({});
+  /** 每条候选各自的失败提示：只影响当前候选，不清空列表、不覆盖提取提示。 */
+  const [factDecisionErrors, setFactDecisionErrors] = useState<Readonly<Record<string, string>>>(
+    {},
+  );
+  /**
+   * 事实列表的**版本身份**：每次发起列表读取自增。
+   *
+   * 决定请求发出时记下当时的版本；响应回来时若版本已变（期间切换了筛选
+   * 或重新读取过列表），这次响应就**完全静默**——不写决定、不写错误，
+   * 避免旧响应覆盖新列表。当前列表来自服务端，本身就是权威。
+   */
+  const factListVersionRef = useRef(0);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -365,6 +401,8 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const loadFacts = useCallback(
     async (filter: string): Promise<void> => {
       const seq = ++factSeqRef.current;
+      // 列表版本自增：此后到达的决定响应会因版本不符而被丢弃。
+      factListVersionRef.current += 1;
       setFactPage(null);
       setFactsState('loading');
       setFactsError('');
@@ -434,6 +472,68 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       setExtractingFacts(false);
     }
   }, [canExtractFactsNow, selectedVersion, workId, chapterId, factFilter, loadFacts, router]);
+
+  /**
+   * 记录作者对一条事实候选的决定（A2-F-C）。
+   *
+   * - **只记录**：不写回人物 / 物品 / 势力 / 关系 / 境界；
+   * - 成功（含同决定幂等）只更新**这一条**候选的 decision，不重载整个列表；
+   * - 失败只影响当前候选：不清空列表、不覆盖提取提示；
+   * - 双击 / 同时点接受与拒绝只发一个请求（in-flight 用 ref 判定）；
+   * - 期间列表被换过（切筛选 / 重新读取）则响应**完全静默**，
+   *   不覆盖新列表（当前列表来自服务端，本身就是权威）。
+   */
+  const submitFactDecision = useCallback(
+    async (candidateId: string, decision: ChapterFactDecisionValue): Promise<void> => {
+      if (factDecisionInFlightRef.current.has(candidateId)) {
+        return;
+      }
+      const listVersion = factListVersionRef.current;
+      factDecisionInFlightRef.current.add(candidateId);
+      setFactDecisionPending((prev) => ({ ...prev, [candidateId]: decision }));
+      setFactDecisionErrors((prev) => {
+        const next = { ...prev };
+        delete next[candidateId];
+        return next;
+      });
+      try {
+        const result = await decideChapterFactFromApi(workId, chapterId, candidateId, decision);
+        if (factListVersionRef.current !== listVersion) {
+          return;
+        }
+        // 同决定幂等（deduplicated=true）同样展示已决状态。
+        setFactPage((prev) =>
+          prev === null
+            ? prev
+            : {
+                ...prev,
+                facts: prev.facts.map((fact) =>
+                  fact.id === candidateId
+                    ? { ...fact, decision: { value: result.decision, decidedAt: result.decidedAt } }
+                    : fact,
+                ),
+              },
+        );
+      } catch (caught) {
+        if (factListVersionRef.current !== listVersion) {
+          return;
+        }
+        if (handleSessionError(caught, router)) {
+          return;
+        }
+        const text = factDecisionErrorText(caught instanceof ApiError ? caught.code : null);
+        setFactDecisionErrors((prev) => ({ ...prev, [candidateId]: text }));
+      } finally {
+        factDecisionInFlightRef.current.delete(candidateId);
+        setFactDecisionPending((prev) => {
+          const next = { ...prev };
+          delete next[candidateId];
+          return next;
+        });
+      }
+    },
+    [workId, chapterId, router],
+  );
 
   /** 刷新章节详情与版本列表；`selectLatest` 用于采纳后自动选中最大版本。 */
   const refreshDetailAndVersions = useCallback(
@@ -1395,6 +1495,11 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     versionLoading,
   });
   const factsEmpty = factsEmptyView({ filter: factFilter, allTotal: factsAllTotal });
+  // 事实区（A2-F-C）：章节未定稿时整个决定入口不出现。
+  const factsDecisionHint =
+    detail !== null && detail.chapter.status !== 'finalized'
+      ? FACT_DECISION_NOT_FINALIZED_HINT
+      : '';
   const reviewIssues = review?.run?.issues ?? [];
   const adoptCandidate =
     detail?.candidates.find((candidate) => candidate.id === adoptTargetId) ?? null;
@@ -2145,6 +2250,11 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                   {factsHint}
                 </p>
               )}
+              {factsDecisionHint === '' ? null : (
+                <p className="hint" data-testid="facts-decision-hint">
+                  {factsDecisionHint}
+                </p>
+              )}
               {factExtractError === '' ? null : (
                 <p className="alert alert--error" role="alert" data-testid="facts-extract-error">
                   {factExtractError}
@@ -2231,8 +2341,22 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                 <ul className="facts-list" data-testid="facts-list">
                   {factPage.facts.map((fact) => {
                     const refs = factRefLabels(fact);
+                    const decisionView = factDecisionView({
+                      chapterStatus: detail?.chapter.status ?? null,
+                      candidateSourceVersionId: fact.sourceVersionId,
+                      latestVersionId: versions[0]?.id ?? null,
+                      decision: fact.decision,
+                      submitting: factDecisionPending[fact.id] !== undefined,
+                    });
+                    const decisionBadge = decisionView.badge;
+                    const decisionError = factDecisionErrors[fact.id] ?? '';
                     return (
-                      <li className="facts-item" key={fact.id} data-testid="facts-item">
+                      <li
+                        className="facts-item"
+                        key={fact.id}
+                        data-testid="facts-item"
+                        data-fact-id={fact.id}
+                      >
                         <div className="facts-item__meta">
                           {/* 全部为 React 文本节点：summary / reason 里的 HTML 只会显示成文字 */}
                           <span className="badge" data-testid="facts-item-type">
@@ -2258,6 +2382,81 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                             {refs.map((label) => (
                               <span key={label}>{label}</span>
                             ))}
+                          </p>
+                        )}
+
+                        {/* 已决：徽章 + 决定时间 + 声明；不再显示接受 / 拒绝按钮 */}
+                        {decisionBadge !== null ? (
+                          <div className="facts-item__decision" data-testid="facts-item-decision">
+                            <span
+                              className={factDecisionBadgeClass(decisionBadge.tone)}
+                              data-testid="facts-item-decision-badge"
+                            >
+                              {decisionBadge.label}
+                            </span>
+                            <span className="hint" data-testid="facts-item-decision-time">
+                              {factDecisionTimeLabel(
+                                formatDateTime(fact.decision?.decidedAt ?? ''),
+                              )}
+                            </span>
+                            <span className="hint" data-testid="facts-item-decision-note">
+                              {FACT_DECISION_RECORDED_NOTE}
+                            </span>
+                          </div>
+                        ) : null}
+
+                        {/* 旧版本候选：说明为什么不能决定 */}
+                        {decisionView.hint === '' ? null : (
+                          <p
+                            className="facts-item__decision-hint"
+                            data-testid="facts-item-decision-hint"
+                          >
+                            {decisionView.hint}
+                          </p>
+                        )}
+
+                        {/* 未决且可决定：接受 / 拒绝（提交中两按钮都禁用） */}
+                        {decisionView.showButtons ? (
+                          <div className="facts-item__actions" data-testid="facts-item-actions">
+                            <button
+                              type="button"
+                              className="btn-secondary btn-small"
+                              onClick={() => {
+                                void submitFactDecision(fact.id, 'accepted');
+                              }}
+                              disabled={!decisionView.canSubmit}
+                              aria-busy={decisionView.state === 'submitting'}
+                              data-testid="facts-item-accept"
+                            >
+                              {decisionView.state === 'submitting'
+                                ? FACT_DECISION_RECORDING_LABEL
+                                : '接受'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-secondary btn-small"
+                              onClick={() => {
+                                void submitFactDecision(fact.id, 'rejected');
+                              }}
+                              disabled={!decisionView.canSubmit}
+                              aria-busy={decisionView.state === 'submitting'}
+                              data-testid="facts-item-reject"
+                            >
+                              {decisionView.state === 'submitting'
+                                ? FACT_DECISION_RECORDING_LABEL
+                                : '拒绝'}
+                            </button>
+                          </div>
+                        ) : null}
+
+                        {/* 失败只影响当前候选 */}
+                        {decisionError === '' ? null : (
+                          <p
+                            className="alert alert--error"
+                            role="alert"
+                            data-testid="facts-item-decision-error"
+                          >
+                            {decisionError}
                           </p>
                         )}
                       </li>
