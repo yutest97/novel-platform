@@ -2489,3 +2489,113 @@ WHERE ... AND r."status" = 'succeeded'
 
 实体 / 物品事件写回、撤销 / 改判、批量决定、决策历史视图、决策统计、
 migration、新的写接口。
+
+---
+
+## 36. C1-A：Coordinator Agent 契约与 Runtime
+
+C1-A 把“小说创作”从固定步骤向导切换为**单 Coordinator Agent 动态问答**。
+Runtime 仍是代码控制的持久化与执行层；Coordinator 只输出结构化的下一步 action。
+
+### 36.1 Agent 契约
+
+- `novel.coordinator@1.0.0`，`maxOutputTokens = 1024`；
+- 输入：作者 id、原始 `requestText`、当前目标、步骤摘要、回答历史与预算信息；
+- 输出（严格 JSON Schema）：
+
+```json
+{
+  "action": "ask_user | finish",
+  "objective": "当前步骤目标",
+  "input": {
+    "question": "string | null",
+    "options": ["string"],
+    "finishReason": "string | null"
+  },
+  "decisionSummary": "给作者看的一句话"
+}
+```
+
+- JSON Schema 允许 `question` / `finishReason` 为 `string | null`，交叉语义由
+  `validateNovelCoordinatorAction` 负责：
+  - `ask_user`：`question` 非空、`options` 1–6 个且不重复、`finishReason === null`；
+  - `finish`：`question === null`、`options` 为空、`finishReason` 非空；
+  - `objective` / `decisionSummary` 非空且长度受限；
+  - 任何 SQL、Prisma 调用、文件路径、shell 或 HTML 片段一律拒绝。
+
+### 36.2 工具工作流
+
+`NOVEL_TOOL_WORKFLOWS` 是唯一工具注册表，当前只注册：
+
+| 工具 | 允许来源状态 | 成功迁移 | sideEffect | 重试 | 超时 |
+| --- | --- | --- | --- | --- | --- |
+| `ask_user` | `running` | `waiting_user` | `read_only` | 1 | 60s |
+| `finish` | `running` | `completed` | `read_only` | 1 | 60s |
+
+Runtime 的校验顺序固定为：注册表 → `NOVEL_ALLOWED_TOOLS` → 来源状态 →
+工具 `inputSchema`。任一失败都写 failed step（或直接失败），不产生业务副作用。
+C1-A **不产生 `waiting_approval`**，也不创建 Work、章节或正文。
+
+### 36.3 Runtime 边界
+
+`NovelCoordinatorWorker.runOnce()` 负责：
+
+- 过期租约回收：有 `cancel_requested_at` 的 running run 直接 `cancelled`，否则重排 `queued`；
+- `FOR UPDATE SKIP LOCKED` 领取单条 run，写 `locked_by / lease_until / heartbeat_at`；
+- 心跳与 fence：所有提交条件都带 `status = 'running' AND locked_by = 本 Worker
+  AND state_version = 读取时版本 AND cancel_requested_at IS NULL`；
+- Schema / 语义非法与可重试错误最多尝试 `maxAttempts` 次；每次实际模型调用都缓冲
+  一条 `novel_agent_calls`，失败且未形成 step 时 `step_id = NULL`；
+- 预算：`remainingSteps <= 0` 直接失败且不写 step；token 预算超限写 failed step
+  并记录 `NOVEL_RUN_BUDGET_EXCEEDED`；
+- 循环熔断：`hash(action + question/options/finishReason)` 连续 3 次相同 →
+  `COORDINATOR_LOOP_DETECTED`；
+- 成功提交：条件 UPDATE run + 插入一条 `novel_run_steps` + 批量插入 calls，
+  全在同一事务；旧 Worker 条件 UPDATE 无行时抛 `CommitAborted('lease-lost')`，
+  整事务回滚，`runOnce` 返回 `'lease-lost'`。
+
+### 36.4 持久化
+
+`novel_runs` / `novel_run_steps` / `novel_agent_calls` 的列、CHECK 与触发器见
+[`03-data-model.md`](03-data-model.md) 的 3.15。要点：
+
+- `request_text`、`max_steps`、归属与创建时间不可变；
+- 状态迁移白名单由触发器把关，终态不可离开；
+- step / call append-only，run 不可删除；
+- step 的 `input_hash` 与 call 日志都不包含 prompt、原始响应或密钥。
+
+### 36.5 Worker 与健康检查
+
+- `apps/worker` 同时运行 generation 循环与 novel 循环；
+- 两个循环共享 `/healthz`，`mergeWorkerLoopSnapshots` 取最严重状态
+  （`ready < starting < retrying < stopping < failed`），合并连续失败、错误码、
+  退避与最早成功时间；
+- 任一循环永久失败或抛错 → 进程以退出码 1 优雅关闭；
+- Mock 模式使用 `createNovelCoordinatorMockProvider()`，真实模式复用
+  `createModelProvider(providerConfig)`。
+
+### 36.6 API 与动态问答页
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| `POST /api/novel-runs` | 创建 run；只接受 `requestText`，1–2000 字；201 只返回 `runId/status/version` |
+| `GET /api/novel-runs/:runId` | 读取当前视图；跨作者或畸形 id 统一 404 |
+| `POST /api/novel-runs/:runId/answer` | 只接受 `expectedVersion` 与 `answer`；幂等 / 冲突 / 非法状态用稳定错误码 |
+| `POST /api/novel-runs/:runId/cancel` | 非终态幂等取消；终态原样返回 |
+
+所有写接口都校验登录、作者角色与 Origin；管理员无普通 run 入口。
+
+页面 `/novel-runs/[runId]`：
+
+- 1s → 2s → 5s 轮询；页面隐藏暂停，恢复可见立即刷新；
+- 请求带单调 `seq` 与 `AbortController`，旧响应不能覆盖新状态；
+- 回答提交带当前 `version`；409 时提示并立即重取，不覆盖作者输入；
+- 终态停止轮询并展示结论；取消按钮只在非终态出现；
+- 问题、选项、摘要、错误全部按纯文本渲染，不使用 `dangerouslySetInnerHTML`；
+- 顶部「写作台 → 写新小说」只有一个目标输入框，不做题材预设或向导。
+
+### 36.7 未做
+
+故事规划 Agent（创意 / 世界观 / 人物 / 剧情 / 三级大纲）、候选 revision、
+作者确认故事圣经、`waiting_approval`、创建 Work、正文生成、事实写回、
+RAG、图数据库与任何自动采纳。

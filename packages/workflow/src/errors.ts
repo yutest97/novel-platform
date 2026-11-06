@@ -30,7 +30,19 @@ export type WorkflowErrorCode =
   /** 摘要任务：章节当前不是定稿状态（含提交阶段被人工 revision 拉回 in_review）。 */
   | 'SUMMARY_CHAPTER_NOT_FINALIZED'
   /** 摘要任务：sourceVersion 已不是当前最新正式版本。 */
-  | 'SUMMARY_SOURCE_VERSION_STALE';
+  | 'SUMMARY_SOURCE_VERSION_STALE'
+  /** Coordinator 运行：租约已被其它 Worker 接管。 */
+  | 'NOVEL_RUN_LEASE_LOST'
+  /** Coordinator 运行：步骤 / token 预算耗尽。 */
+  | 'NOVEL_RUN_BUDGET_EXCEEDED'
+  /** Coordinator 运行：动作不在当前状态允许的工具白名单内。 */
+  | 'NOVEL_RUN_TOOL_NOT_ALLOWED'
+  /** Coordinator 运行：连续重复同一动作，触发熔断。 */
+  | 'COORDINATOR_LOOP_DETECTED'
+  /** Coordinator 运行：作者已取消，未提交结果全部丢弃。 */
+  | 'NOVEL_RUN_CANCELLED'
+  /** Coordinator 运行：持久化状态损坏，无法继续调度。 */
+  | 'NOVEL_RUN_STATE_CORRUPT';
 
 /** 任务记录的 provider/model 与 Worker 当前配置不一致时的安全文案。 */
 export const TASK_MODEL_CONFIG_MISMATCH_MESSAGE = '任务模型配置已变化，请重新提交生成任务';

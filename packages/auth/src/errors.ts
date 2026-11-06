@@ -58,6 +58,11 @@ export type AuthErrorCode =
   | 'REVIEW_NOT_FOUND'
   // 章节版本摘要只读接口（A2-D-D）：该版本还没有成功落库的摘要
   | 'SUMMARY_NOT_FOUND'
+  // 小说创作问答（C1-A）：运行不存在 / 版本或回答冲突 / 状态不允许回答
+  | 'NOVEL_RUN_NOT_FOUND'
+  | 'NOVEL_RUN_VERSION_CONFLICT'
+  | 'NOVEL_RUN_ANSWER_CONFLICT'
+  | 'NOVEL_RUN_INVALID_STATE'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -134,6 +139,14 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   REVIEW_NOT_FOUND: 404,
   // 摘要不存在（含"不是你的作品 / 章节 / 版本"与"尚未生成"）
   SUMMARY_NOT_FOUND: 404,
+  // 统一 404：不区分"不存在"与"不是当前作者的运行"，避免探测
+  NOVEL_RUN_NOT_FOUND: 404,
+  // 作者回答基于的版本已过期
+  NOVEL_RUN_VERSION_CONFLICT: 409,
+  // 同一版本提交了不同回答（幂等键冲突）
+  NOVEL_RUN_ANSWER_CONFLICT: 409,
+  // 运行当前状态不允许回答 / 取消等操作
+  NOVEL_RUN_INVALID_STATE: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -197,6 +210,11 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   REVIEW_NOT_FOUND: '审阅结果不存在',
   // 同样统一 404，不区分"尚未生成"与"不是你的"
   SUMMARY_NOT_FOUND: '章节摘要不存在',
+  // 统一 404，不区分"不存在"与"不是当前作者"
+  NOVEL_RUN_NOT_FOUND: '小说创作问答不存在',
+  NOVEL_RUN_VERSION_CONFLICT: '问答版本已更新，请刷新后重试',
+  NOVEL_RUN_ANSWER_CONFLICT: '该版本已提交过不同回答，请刷新后重试',
+  NOVEL_RUN_INVALID_STATE: '当前状态不允许该操作',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

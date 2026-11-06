@@ -1,7 +1,7 @@
 # 07 总路线（个人可用版优先）
 
 - 版本：v1.9
-- 日期：2026-11-06
+- 日期：2026-11-07
 - 最后已验收基线：`07cb346`（A2-F-C-REV-01，CI #25 绿色）
 - 状态：执行中
 
@@ -60,7 +60,7 @@
 | **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | 已验收（CI #25）：契约、定稿任务、落库、前章摘要接线、API 与 UI |
 | **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 已验收（CI #25） |
 | **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | A2-F-A/B/C 已验收（CI #25）；实体写回待产品语义确认 |
-| **C1-A** | Coordinator Runtime + 工作流 + 动态问答壳 | `novel.coordinator@1.0.0` 严格动作 Schema、ToolWorkflow guard/execute/validate/commit、run 状态机、`novel_runs` / `novel_run_steps` / `novel_agent_calls`、单 run 租约与 fence、预算/循环保护、ask_user/finish、最小 API、可操作的“写新小说”问答页；不做专业创作 Agent | 下一阶段（Trae） |
+| **C1-A** | Coordinator Runtime + 工作流 + 动态问答壳 | `novel.coordinator@1.0.0` 严格动作 Schema、ToolWorkflow guard/execute/validate/commit、run 状态机、`novel_runs` / `novel_run_steps` / `novel_agent_calls`、单 run 租约与 fence、预算/循环保护、ask_user/finish、4 个 API、可操作的“写新小说”问答页；不做专业创作 Agent | 已本地实现（待复审） |
 | **C1-B** | 故事规划与确认 | 创意 / 世界观 / 人物 / 剧情 / 全书/分卷/章节大纲 Agent；候选 revision、作者编辑/确认/拒绝、故事圣经与大纲持久化及 UI | 待 C1-A |
 | **C1-C** | 正文生产闭环 | Composer、Writer、Reviser；复用 Reviewer / Summarizer / FactExtractor；确认章节大纲驱动正文，支持采纳/退回修改/定稿 | 待 C1-B |
 | **C1-D** | 连续性与故事记忆 | Continuity、设定审查、文风审查、伏笔、Librarian 受控写回、故事一致性投影；作者确认事实后的资料更新 | 待 C1-C |
@@ -159,3 +159,4 @@
 | 2026-11-06 | 产品方向调整：固定 N1 八步向导方案废弃；改为 C1 单 Coordinator Agent 创作运行时（C1-A Runtime、C1-B 故事规划工具、C1-C 章节/记忆工具、C1-D 创作界面）；事实写回与高级审阅门禁后移 |
 | 2026-11-06 | C1 方案 v2：把完整 Agent 能力地图纳入规划；Coordinator 仍是唯一语义调度者，其他能力明确区分 LLM Agent、确定性服务和混合服务；阶段调整为 C1-A Runtime + 动态问答壳、C1-B 故事规划与确认、C1-C 正文生产、C1-D 连续性与记忆、C1-E 高级可选能力。每阶段都交付最小 UI 纵向切片 |
 | 2026-11-06 | C1 方案 v2.1：显式补齐工作流控制层 — Coordinator 动态语义路由 + 每个 tool 的固定 guard/execute/validate/commit 工作流 + PostgreSQL 事务/租约层；明确 run、候选、正文修订、记忆写回状态机，以及 Agent 判定与工作流放行/回退的职责边界 |
+| 2026-11-07 | C1-A 本地完成（未推送）：`novel.coordinator@1.0.0`（只允许 `ask_user` / `finish`，不产生 `waiting_approval`）、`NOVEL_TOOL_WORKFLOWS`、`novel_runs` / `novel_run_steps` / `novel_agent_calls`（CHECK + 触发器 + append-only）、Worker 独立 novel 轮询与健康合并、4 个 API、`/novel-runs/[runId]` 动态问答页；migrations / 表 / 触发器 15 / 26 / 19；全量单测 1170、E2E 159；下一步 C1-B 故事规划与确认 |

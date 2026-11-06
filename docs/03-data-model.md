@@ -624,6 +624,39 @@ run 进入 `succeeded / failed` 终态后不能再追加问题，避免 `issue_c
 > 不同决定 409 `CONTINUITY_FACT_ALREADY_DECIDED`；首次决定写一条审计
 > `continuity.fact_decided`（detail 只有 ids 与 decision）。
 
+### 3.15 novel_runs / novel_run_steps / novel_agent_calls（C1-A 实现口径）
+
+C1-A 只跑单 Coordinator Agent 的问答与结束，不创建 Work、章节或正文；
+三张表迁移为 `20261106120000_c1a_novel_coordinator`。
+
+| 表 | 关键列 | 约束 |
+| --- | --- | --- |
+| `novel_runs` | `author_id`、`work_id`（C1-A 恒为 NULL）、`status`、`request_text`、`state_summary`、`state_version`、`current_goal`、`last_decision_summary`、`step_count`、`max_steps`、`locked_by`、`lease_until`、`heartbeat_at`、`cancel_requested_at`、`completed_at` | `status` 只允许 `queued/running/waiting_user/waiting_approval/completed/failed/cancelled`；`request_text` 1–2000、`max_steps` 1–100、`state_version >= 0`、`step_count <= max_steps`；`(status, locked_by, lease_until)` 与 `cancel/completed` 组合自洽；`(work_id, author_id)` 复合外键且作品必须属于同一作者 |
+| `novel_run_steps` | `run_id`、`step_no`、`decision`、`tool_name`、`input_hash`（SHA-256 hex）、`output_summary`、`status`、`error_code` | `(run_id, step_no)` 唯一；`(id, run_id)` 唯一供 calls 复合外键；`status` 只允许 `succeeded/failed`，succeeded 的 `error_code` 必须为 NULL、failed 必须非 NULL；UPDATE / DELETE 一律拒绝 |
+| `novel_agent_calls` | `run_id`、`step_id`（可为 NULL）、`call_kind`、`agent_name`、`agent_version`、`provider`、`model`、token 数与延迟、`success`、`error_code` | 每次实际模型调用恰好一行；`step_id` 为空表示失败且未形成可提交步骤；`(step_id, run_id)` 复合外键保证 step 属于同一 run；UPDATE / DELETE 一律拒绝 |
+
+**触发器与不可变边界**：
+
+- `novel_runs_guard`：禁止 DELETE；禁止修改 `id`、`author_id`、`work_id`、
+  `request_text`、`max_steps`、`created_at`；只允许白名单状态迁移，
+  `queued → running`、`running → waiting_user/completed/failed/cancelled`、
+  `waiting_user → queued/cancelled` 等；终态不可离开；
+  `state_version` 与 `step_count` 只能单调递增；
+- step / call 的 UPDATE/DELETE 由触发器直接拒绝，保证 append-only；
+- 状态迁移由服务层事务 + 条件 UPDATE（`status='running' AND locked_by AND
+  state_version`）共同把关，旧 Worker 的迟到提交整事务回滚。
+
+**服务层规则（不在数据库层表达）**：
+
+- 只允许 `ask_user` / `finish` 两个工具；`waiting_approval` 在 C1-A 不产生；
+- `ask_user` 成功迁移到 `waiting_user`，`finish` 成功迁移到 `completed`；
+- 回答按 `expectedVersion` 乐观并发：同版本同答案幂等，同版本不同答案 409
+  `NOVEL_RUN_ANSWER_CONFLICT`，版本落后 409 `NOVEL_RUN_VERSION_CONFLICT`；
+- 非 `waiting_user` 回答 409 `NOVEL_RUN_INVALID_STATE`；
+- 预算：步数用尽直接失败且不写 step；token 用尽写一条 failed step 并记录
+  `NOVEL_RUN_BUDGET_EXCEEDED`；
+- 连续 3 次相同 action 签名触发 `COORDINATOR_LOOP_DETECTED`。
+
 ---
 
 ## 4. 通用核心 vs 玄幻规则包（边界）

@@ -1,10 +1,10 @@
 # 09 项目记忆（当前事实快照）
 
-- 更新日期：2026-11-06
+- 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；产品入口转向 C1 单 Coordinator Agent 创作运行时，
-  C1-A 为下一阶段；事实写回与高级审阅门禁后移
+- 当前产品阶段：A1 / A2 已验收；C1-A 已本地完成（待复审），产品入口转向 C1 单
+  Coordinator Agent 创作运行时；C1-B 故事规划为下一阶段；事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -137,6 +137,24 @@
   不复制摘要正文；
 - 无 migration、无 API / UI。
 
+### C1-A Coordinator Runtime 与动态问答（本地完成，待复审）
+
+- `novel.coordinator@1.0.0`：严格输入 / 输出 Schema，只允许 `ask_user` / `finish`；
+  `ask_user` 必须带 1–6 个不重复短选项，`finish` 必须带结束原因；
+  输出中的 SQL / Prisma / 文件路径 / shell / HTML 片段一律拒绝；
+- `NOVEL_TOOL_WORKFLOWS`：每个工具声明允许状态、输入 Schema、成功迁移、
+  sideEffect、重试上限与超时；Runtime 负责工具白名单、状态迁移、预算、
+  重复动作熔断、取消优先、租约 fencing 与落库；
+- `novel_runs` / `novel_run_steps` / `novel_agent_calls`：
+  CHECK + 触发器保证状态迁移合法、`request_text` / `max_steps` / 归属不可变、
+  step 与 call append-only、run 不可删除；
+- Worker 新增独立 novel 轮询循环，与 generation 循环共用健康检查端口并合并状态；
+- 4 个 API：创建、读取、回答（带 `expectedVersion`）、取消；
+- `/novel-runs/[runId]` 动态问答页：1s → 2s → 5s 轮询、页面隐藏暂停、
+  回答冲突提示并重取、终态停止轮询；
+- C1-A 只产生 `waiting_user` / `completed` / `failed` / `cancelled`，
+  **不产生 `waiting_approval`**；不创建 Work、章节或正文。
+
 ---
 
 ## 2. 当前冻结决策
@@ -201,8 +219,8 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | 下一阶段（Trae）：严格动作、ToolWorkflow 状态机、run/step/call 持久化、ask_user/finish、最小 API 与“写新小说”问答页 |
-| C1-B | 故事规划与确认 | 待 C1-A：创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | 已本地实现（待复审）：严格动作、ToolWorkflow 状态机、run/step/call 持久化、ask_user/finish、4 个 API 与“写新小说”问答页 |
+| C1-B | 故事规划与确认 | 下一步：待 C1-A 复审后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
 | C1-E | 高级可选能力 | 待 C1-D：多稿、质量裁定、文风 Skill、跨卷伏笔与批量记忆 |
@@ -224,6 +242,14 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
 硬编码小说创作阶段顺序。
 
+### C1-A 现状（本地完成，待复审）
+
+- Runtime / 工具工作流 / 三张表 / Worker 轮询 / 4 个 API / 动态问答页与浏览器 E2E 已完成；
+- 本地验证：全新空库 15 个 migration（26 张业务表、19 个触发器）、
+  全量单测 1170 全绿、E2E 159 全绿；两次灵敏度验证均先按预期暴露失败，恢复后全绿；
+- 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
+- 下一张卡：C1-B 故事规划与确认。
+
 C1 方案 v2 已把完整 Agent 能力地图纳入规划：创意、世界观、人物、剧情、全书/分卷/
 章节大纲、Composer、Writer、多稿、文风、Reviewer、Continuity、设定审查、文风审查、
 Reviser、质量裁定、Summarizer、FactExtractor、Librarian、伏笔和故事一致性。
@@ -244,9 +270,8 @@ Agent 与工作流按两个维度落地：
 
 完整方案：`docs/plans/C1-coordinator-agent-runtime.md`。
 
-下一张实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（执行方 Trae）。
-C1-A 不再只交付后台 Runtime，而是同时交付最小“写新小说”动态问答页，确保每个阶段
-都有作者可感知的纵向切片。
+C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（已按卡完成，待用户复审）。
+C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
 故事圣经确认 → 开始写作”，但这是 Coordinator 的默认判断，不是 Runtime 写死的阶段。
@@ -337,6 +362,28 @@ A2-E 再新增 24 个事实面板纯函数用例（`chapter-facts-panel.test.ts`
 A2-F-C 再新增 20 个决策面板纯函数用例（`chapter-fact-decision.test.ts`）
 与 10 个浏览器 E2E（`chapter-fact-decision-ui.spec.ts`），
 因此 web **445**、workflow **368**、全量 **1128**、E2E **158**。
+
+C1-A 完成后的当前数字：
+
+| 项目 | 数量 |
+| --- | --- |
+| 全量单测 | **1170**（web 457 / workflow 398 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 浏览器 E2E | **159** |
+| migrations | **15** |
+| 数据表 | **26**（不含 `_prisma_migrations`） |
+| 数据库触发器 | **19** |
+
+C1-A 新增 30 个 workflow 用例（`novel-coordinator.test.ts` 8 +
+`novel-runtime.test.ts` 22）、12 个 web 用例（`novel-runs-api.test.ts` 8 +
+`novel-run-view.test.ts` 4）与 1 个浏览器 E2E（`novel-run-flow.spec.ts`）。
+
+C1-A 的两处灵敏度验证：
+
+1. 把重复动作熔断阈值从 `MAX_REPEAT_ACTIONS - 1` 改为永不触发 →
+   「连续重复同一 action」用例失败；
+2. 把步数预算判断从 `<= 0` 改成 `< 0` → 「步数预算耗尽」用例失败；
+   恢复后相关测试全绿。
+
 
 A2-F-C 的两处灵敏度验证：
 
@@ -454,6 +501,12 @@ A2-F-C 附带把 A2-E E2E 的「事实区没有任何接受 / 拒绝 / 写回入
 39. Agent 与工作流的职责必须同时验收：只实现一个“模型调用循环”不足以称为工作流系统；
     每个 tool 都要有 guard、允许状态、成功迁移、失败分类、重试上限、幂等提交与回退路径，
     否则 Coordinator 仍可能绕过业务门禁。
+40. C1-A 默认使用 Mock Coordinator；真实模型下的提问质量、轮次长度与费用尚未验证，
+    C1-B 接入真实规划工具后必须重新校准追问上限与预算。
+41. 旧 Worker 的迟到结果由条件 UPDATE + 租约/版本 fence 丢弃，但被中断的 running run
+    要等 sweep 周期才会重排；期间该 run 不会被第二个 Worker 领取，表现为短暂停滞。
+42. `novel_runs` 的状态迁移白名单目前只覆盖 C1-A 的 `ask_user` / `finish`；
+    C1-B 引入 `waiting_approval` 或新工具时必须新增 migration，不允许绕过 CHECK。
 
 ---
 
@@ -530,6 +583,10 @@ D-038 C1 采用纵向切片交付：C1-A 起每个阶段同时交付最小 UI、
 D-039 Agent 与工作流是同一系统的角色层/控制层，不是两张平行清单：
       Coordinator 只负责动态语义路由；每个 tool 内部使用固定 guard → execute → validate
       → commit 工作流；状态迁移、质量门禁、回退、重试、取消、幂等和事务提交由代码决定。
+D-040 C1-A 只注册 ask_user / finish，且不产生 waiting_approval；
+      Coordinator 输出必须同时通过 JSON Schema 与业务语义校验（ask 必须有 1–6 个不重复选项，
+      finish 必须给原因）；Runtime 拒绝未注册工具、非法状态和超预算动作；
+      step / call append-only，旧 Worker 的迟到结果整事务丢弃。
 ```
 
 ---

@@ -23,7 +23,13 @@ export type JsonPrimitive = string | number | boolean | null;
 
 /** 受支持的 Schema 子集。 */
 export interface JsonSchema {
-  readonly type?: JsonSchemaType;
+  /**
+   * 允许联合类型（例如 `['string', 'null']`）。
+   *
+   * 这不是 oneOf：联合只表达"值可以是其中任一类型"，
+   * 长度 / 数值等约束只作用于实际命中的那个类型。
+   */
+  readonly type?: JsonSchemaType | readonly JsonSchemaType[];
   readonly enum?: readonly JsonPrimitive[];
   readonly properties?: Readonly<Record<string, JsonSchema>>;
   readonly required?: readonly string[];
@@ -81,6 +87,53 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function normalizeType(raw: unknown, path: string): readonly JsonSchemaType[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw === 'string') {
+    if (!TYPES.has(raw as JsonSchemaType)) {
+      throw schemaError(path, 'type 不合法');
+    }
+    return [raw as JsonSchemaType];
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw schemaError(path, 'type 必须是非空字符串或非空类型数组');
+  }
+  const seen = new Set<JsonSchemaType>();
+  for (const item of raw) {
+    if (typeof item !== 'string' || !TYPES.has(item as JsonSchemaType)) {
+      throw schemaError(path, 'type 数组包含不支持的类型');
+    }
+    if (seen.has(item as JsonSchemaType)) {
+      throw schemaError(path, 'type 数组存在重复类型');
+    }
+    seen.add(item as JsonSchemaType);
+  }
+  return raw as readonly JsonSchemaType[];
+}
+
+function matchesType(value: unknown, type: JsonSchemaType): boolean {
+  switch (type) {
+    case 'object':
+      return isPlainObject(value);
+    case 'array':
+      return Array.isArray(value);
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'null':
+      return value === null;
+    default:
+      return false;
+  }
+}
+
 function isPrimitive(value: unknown): value is JsonPrimitive {
   return (
     value === null ||
@@ -105,14 +158,12 @@ export function assertJsonSchema(schema: unknown, path = '$'): asserts schema is
     }
   }
 
-  const type = schema['type'];
+  const rawType = schema['type'];
   const hasEnum = schema['enum'] !== undefined;
-  if (type === undefined && !hasEnum) {
+  if (rawType === undefined && !hasEnum) {
     throw schemaError(path, '必须声明 type 或 enum');
   }
-  if (type !== undefined && (typeof type !== 'string' || !TYPES.has(type as JsonSchemaType))) {
-    throw schemaError(path, 'type 不合法');
-  }
+  const type = normalizeType(rawType, path);
 
   if (hasEnum) {
     const values = schema['enum'];
@@ -163,7 +214,7 @@ export function assertJsonSchema(schema: unknown, path = '$'): asserts schema is
   }
 
   const items = schema['items'];
-  if (type === 'array') {
+  if (type?.includes('array')) {
     if (items === undefined) {
       throw schemaError(path, 'array 必须声明 items');
     }
@@ -224,8 +275,14 @@ export function validateJson(schema: JsonSchema, value: unknown, path = '$'): re
     }
   }
 
-  const type = schema.type;
+  const rawType = schema.type;
+  if (rawType === undefined) {
+    return issues;
+  }
+  const types: readonly JsonSchemaType[] = typeof rawType === 'string' ? [rawType] : rawType;
+  const type = types.find((candidate) => matchesType(value, candidate));
   if (type === undefined) {
+    issues.push({ path, message: '类型不匹配' });
     return issues;
   }
 

@@ -286,3 +286,53 @@ export {
   type StartChapterDraftInput,
   type ValidatedDraft,
 } from './chapter/index.js';
+
+export {
+  DEFAULT_NOVEL_MAX_STEPS,
+  INITIAL_NOVEL_STATE_SUMMARY,
+  MAX_NOVEL_ANSWER_LENGTH,
+  MAX_NOVEL_REQUEST_LENGTH,
+  MAX_NOVEL_STEPS_LIMIT,
+  NOVEL_ACTIVE_STATUSES,
+  NOVEL_ALLOWED_TOOLS,
+  NOVEL_RUN_STATUSES,
+  NOVEL_TERMINAL_STATUSES,
+  isNovelRunStatus,
+  isNovelTerminalStatus,
+  parseNovelStateSummary,
+  type NovelRunCreated,
+  type NovelRunStateSummary,
+  type NovelRunStatus,
+  type NovelRunView,
+  type NovelTerminalStatus,
+  type NovelToolName,
+} from './novel/types.js';
+
+export {
+  NOVEL_COORDINATOR_AGENT,
+  NOVEL_COORDINATOR_INPUT_SCHEMA,
+  NOVEL_COORDINATOR_OUTPUT_SCHEMA,
+  validateNovelCoordinatorAction,
+  type NovelActionIssue,
+  type NovelCoordinatorAction,
+  type NovelCoordinatorInput,
+} from './novel/coordinator-agent.js';
+
+export { createNovelCoordinatorMockProvider } from './novel/coordinator-mock-provider.js';
+
+export {
+  NOVEL_TOOL_WORKFLOWS,
+  getNovelToolWorkflow,
+  type NovelToolContext,
+  type NovelToolResult,
+  type NovelToolSideEffect,
+  type NovelToolWorkflow,
+} from './novel/tool-workflows.js';
+
+export {
+  NovelCoordinatorWorker,
+  type NovelCoordinatorWorkerOptions,
+  type NovelRunOutcome,
+} from './novel/runtime.js';
+
+export { answerNovelRun, cancelNovelRun, readNovelRun, startNovelRun } from './novel/service.js';

@@ -97,6 +97,11 @@ export type ApiErrorCode =
   | 'REVIEW_NOT_FOUND'
   // 章节摘要（A2-D-D）：该版本还没有成功落盘的摘要
   | 'SUMMARY_NOT_FOUND'
+  // Coordinator 问答（C1-A）：不存在 / 版本冲突 / 回答冲突 / 状态不允许
+  | 'NOVEL_RUN_NOT_FOUND'
+  | 'NOVEL_RUN_VERSION_CONFLICT'
+  | 'NOVEL_RUN_ANSWER_CONFLICT'
+  | 'NOVEL_RUN_INVALID_STATE'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -146,6 +151,10 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CONTINUITY_FACT_ALREADY_DECIDED: '该事实候选已做出不同决定，不能改判',
   REVIEW_NOT_FOUND: '该候选还没有审阅结果',
   SUMMARY_NOT_FOUND: '该版本还没有摘要',
+  NOVEL_RUN_NOT_FOUND: '小说创作问答不存在',
+  NOVEL_RUN_VERSION_CONFLICT: '问答版本已更新，请刷新后重试',
+  NOVEL_RUN_ANSWER_CONFLICT: '该版本已提交过不同回答，请刷新后重试',
+  NOVEL_RUN_INVALID_STATE: '当前状态不允许该操作',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -1343,4 +1352,172 @@ export async function fetchChapterVersionSummary(
     }
     throw error;
   }
+}
+
+/* ---------------------------------------------------------- Coordinator 问答（C1-A） */
+
+/** 一轮问答状态（与数据库 CHECK / Worker 状态机一致）。 */
+export type NovelRunStatus =
+  'queued' | 'running' | 'waiting_user' | 'completed' | 'failed' | 'cancelled';
+
+const NOVEL_RUN_STATUSES: readonly NovelRunStatus[] = [
+  'queued',
+  'running',
+  'waiting_user',
+  'completed',
+  'failed',
+  'cancelled',
+];
+
+/** 运行中 / 等待回答属于"未结束"，页面需要继续轮询。 */
+export function isNovelRunStatus(value: unknown): value is NovelRunStatus {
+  return typeof value === 'string' && (NOVEL_RUN_STATUSES as readonly string[]).includes(value);
+}
+
+/** 只读视图：不含 stateSummary、租约、provider、prompt 或调用日志。 */
+export interface NovelRunView {
+  readonly runId: string;
+  readonly status: NovelRunStatus;
+  readonly version: number;
+  readonly currentGoal: string;
+  readonly decisionSummary: string;
+  readonly question: string | null;
+  readonly options: readonly string[];
+  readonly stepCount: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** 创建接口的最小返回契约。 */
+export interface NovelRunCreated {
+  readonly runId: string;
+  readonly status: NovelRunStatus;
+  readonly version: number;
+}
+
+/** 响应形状不合契约时抛出的内部错误（不会把畸形字段带到界面）。 */
+class NovelRunPayloadError extends Error {
+  constructor() {
+    super('小说问答响应不合法');
+    this.name = 'NovelRunPayloadError';
+  }
+}
+
+function parseNovelRunView(value: unknown): NovelRunView {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new NovelRunPayloadError();
+  }
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw['runId'] !== 'string' ||
+    !isNovelRunStatus(raw['status']) ||
+    typeof raw['version'] !== 'number' ||
+    typeof raw['currentGoal'] !== 'string' ||
+    typeof raw['decisionSummary'] !== 'string' ||
+    (raw['question'] !== null && typeof raw['question'] !== 'string') ||
+    !Array.isArray(raw['options']) ||
+    raw['options'].some((option) => typeof option !== 'string') ||
+    typeof raw['stepCount'] !== 'number' ||
+    typeof raw['createdAt'] !== 'string' ||
+    typeof raw['updatedAt'] !== 'string'
+  ) {
+    throw new NovelRunPayloadError();
+  }
+  return {
+    runId: raw['runId'],
+    status: raw['status'],
+    version: raw['version'],
+    currentGoal: raw['currentGoal'],
+    decisionSummary: raw['decisionSummary'],
+    question: raw['question'],
+    options: raw['options'] as readonly string[],
+    stepCount: raw['stepCount'],
+    createdAt: raw['createdAt'],
+    updatedAt: raw['updatedAt'],
+  };
+}
+
+function parseNovelRunCreated(value: unknown): NovelRunCreated {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new NovelRunPayloadError();
+  }
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw['runId'] !== 'string' ||
+    !isNovelRunStatus(raw['status']) ||
+    typeof raw['version'] !== 'number'
+  ) {
+    throw new NovelRunPayloadError();
+  }
+  return { runId: raw['runId'], status: raw['status'], version: raw['version'] };
+}
+
+async function readNovelRunResponse(
+  path: string,
+  init: { method?: string; body?: unknown; signal?: AbortSignal },
+): Promise<NovelRunView> {
+  const { body } = await apiRequest(path, init);
+  try {
+    return parseNovelRunView(body);
+  } catch (error) {
+    if (error instanceof NovelRunPayloadError) {
+      throw new ApiError('INTERNAL_ERROR', 500);
+    }
+    throw error;
+  }
+}
+
+/** 创建一轮 Coordinator 问答（`requestText` 是作者目标纯文本）。 */
+export async function startNovelRun(
+  requestText: string,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<NovelRunCreated> {
+  const { body } = await apiRequest('/api/novel-runs', {
+    method: 'POST',
+    body: { requestText },
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  try {
+    return parseNovelRunCreated(body);
+  } catch (error) {
+    if (error instanceof NovelRunPayloadError) {
+      throw new ApiError('INTERNAL_ERROR', 500);
+    }
+    throw error;
+  }
+}
+
+/** 读取当前作者的一轮问答。 */
+export function fetchNovelRun(
+  runId: string,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<NovelRunView> {
+  return readNovelRunResponse(
+    `/api/novel-runs/${encodeURIComponent(runId)}`,
+    options.signal === undefined ? { method: 'GET' } : { method: 'GET', signal: options.signal },
+  );
+}
+
+/** 提交作者回答（`expectedVersion` 用于乐观并发）。 */
+export function submitNovelRunAnswer(
+  runId: string,
+  input: { readonly expectedVersion: number; readonly answer: string },
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<NovelRunView> {
+  return readNovelRunResponse(`/api/novel-runs/${encodeURIComponent(runId)}/answer`, {
+    method: 'POST',
+    body: { expectedVersion: input.expectedVersion, answer: input.answer },
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+}
+
+/** 取消一轮问答（非终态幂等）。 */
+export function cancelNovelRun(
+  runId: string,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<NovelRunView> {
+  return readNovelRunResponse(`/api/novel-runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
 }

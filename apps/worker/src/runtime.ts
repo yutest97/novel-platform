@@ -15,6 +15,8 @@ import {
   createChapterReviewWorkflow,
   createChapterSummaryWorkflow,
   createModelProvider,
+  createNovelCoordinatorMockProvider,
+  NovelCoordinatorWorker,
   readProviderConfig,
   WorkflowKernel,
   WorkflowRegistry,
@@ -28,13 +30,16 @@ import { readWorkerRuntimeConfig, type WorkerRuntimeConfig } from './config.js';
 /** 装配结果（不启动任何循环 / 端口）。 */
 export interface WorkerRuntime {
   readonly provider: ModelProvider;
+  readonly novelProvider: ModelProvider;
   readonly config: WorkerRuntimeConfig;
   readonly runner: WorkerRunner;
+  readonly novelRunner: NovelCoordinatorWorker;
 }
 
-/** 测试注入点：默认 `createModelProvider`，生产不传。 */
+/** 测试注入点：默认 `createModelProvider` / Coordinator Mock，生产不传。 */
 export interface WorkerRuntimeDeps {
   readonly createProvider?: (config: ProviderRuntimeConfig) => ModelProvider;
+  readonly createNovelProvider?: (config: ProviderRuntimeConfig) => ModelProvider;
 }
 
 /**
@@ -60,6 +65,15 @@ export function createWorkerRuntime(
         ? createChapterMockProvider()
         : createModelProvider(providerConfig);
 
+  // C1-A：Coordinator 只做语义决策，Mock 输出必须符合 Coordinator Schema，
+  // 因此与章节流水线的 Mock 分开构造；真实 Provider 复用同一配置。
+  const novelProvider =
+    deps.createNovelProvider !== undefined
+      ? deps.createNovelProvider(providerConfig)
+      : providerConfig.kind === 'mock'
+        ? createNovelCoordinatorMockProvider()
+        : createModelProvider(providerConfig);
+
   const registry = new WorkflowRegistry();
   registry.register(createChapterDraftWorkflow({ db, provider }));
   // A2-C-B：候选审阅是独立任务，与正文生成共用同一个 Provider 实例。
@@ -78,5 +92,17 @@ export function createWorkerRuntime(
     sweepIntervalMs: config.sweepIntervalMs,
   });
 
-  return { provider, config, runner };
+  // C1-A：Coordinator 轮询与 generation task 轮询共用一个 supervisor 策略，
+  // 由 index.ts 启动独立循环，任一循环永久失败都退出进程。
+  const novelRunner = new NovelCoordinatorWorker(db, {
+    provider: novelProvider,
+    ...(config.workerId === undefined ? {} : { workerId: `${config.workerId}:novel` }),
+    leaseMs: config.leaseMs,
+    ...(config.heartbeatIntervalMs === undefined
+      ? {}
+      : { heartbeatIntervalMs: config.heartbeatIntervalMs }),
+    sweepIntervalMs: config.sweepIntervalMs,
+  });
+
+  return { provider, novelProvider, config, runner, novelRunner };
 }

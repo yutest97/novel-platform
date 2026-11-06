@@ -55,6 +55,7 @@ model User {
   itemEvents ItemEvent[] @relation("ItemEventCreatedBy")
   chapterVersions ChapterVersion[] @relation("ChapterVersionCreatedBy")
   chapterFactDecisions ChapterFactDecision[] @relation("UserChapterFactDecisions")
+  novelRuns NovelRun[] @relation("NovelRunAuthor")
 
   @@map("users")
 }
@@ -151,9 +152,12 @@ model Work {
   chapterReviewRuns ChapterReviewRun[] @relation("WorkChapterReviewRuns")
   chapterSummaries ChapterSummary[] @relation("WorkChapterSummaries")
   chapterFactDecisions ChapterFactDecision[] @relation("WorkChapterFactDecisions")
+  novelRuns NovelRun[]
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
+  /// 供 novel_runs 的复合外键引用（work 必须属于同一 author）
+  @@unique([id, authorId])
   @@index([authorId, updatedAt])
   @@map("works")
 }
@@ -729,4 +733,104 @@ model ChapterSummary {
   @@unique([sourceVersionId])
   @@index([chapterId, createdAt])
   @@map("chapter_summaries")
+}
+
+/// 小说创作运行（C1-A）。
+///
+/// - 一次作者问答只对应一行；`state_version` 是作者回答 / Worker 提交的乐观并发基线；
+/// - `state_summary` 只放**调度摘要**（已知事实摘要、待答问题、产物版本引用等），
+///   不放大纲 / 人物 / 正文全文，也不放 prompt、模型原始响应或密钥；
+/// - 租约与状态迁移由迁移里的 CHECK + 触发器兜底；
+/// - `max_steps` 是本轮问答的硬预算；`step_count` 只统计已提交步骤；
+/// - 终态（completed / failed / cancelled）由 `completed_at` 自洽标记。
+model NovelRun {
+  id                    String    @id @default(uuid()) @db.Uuid
+  authorId              String    @map("author_id") @db.Uuid
+  /// C1-A 固定为 NULL；后续阶段才允许关联作品。
+  workId                String?   @map("work_id") @db.Uuid
+  /// queued | running | waiting_user | waiting_approval | completed | failed | cancelled
+  status                String    @default("queued")
+  requestText           String    @map("request_text")
+  stateSummary          Json      @default("{}") @map("state_summary")
+  stateVersion          Int       @default(0) @map("state_version")
+  currentGoal           String    @default("") @map("current_goal")
+  lastDecisionSummary   String    @default("") @map("last_decision_summary")
+  stepCount             Int       @default(0) @map("step_count")
+  maxSteps              Int       @default(20) @map("max_steps")
+  lockedBy              String?   @map("locked_by")
+  leaseUntil            DateTime? @map("lease_until") @db.Timestamptz(3)
+  heartbeatAt           DateTime? @map("heartbeat_at") @db.Timestamptz(3)
+  cancelRequestedAt     DateTime? @map("cancel_requested_at") @db.Timestamptz(3)
+  completedAt           DateTime? @map("completed_at") @db.Timestamptz(3)
+  createdAt             DateTime  @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  author User             @relation("NovelRunAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  work   Work?            @relation(fields: [workId, authorId], references: [id, authorId], onDelete: Restrict)
+  steps  NovelRunStep[]
+  calls  NovelAgentCall[]
+
+  @@index([authorId, updatedAt])
+  @@index([status, createdAt])
+  @@index([status, leaseUntil])
+  @@map("novel_runs")
+}
+
+/// Coordinator 已提交步骤（C1-A，append-only）。
+///
+/// - `decision` 只保存**通过语义校验**的结构化 action；
+/// - `output_summary` 只保存安全展示摘要（问题 / 选项 / finish 原因）；
+/// - failed step 的 `error_code` 必填，succeeded step 必填 NULL；
+/// - UPDATE / DELETE 由触发器拒绝。
+model NovelRunStep {
+  id            String   @id @default(uuid()) @db.Uuid
+  runId         String   @map("run_id") @db.Uuid
+  stepNo        Int      @map("step_no")
+  decision      Json
+  toolName      String   @map("tool_name")
+  /// SHA-256(hex)，64 位；不含 prompt / 原始响应
+  inputHash     String   @map("input_hash")
+  outputSummary Json     @map("output_summary")
+  /// succeeded | failed
+  status        String
+  errorCode     String?  @map("error_code")
+  createdAt     DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  finishedAt    DateTime @default(dbgenerated("clock_timestamp()")) @map("finished_at") @db.Timestamptz(3)
+
+  run   NovelRun         @relation(fields: [runId], references: [id], onDelete: Restrict)
+  calls NovelAgentCall[]
+
+  @@unique([runId, stepNo])
+  /// 供 novel_agent_calls 的复合外键引用（step 必须属于同一 run）
+  @@unique([id, runId])
+  @@map("novel_run_steps")
+}
+
+/// 实际模型调用日志（C1-A，append-only）。
+///
+/// 每次实际 Coordinator 模型调用恰好一行；不保存 prompt、原始响应或密钥。
+/// `step_id` 为空表示该次尝试失败且没有形成可提交步骤。
+model NovelAgentCall {
+  id               String   @id @default(uuid()) @db.Uuid
+  runId            String   @map("run_id") @db.Uuid
+  stepId           String?  @map("step_id") @db.Uuid
+  /// C1-A 只允许 coordinator
+  callKind         String   @map("call_kind")
+  agentName        String   @map("agent_name")
+  agentVersion     String   @map("agent_version")
+  provider         String
+  model            String
+  promptTokens     Int      @default(0) @map("prompt_tokens")
+  completionTokens Int      @default(0) @map("completion_tokens")
+  latencyMs        Int      @default(0) @map("latency_ms")
+  success          Boolean
+  errorCode        String?  @map("error_code")
+  createdAt        DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  run  NovelRun     @relation(fields: [runId], references: [id], onDelete: Restrict)
+  step NovelRunStep? @relation(fields: [stepId, runId], references: [id, runId], onDelete: Restrict)
+
+  @@index([runId, createdAt])
+  @@index([stepId])
+  @@map("novel_agent_calls")
 }

@@ -27,7 +27,7 @@ import { WorkerConfigError } from './config.js';
 import { safeWorkerLoopErrorCode } from './loop-errors.js';
 import { createWorkerRuntime } from './runtime.js';
 import { startHealthServer } from './server.js';
-import { WorkerLoopSupervisor } from './supervisor.js';
+import { mergeWorkerLoopSnapshots, WorkerLoopSupervisor } from './supervisor.js';
 
 /** 关闭总时限：超时强制退出，未完成的任务交给租约回收。 */
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -60,15 +60,23 @@ function main(): void {
   // 避免缺表 / 连接串等信息直接进入 stdout/stderr。
   const db = getPrismaClient({ log: [] });
   const runtime = createWorkerRuntime(db);
-  const { config, provider, runner } = runtime;
+  const { config, provider, novelProvider, runner, novelRunner } = runtime;
 
-  // supervisor 先创建（starting），健康检查读取它的实时快照。
+  // 两条独立循环：generation tasks 与 novel runs。共享同一 supervisor 语义，
+  // 健康检查合并两者快照（任一永久失败即 503 / 退出进程）。
   const supervisor = new WorkerLoopSupervisor({
     runner,
     pollIntervalMs: config.pollIntervalMs,
     logger,
   });
-  const server = startHealthServer(config.port, { loopState: () => supervisor.snapshot() });
+  const novelSupervisor = new WorkerLoopSupervisor({
+    runner: novelRunner,
+    pollIntervalMs: config.pollIntervalMs,
+    logger,
+  });
+  const server = startHealthServer(config.port, {
+    loopState: () => mergeWorkerLoopSnapshots([supervisor.snapshot(), novelSupervisor.snapshot()]),
+  });
 
   let shuttingDown = false;
 
@@ -91,7 +99,9 @@ function main(): void {
     shuttingDown = true;
     // stopping 必须先于关闭健康端口，避免关闭窗口里仍显示 ready。
     supervisor.stop();
+    novelSupervisor.stop();
     runner.stop();
+    novelRunner.stop();
     console.log(`[worker] 收到 ${signal}，停止领取新任务……`);
 
     // 总时限兜底：包括"正在执行的任务"在内，超过时限一律强制退出。
@@ -104,7 +114,7 @@ function main(): void {
     await closeHealthServer();
 
     try {
-      await workerLoop;
+      await Promise.all([workerLoop, novelLoop]);
     } catch (error) {
       console.warn(`[worker] 轮询循环异常结束，code=${safeWorkerLoopErrorCode(error)}`);
     }
@@ -124,17 +134,31 @@ function main(): void {
     .run()
     .then((result) => {
       if (result.status === 'failed') {
-        console.error(`[worker] 轮询循环永久失败，code=${result.errorCode}`);
+        console.error(`[worker] 生成任务轮询永久失败，code=${result.errorCode}`);
         void shutdown('WORKER_LOOP_FAILED', 1);
       }
     })
     .catch((error: unknown) => {
-      console.error(`[worker] 轮询 supervisor 异常，code=${safeWorkerLoopErrorCode(error)}`);
+      console.error(`[worker] 生成任务 supervisor 异常，code=${safeWorkerLoopErrorCode(error)}`);
       void shutdown('WORKER_SUPERVISOR_ERROR', 1);
+    });
+
+  const novelLoop = novelSupervisor
+    .run()
+    .then((result) => {
+      if (result.status === 'failed') {
+        console.error(`[worker] 小说问答轮询永久失败，code=${result.errorCode}`);
+        void shutdown('WORKER_NOVEL_LOOP_FAILED', 1);
+      }
+    })
+    .catch((error: unknown) => {
+      console.error(`[worker] 小说问答 supervisor 异常，code=${safeWorkerLoopErrorCode(error)}`);
+      void shutdown('WORKER_NOVEL_SUPERVISOR_ERROR', 1);
     });
 
   console.log(
     `[worker] 运行参数：id=${runner.id} provider=${provider.name} model=${provider.defaultModel} ` +
+      `novelProvider=${novelProvider.name} novelModel=${novelProvider.defaultModel} ` +
       `lease=${config.leaseMs}ms poll=${config.pollIntervalMs}ms sweep=${config.sweepIntervalMs}ms`,
   );
 

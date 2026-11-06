@@ -12,7 +12,7 @@
  * 数据库或基础设施问题。
  */
 
-import type { WorkerLogger, WorkerRunner } from '@novel/workflow';
+import type { WorkerLogger } from '@novel/workflow';
 
 import { isRetryableWorkerLoopError, safeWorkerLoopErrorCode } from './loop-errors.js';
 
@@ -33,9 +33,14 @@ export interface WorkerLoopSnapshot {
 export type WorkerLoopExit =
   { readonly status: 'stopped' } | { readonly status: 'failed'; readonly errorCode: string };
 
+/** supervisor 只关心 runOnce 是否正常返回；generation / novel 两种循环都可传入。 */
+export interface WorkerLoopRunner {
+  runOnce(): Promise<string>;
+}
+
 export interface WorkerLoopSupervisorOptions {
-  /** 只需要 runOnce；WorkerRunner 或测试替身均可。 */
-  readonly runner: Pick<WorkerRunner, 'runOnce'>;
+  /** 只需要 runOnce；WorkerRunner、NovelCoordinatorWorker 或测试替身均可。 */
+  readonly runner: WorkerLoopRunner;
   /** 空队列轮询间隔（健康轮询后的等待）。 */
   readonly pollIntervalMs: number;
   readonly logger: WorkerLogger;
@@ -49,6 +54,55 @@ export interface WorkerLoopSupervisorOptions {
 const DEFAULT_MIN_RETRY_MS = 1_000;
 const DEFAULT_MAX_RETRY_MS = 5_000;
 
+/** 循环状态严重度：合并多个循环时取最严重的一个。 */
+const LOOP_STATE_SEVERITY: Record<WorkerLoopState, number> = {
+  ready: 0,
+  starting: 1,
+  retrying: 2,
+  stopping: 3,
+  failed: 4,
+};
+
+/**
+ * 合并多个轮询循环快照（generation task 与 novel runs 各一个）。
+ *
+ * 任一循环永久失败即整体 failed；任一循环退避即整体 retrying；
+ * 只有全部 ready 才 ready。错误码只保留最严重循环的非空值。
+ */
+export function mergeWorkerLoopSnapshots(
+  snapshots: readonly WorkerLoopSnapshot[],
+): WorkerLoopSnapshot {
+  if (snapshots.length === 0) {
+    return {
+      state: 'starting',
+      consecutiveFailures: 0,
+      errorCode: null,
+      nextRetryMs: null,
+      lastSuccessAt: null,
+    };
+  }
+  let merged = snapshots[0] as WorkerLoopSnapshot;
+  for (const snapshot of snapshots.slice(1)) {
+    const severity = LOOP_STATE_SEVERITY[snapshot.state];
+    const mergedSeverity = LOOP_STATE_SEVERITY[merged.state];
+    const lastSuccessAt =
+      [merged.lastSuccessAt, snapshot.lastSuccessAt]
+        .filter((value): value is string => value !== null)
+        .sort()[0] ?? null;
+    merged = {
+      state: severity >= mergedSeverity ? snapshot.state : merged.state,
+      consecutiveFailures: Math.max(merged.consecutiveFailures, snapshot.consecutiveFailures),
+      errorCode:
+        severity >= mergedSeverity
+          ? (snapshot.errorCode ?? merged.errorCode)
+          : (merged.errorCode ?? snapshot.errorCode),
+      nextRetryMs: Math.max(merged.nextRetryMs ?? 0, snapshot.nextRetryMs ?? 0) || null,
+      lastSuccessAt,
+    };
+  }
+  return merged;
+}
+
 function assertPositive(value: number, field: string): number {
   if (!Number.isInteger(value) || value < 1) {
     throw new Error(`${field} 必须是正整数`);
@@ -57,7 +111,7 @@ function assertPositive(value: number, field: string): number {
 }
 
 export class WorkerLoopSupervisor {
-  private readonly runner: Pick<WorkerRunner, 'runOnce'>;
+  private readonly runner: WorkerLoopRunner;
   private readonly pollIntervalMs: number;
   private readonly minRetryMs: number;
   private readonly maxRetryMs: number;

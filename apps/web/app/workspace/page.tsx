@@ -20,6 +20,7 @@ import {
   formatDateTime,
   messageOf,
   roleLabel,
+  startNovelRun,
   type WorkSummary,
 } from '@/lib/api';
 import { handleSessionError } from '@/lib/session-errors';
@@ -46,6 +47,11 @@ export default function WorkspacePage(): React.ReactElement {
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
   const [notice, setNotice] = useState('');
+
+  // C1-A：先与 Coordinator 动态问答，再进入正式创作；此处只收集目标纯文本。
+  const [novelGoal, setNovelGoal] = useState('');
+  const [novelBusy, setNovelBusy] = useState(false);
+  const [novelError, setNovelError] = useState('');
 
   const loadWorks = useCallback(async (): Promise<void> => {
     try {
@@ -135,6 +141,36 @@ export default function WorkspacePage(): React.ReactElement {
     }
   }
 
+  async function handleStartNovel(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (novelBusy) {
+      return;
+    }
+    const goal = novelGoal.trim();
+    if (goal === '') {
+      setNovelError('请先写下你想写的小说目标');
+      return;
+    }
+    if (goal.length > 2000) {
+      setNovelError('小说目标不能超过 2000 个字符');
+      return;
+    }
+
+    setNovelBusy(true);
+    setNovelError('');
+    try {
+      const created = await startNovelRun(goal);
+      void refreshSession();
+      router.push(`/novel-runs/${created.runId}`);
+    } catch (caught) {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      setNovelError(messageOf(caught));
+      setNovelBusy(false);
+    }
+  }
+
   if (state.status === 'loading') {
     return (
       <main className="page">
@@ -177,6 +213,43 @@ export default function WorkspacePage(): React.ReactElement {
             {formatDateTime(session.idleExpiresAt)}
           </dd>
         </dl>
+      </div>
+
+      <div className="card" data-testid="novel-start-card">
+        <h2>写新小说</h2>
+        <p className="hint">
+          先告诉 Coordinator 你想写什么，它会一次问一个问题，逐步确认题材、主角与目标。
+        </p>
+        <form onSubmit={(event) => void handleStartNovel(event)} noValidate>
+          <div className="field">
+            <label htmlFor="novel-goal">小说目标</label>
+            <textarea
+              id="novel-goal"
+              name="requestText"
+              rows={4}
+              maxLength={2000}
+              value={novelGoal}
+              onChange={(event) => setNovelGoal(event.target.value)}
+              data-testid="novel-goal-input"
+            />
+          </div>
+
+          {novelError === '' ? null : (
+            <p className="alert alert--error" role="alert" data-testid="novel-start-error">
+              {novelError}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={novelBusy}
+            aria-busy={novelBusy}
+            data-testid="novel-start-submit"
+          >
+            {novelBusy ? '提交中…' : '开始问答'}
+          </button>
+        </form>
       </div>
 
       <div className="card">
