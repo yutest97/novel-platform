@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v2.3
+- 版本：v2.4
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -2167,3 +2167,58 @@ GET /api/works/:workId/chapters/:chapterId/versions/:versionId/summary
 
 摘要 UI（版本阅读器里的摘要展示）、手动重试 / 重建、摘要回写正文、
 Reviewer UI 修改、事实 UI、migration、RAG / 图谱。
+
+## 31. A2-D-E：章节版本摘要展示 UI
+
+> 在章节工作台的正式版本区展示**所选版本**已落库的摘要。
+> 只读展示：不改后端、不触发摘要任务、不重试 / 重建、不写回正文。
+
+### 31.1 数据流
+
+```
+选中正式版本（版本列表 / 采纳后自动选中 / 恢复后刷新）
+  ├─ GET /versions/:versionId               （正文，既有）
+  └─ GET /versions/:versionId/summary       （摘要，A2-D-D）
+       ├─ 200 → 版本摘要卡片（版本号 + 生成时间 + 纯文本摘要）
+       ├─ 404 SUMMARY_NOT_FOUND → 信息态
+       └─ 5xx / 解析失败 → 读取失败 + 局部「重新读取」
+```
+
+- 摘要**按版本**读取：v1 / v2 / v3 各自展示自己的摘要，不会被最新版覆盖；
+- 摘要状态只存在组件内存（`useState`），不写 `localStorage` / `sessionStorage`、不进 URL；
+- 不轮询：接口只有 404 一种"没有"语义，无法据此判断"正在生成"。
+
+### 31.2 旧请求隔离
+
+- 请求身份是**单调序号**（`summarySeqRef`），不是 `versionId`：
+  「同一版本重新读取」与「v2 → v1 → v2 切回」都会得到相同 id，只有序号能区分；
+- 每次加载 / 切换 / 手动重试都自增，并 `abort` 上一次在途请求；
+- 旧请求（序号过期）完全静默：不写 summary / error，也不改变 loading；
+- 组件卸载时中止在途请求。
+
+### 31.3 状态文案
+
+| 条件 | 文案 | 色调 |
+| --- | --- | --- |
+| 加载中 | 正在读取版本摘要… | info |
+| 成功 | 版本摘要 + `版本 vN · 生成于 …` + 摘要正文 | ok |
+| 404 `SUMMARY_NOT_FOUND` | 该版本暂无摘要 / 摘要可能仍在生成、生成失败，或定稿时模型未配置。 | muted |
+| 5xx / 解析失败 | 版本摘要读取失败 + 局部「重新读取」 | danger |
+| 尚未读取 / 未知状态 | 尚未读取版本摘要 / 版本摘要状态未知 | muted |
+
+- 404 是**信息态**，不是红色错误：它同时可能是"仍在生成"、「生成失败」、「定稿时模型未配置」；
+- 未知状态回退到安全文案，不暴露内部枚举。
+
+### 31.4 展示与边界
+
+- 摘要正文用 React 文本节点渲染，`white-space: pre-wrap` 保留换行；
+  全链路无 `dangerouslySetInnerHTML`，`<script>` / `<img onerror>` 只作为文字显示；
+- 只显示版本号与生成时间，不显示 provider / model / task / prompt / requestId；
+- 长文本 `overflow-wrap: anywhere` + `min-width: 0`，移动端不横向撑破；
+- 摘要读取失败**不**关闭编辑器、不清空未保存草稿、不改变所选版本 / 正文 / diff /
+  恢复 / 定稿的可用性；摘要也不回写正文。
+
+### 31.5 未做
+
+摘要重试 / 重建、摘要写回正文、摘要任务状态查询（因此无轮询）、
+Reviewer UI 修改、事实 UI、RAG / 图谱、migration。

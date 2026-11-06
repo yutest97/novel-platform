@@ -891,6 +891,63 @@ fieldset.field legend {
   color: var(--muted);
 }
 
+/* --------------------------------------------------------------------------
+   版本摘要卡片（A2-D-E）
+   - 只做展示：颜色表达"有没有摘要"，不改变任何版本操作的可用性；
+   - 摘要正文 pre-wrap 保留换行，长文本自然换行，移动端不横向撑破。
+   -------------------------------------------------------------------------- */
+.summary-card {
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfc;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.summary-card--info {
+  border-left-color: #4a76a8;
+  background: #f4f7fb;
+}
+
+.summary-card--ok {
+  border-left-color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.summary-card--danger {
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.summary-card--muted {
+  background: #f7f8fa;
+}
+
+.summary-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.summary-card__head h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.summary-card__text {
+  margin: 0.45rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
 .version-list {
   list-style: none;
   margin: 0 0 1rem;

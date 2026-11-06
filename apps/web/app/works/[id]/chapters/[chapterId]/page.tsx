@@ -35,6 +35,7 @@ import {
   fetchChapterReview,
   fetchChapterVersion,
   fetchChapterVersionDiff,
+  fetchChapterVersionSummary,
   fetchChapterVersions,
   fetchGenerationTask,
   fetchWork,
@@ -47,6 +48,7 @@ import {
   type ChapterCandidateDetail,
   type ChapterDetail,
   type ChapterReviewView,
+  type ChapterSummaryRecord,
   type ChapterVersionDetail,
   type ChapterVersionDiff,
   type ChapterVersionListItem,
@@ -101,6 +103,13 @@ import {
   type PendingLeave,
 } from '@/lib/chapter-editor';
 import {
+  isCurrentSummaryRequest,
+  summaryBodyText,
+  summaryMetaLabel,
+  summaryPanelView,
+  type SummaryLoadState,
+} from '@/lib/chapter-summary-panel';
+import {
   nextReviewPollDelay,
   reviewCountsLabel,
   reviewPanelView,
@@ -125,6 +134,20 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [versions, setVersions] = useState<readonly ChapterVersionListItem[]>([]);
   const [selectedVersion, setSelectedVersion] = useState<ChapterVersionDetail | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
+
+  // 版本摘要（A2-D-E）：只读、按 versionId 读取；状态全在组件内存。
+  const [versionSummary, setVersionSummary] = useState<ChapterSummaryRecord | null>(null);
+  const [summaryState, setSummaryState] = useState<SummaryLoadState>('idle');
+  const [summaryError, setSummaryError] = useState('');
+  /**
+   * 摘要请求的单调序号（请求身份）。
+   *
+   * 版本 id 不足以区分"同一版本重新读取"与"v2 → v1 → v2 切回"：
+   * 两种情况都会得到相同 versionId，旧请求晚返回就会覆盖新状态。
+   * 每次加载 / 切换 / 手动重试都自增，只有最新序号可以写 summary / error / loading。
+   */
+  const summarySeqRef = useRef(0);
+  const summaryAbortRef = useRef<AbortController | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -216,6 +239,52 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const requestIdRef = useRef<{ readonly key: string; readonly id: string } | null>(null);
   const pollDelayRef = useRef(1_000);
 
+  /**
+   * 读取所选版本的摘要（A2-D-E）。
+   *
+   * 失败只影响摘要卡片：不关闭编辑器、不清空草稿、不改所选版本与正文。
+   * 旧请求（序号已过期）完全静默，并中止在途 fetch。
+   */
+  const loadVersionSummary = useCallback(
+    async (versionId: string): Promise<void> => {
+      const seq = ++summarySeqRef.current;
+      summaryAbortRef.current?.abort();
+      const controller = new AbortController();
+      summaryAbortRef.current = controller;
+      setVersionSummary(null);
+      setSummaryState('loading');
+      setSummaryError('');
+      try {
+        const next = await fetchChapterVersionSummary(workId, chapterId, versionId, {
+          signal: controller.signal,
+        });
+        if (!isCurrentSummaryRequest(seq, summarySeqRef.current)) {
+          return;
+        }
+        setVersionSummary(next);
+        setSummaryState('ready');
+      } catch (caught) {
+        if (!isCurrentSummaryRequest(seq, summarySeqRef.current)) {
+          return;
+        }
+        if (handleSessionError(caught, router)) {
+          return;
+        }
+        if (caught instanceof ApiError && caught.code === 'SUMMARY_NOT_FOUND') {
+          // 信息态：可能还在生成 / 生成失败 / 定稿时模型未配置。
+          setVersionSummary(null);
+          setSummaryError('');
+          setSummaryState('notfound');
+          return;
+        }
+        setVersionSummary(null);
+        setSummaryError(messageOf(caught));
+        setSummaryState('error');
+      }
+    },
+    [workId, chapterId, router],
+  );
+
   const openVersion = useCallback(
     async (versionId: string): Promise<void> => {
       setVersionLoading(true);
@@ -226,6 +295,8 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
         // 换版本后，上一条恢复 / 定稿错误不再对应当前选择。
         setRestoreError(null);
         setFinalizeError(null);
+        // 摘要按版本读取：与正文并行，不阻塞正文展示。
+        void loadVersionSummary(version.id);
       } catch (caught) {
         if (handleSessionError(caught, router)) {
           return;
@@ -235,7 +306,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
         setVersionLoading(false);
       }
     },
-    [workId, chapterId, router],
+    [workId, chapterId, router, loadVersionSummary],
   );
 
   /** 刷新章节详情与版本列表；`selectLatest` 用于采纳后自动选中最大版本。 */
@@ -256,6 +327,12 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       if (preferred === undefined) {
         setSelectedVersion(null);
         selectedVersionIdRef.current = null;
+        // 没有正式版本：摘要卡片回到初始态，旧请求作废。
+        summarySeqRef.current += 1;
+        summaryAbortRef.current?.abort();
+        setVersionSummary(null);
+        setSummaryState('idle');
+        setSummaryError('');
       } else {
         await openVersion(preferred.id);
       }
@@ -532,6 +609,14 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       void load();
     }
   }, [state.status, load]);
+
+  // 卸载时中止在途摘要请求（序号已不会再变，避免无意义的响应落地）。
+  useEffect(
+    () => () => {
+      summaryAbortRef.current?.abort();
+    },
+    [],
+  );
 
   /* ----------------------------- 轮询 ----------------------------- */
   const latestTask = detail?.latestTask ?? null;
@@ -1170,6 +1255,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     review,
     errorText: reviewError,
   });
+  const summaryPanel = summaryPanelView({ state: summaryState, errorText: summaryError });
   const reviewIssues = review?.run?.issues ?? [];
   const adoptCandidate =
     detail?.candidates.find((candidate) => candidate.id === adoptTargetId) ?? null;
@@ -1851,6 +1937,47 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
                     {selectedVersion.content}
                   </pre>
                 )}
+
+                <section
+                  className={`summary-card summary-card--${summaryPanel.tone}`}
+                  data-testid="version-summary"
+                  aria-live="polite"
+                >
+                  <div className="summary-card__head">
+                    <h4 data-testid="version-summary-title">{summaryPanel.text}</h4>
+                    {versionSummary === null ? null : (
+                      <span className="hint" data-testid="version-summary-meta">
+                        {summaryMetaLabel(
+                          versionSummary.versionNo,
+                          formatDateTime(versionSummary.createdAt),
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {summaryPanel.detail === '' ? null : (
+                    <p className="hint" data-testid="version-summary-detail">
+                      {summaryPanel.detail}
+                    </p>
+                  )}
+                  {summaryPanel.canRetry ? (
+                    <button
+                      type="button"
+                      className="btn-secondary btn-small"
+                      onClick={() => {
+                        void loadVersionSummary(selectedVersion.id);
+                      }}
+                      data-testid="version-summary-retry"
+                    >
+                      重新读取
+                    </button>
+                  ) : null}
+                  {/* 纯文本渲染：摘要可能包含 <、> 或 HTML 片段，绝不当作 HTML */}
+                  {versionSummary === null ? null : (
+                    <p className="summary-card__text" data-testid="version-summary-text">
+                      {summaryBodyText(versionSummary.summary)}
+                    </p>
+                  )}
+                </section>
               </div>
             )}
           </div>

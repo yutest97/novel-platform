@@ -1273,16 +1273,21 @@ export async function fetchChapterReview(
  * - 版本不属于该作品 / 章节、或该版本还没有摘要 → 404 `SUMMARY_NOT_FOUND`；
  * - 响应严格解析：字段缺失、摘要为空或超长、时间戳不可解析 → `INTERNAL_ERROR`；
  * - 不包含正文全文、generation task、provider / model 或 prompt。
+ *
+ * `options.signal` 可选（A2-D-E）：切换版本 / 离开页面时中止在途请求；
+ * 不传时行为与之前完全一致。
  */
 export async function fetchChapterVersionSummary(
   workId: string,
   chapterId: string,
   versionId: string,
+  options: { readonly signal?: AbortSignal } = {},
 ): Promise<ChapterSummaryRecord> {
   const { body } = await apiRequest(
     `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
       chapterId,
     )}/versions/${encodeURIComponent(versionId)}/summary`,
+    options.signal === undefined ? {} : { signal: options.signal },
   );
   try {
     return parseChapterVersionSummary(body);
