@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v2.5
+- 版本：v2.6
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -2291,3 +2291,78 @@ Reviewer UI 修改、事实 UI、RAG / 图谱、migration。
 
 事实接受 / 拒绝、批量决策、实体与物品事件写回、事实编辑、按候选查看 run 详情、
 自动重写 / 摘要重建、RAG / embedding / 图谱、migration、后端改动。
+
+## 33. A2-F-A：事实候选决策记录与 API
+
+> 让作者对成功事实候选记录终态决定（接受 / 拒绝）。
+> **只记录决定**：不写回人物 / 物品 / 势力 / 关系 / 境界，不创建或修改物品事件，
+> 不做批量、不做撤销 / 改判，也没有 UI。
+
+### 33.1 决策语义
+
+| decision | 语义 | 副作用 |
+| --- | --- | --- |
+| `accepted` | 可作为**后续写回**的输入 | 仅写 `chapter_fact_decisions` 一行 + 一条审计 |
+| `rejected` | 明确不采纳该候选 | 同上 |
+
+- 决定是**终态**：`UNIQUE(candidate_id)` + append-only，数据库拒绝 UPDATE / DELETE；
+- 同决定重复提交 → 200 `deduplicated=true`（不新增行、不新增审计、`decidedAt` 不变）；
+- 不同决定 → 409 `CONTINUITY_FACT_ALREADY_DECIDED`，**不翻转**；
+- 首次决定 → 201。
+
+### 33.2 接口
+
+```text
+POST /api/works/:workId/chapters/:chapterId/facts/:candidateId/decision
+{ "decision": "accepted" | "rejected" }
+```
+
+```json
+{
+  "decision": {
+    "candidateId": "uuid",
+    "decision": "accepted",
+    "decidedAt": "ISO-8601",
+    "deduplicated": false
+  }
+}
+```
+
+- 请求体严格白名单：只有 `decision`；缺字段 / `null` / 非字符串 /
+  `accepted` 之外的取值（含大小写变体）一律 400，不做"默认接受"；
+- 写接口**校验 Origin**（`INVALID_ORIGIN` 403）；未登录 401、管理员 403；
+- 作者必须拥有作品：他人作品 404；跨作品 / 跨章节 / 随机候选 404（不区分）；
+- 只允许**成功 run** 的候选（失败 run 从不产生候选，这里是防御性拒绝）；
+- 只允许**当前定稿**且候选所属版本仍是**当前最新正式版本**的候选，
+  否则 409 `CONTINUITY_FACT_DECISION_STALE`；
+- 响应只含 `candidateId / decision / decidedAt / deduplicated`：
+  不含 payload、summary / reason、正文、prompt、模型原始响应或 provider / model。
+
+### 33.3 事务、并发与审计
+
+`runWorkWrite` 作品级 advisory lock 内一次完成：
+
+1. `requireOwnedWork`；
+2. 候选归属（`id + work_id + chapter_id`）与 run 状态；
+3. 章节状态与最新版本；
+4. 已有决定（幂等 / 冲突）；
+5. 插入决定 + 写审计 `continuity.fact_decided`（同一事务，审计失败整体回滚）。
+
+- 审计 `detail` 固定 5 个键：`workId / chapterId / sourceVersionId / candidateId /
+  decision`；**不含** payload、summary / reason、正文或模型响应；
+- 并发同决定：一个 201、一个 200 幂等，数据库一行、审计一条；
+- 并发不同决定：一个 201、一个 409，仍只有一行；
+- 死锁 / 序列化失败 → 409 `CONCURRENT_MODIFICATION`。
+
+### 33.4 数据边界
+
+- 决策表没有正文、payload 副本、prompt 或密钥列；
+- 接受**不会**修改实体、属性、关系、境界或物品事件：E2E / 集成测试对
+  实体快照、属性快照、物品事件数量、章节状态、版本数量逐一比对；
+- 决策不改变章节状态与版本：人工 revision 后旧候选的决定保留为历史记录，
+  但**不能再做新决定**（STALE）。
+
+### 33.5 未做
+
+实体 / 物品事件写回、批量决定、撤销 / 改判、决策 UI、决策历史视图、
+自动采纳、事实候选质量评估、RAG / embedding / 图谱。

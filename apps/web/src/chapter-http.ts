@@ -8,9 +8,11 @@
 
 import { AuthError } from '@novel/auth';
 import {
+  CHAPTER_FACT_DECISIONS,
   CHAPTER_FACT_TYPES,
   MAX_CONTRACT_TARGET_WORDS,
   MIN_CONTRACT_TARGET_WORDS,
+  type ChapterFactDecisionValue,
   type ChapterFactType,
   type ChapterStyle,
 } from '@novel/workflow';
@@ -315,4 +317,25 @@ export function readFactListFilter(request: Request): {
     throw new AuthError('VALIDATION_FAILED', 'factType 不是合法的事实类型');
   }
   return { factType: value as ChapterFactType };
+}
+
+/** 事实候选决策的允许字段（A2-F-A）：只有 `decision`。 */
+export const FACT_DECISION_FIELDS = ['decision'] as const;
+
+/**
+ * 读取决策值（A2-F-A）。
+ *
+ * - 必须显式出现，`null` / 缺字段一律 400；
+ * - 只接受 `accepted` / `rejected`；其它字符串、布尔、对象全部 400；
+ * - 不在这里推断默认值：沉默的"默认接受"是不可接受的语义。
+ */
+export function requireFactDecision(body: Record<string, unknown>): ChapterFactDecisionValue {
+  if (!Object.prototype.hasOwnProperty.call(body, 'decision')) {
+    throw new AuthError('VALIDATION_FAILED', '缺少字段 decision');
+  }
+  const value = body['decision'];
+  if (typeof value !== 'string' || !(CHAPTER_FACT_DECISIONS as readonly string[]).includes(value)) {
+    throw new AuthError('VALIDATION_FAILED', 'decision 必须是 accepted 或 rejected');
+  }
+  return value as ChapterFactDecisionValue;
 }

@@ -588,6 +588,42 @@ run 进入 `succeeded / failed` 终态后不能再追加问题，避免 `issue_c
 > 任务侧沿用 `generation_tasks`（`chapter.summarize`）+ `llm_call_logs`，
 > 不另造运行状态机；摘要成功 / 失败都不写 `audit_logs`。
 
+### 3.14 chapter_fact_decisions（A2-F-A 实现口径）
+
+> 以迁移 `20261106110000_a2f_fact_decisions` 与
+> `packages/workflow/src/chapter/fact-decision.ts` 为准。决策是**记录**：
+> 接受只表示"可作为后续写回输入"，**不修改任何实体或物品事件**。
+
+**chapter_fact_decisions**：作者对一条成功事实候选的终态决定。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| work_id / chapter_id / source_version_id | uuid | 归属三件套 |
+| candidate_id | uuid | 被决定的候选 |
+| decision | text | `accepted` / `rejected`（CHECK 白名单） |
+| decided_by | uuid FK→users(id) | 只能来自会话的作者 |
+| decided_at | timestamptz | 数据库时钟 |
+
+约束：
+
+- `UNIQUE(candidate_id)`：每个候选最多一条决定；
+- 复合外键：`(chapter_id, work_id) → chapters(id, work_id)`、
+  `(source_version_id, chapter_id, work_id) → chapter_versions(id, chapter_id, work_id)`、
+  `(candidate_id, source_version_id, chapter_id, work_id) →
+  chapter_fact_candidates(id, source_version_id, chapter_id, work_id)`。
+  最后一条让"决定指向候选 A、却把版本 / 章节 / 作品写成另一个合法组合"直接被拒绝；
+  为此给 `chapter_fact_candidates` 增加了身份唯一键
+  `(id, source_version_id, chapter_id, work_id)`（id 已是主键，属冗余但必需的约束）；
+- **append-only**：UPDATE / DELETE 一律由触发器拒绝；撤销 / 改判是独立产品能力，
+  当前不提供；
+- 表里没有正文、payload 副本、prompt、模型原始响应或密钥列。
+
+> 服务层规则（不在数据库层表达）：只允许**成功 run** 的候选、只允许
+> **当前定稿且该版本仍是最新正式版本**的候选；同决定重复提交幂等（不写审计），
+> 不同决定 409 `CONTINUITY_FACT_ALREADY_DECIDED`；首次决定写一条审计
+> `continuity.fact_decided`（detail 只有 ids 与 decision）。
+
 ---
 
 ## 4. 通用核心 vs 玄幻规则包（边界）

@@ -79,6 +79,13 @@ export {
   type ChapterReviewerOutput,
 } from './reviewer.js';
 export {
+  CHAPTER_FACT_DECISIONS,
+  decideChapterFact,
+  type ChapterFactDecisionResult,
+  type ChapterFactDecisionValue,
+  type DecideChapterFactInput,
+} from './fact-decision.js';
+export {
   MAX_CHAPTER_FACT_LIST,
   getChapterFactCandidate,
   getChapterFactRun,

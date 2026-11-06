@@ -51,6 +51,9 @@ export type AuthErrorCode =
   | 'CONTINUITY_EXTRACTION_LEASE_LOST'
   | 'CONTINUITY_FACTS_INVALID'
   | 'CONTINUITY_EXTRACTION_FAILED'
+  // 事实候选决策（A2-F-A）：候选已过期，或已做出不同决定
+  | 'CONTINUITY_FACT_DECISION_STALE'
+  | 'CONTINUITY_FACT_ALREADY_DECIDED'
   // Reviewer 结果只读接口（A2-C-D）：候选没有审阅任务，或归属不匹配
   | 'REVIEW_NOT_FOUND'
   // 章节版本摘要只读接口（A2-D-D）：该版本还没有成功落库的摘要
@@ -123,6 +126,10 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   CONTINUITY_FACTS_INVALID: 422,
   // Provider / 内部失败：可重试
   CONTINUITY_EXTRACTION_FAILED: 502,
+  // 决定已过期：章节不再定稿，或候选不是当前最新版本
+  CONTINUITY_FACT_DECISION_STALE: 409,
+  // 已做出相反决定：不翻转、不改判
+  CONTINUITY_FACT_ALREADY_DECIDED: 409,
   // 审阅结果不存在（含"不是你的作品 / 章节 / 候选"与"没有审阅任务"）
   REVIEW_NOT_FOUND: 404,
   // 摘要不存在（含"不是你的作品 / 章节 / 版本"与"尚未生成"）
@@ -183,6 +190,9 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   CONTINUITY_EXTRACTION_LEASE_LOST: '该连续性提取任务已由新的尝试接管',
   CONTINUITY_FACTS_INVALID: '模型输出的连续性事实不合法',
   CONTINUITY_EXTRACTION_FAILED: '连续性事实提取失败，请稍后重试',
+  // 区分两种 409：一个是"候选不再适用"，一个是"已做出相反决定"
+  CONTINUITY_FACT_DECISION_STALE: '该事实候选已过期：章节或版本已变化',
+  CONTINUITY_FACT_ALREADY_DECIDED: '该事实候选已做出不同决定，不能改判',
   // 统一 404：不区分"没有审阅结果"与"不是你的"，避免探测
   REVIEW_NOT_FOUND: '审阅结果不存在',
   // 同样统一 404，不区分"尚未生成"与"不是你的"

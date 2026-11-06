@@ -47,6 +47,7 @@ export const AUDIT_ACTIONS = {
   CHAPTER_VERSION_RESTORED: 'chapter.version_restored',
   CHAPTER_FINALIZED: 'chapter.finalized',
   CONTINUITY_FACTS_EXTRACTED: 'continuity.facts_extracted',
+  CONTINUITY_FACT_DECIDED: 'continuity.fact_decided',
 } as const;
 
 /** 审计动作类型。 */

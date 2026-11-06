@@ -54,6 +54,7 @@ model User {
   works     Work[]    @relation("WorkAuthor")
   itemEvents ItemEvent[] @relation("ItemEventCreatedBy")
   chapterVersions ChapterVersion[] @relation("ChapterVersionCreatedBy")
+  chapterFactDecisions ChapterFactDecision[] @relation("UserChapterFactDecisions")
 
   @@map("users")
 }
@@ -149,6 +150,7 @@ model Work {
   chapterVersions ChapterVersion[]
   chapterReviewRuns ChapterReviewRun[] @relation("WorkChapterReviewRuns")
   chapterSummaries ChapterSummary[] @relation("WorkChapterSummaries")
+  chapterFactDecisions ChapterFactDecision[] @relation("WorkChapterFactDecisions")
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -313,6 +315,7 @@ model Chapter {
   versions        ChapterVersion[]
   reviewRuns      ChapterReviewRun[] @relation("ChapterChapterReviewRuns")
   summaries       ChapterSummary[] @relation("ChapterChapterSummaries")
+  factDecisions   ChapterFactDecision[] @relation("ChapterChapterFactDecisions")
 
   @@unique([workId, chapterNo])
   /// 供 chapter_contracts / chapter_candidates 的复合外键引用
@@ -518,6 +521,8 @@ model ChapterVersion {
   /// 该正式版本生成的摘要（数据库 UNIQUE(source_version_id) 保证最多一条；
   /// Prisma 侧只能用数组表达复合外键，不额外造重复唯一索引）
   summaries       ChapterSummary[]
+  /// 该版本候选上的决定（append-only）
+  factDecisions   ChapterFactDecision[] @relation("VersionChapterFactDecisions")
 
   @@unique([chapterId, versionNo])
   @@unique([sourceCandidateId])
@@ -581,9 +586,46 @@ model ChapterFactCandidate {
 
   run ChapterFactRun @relation(fields: [runId, sourceVersionId, chapterId, workId], references: [id, sourceVersionId, chapterId, workId], onDelete: Restrict)
 
+  /// 作者对该候选的决定（数据库 UNIQUE(candidate_id) 保证最多一条；
+  /// Prisma 侧只能用数组表达复合外键，不额外造重复唯一索引）
+  decisions ChapterFactDecision[] @relation("CandidateChapterFactDecisions")
+
+  /// 供 decisions 的复合外键引用（id 已是主键，这里是冗余但必需的约束）
+  @@unique([id, sourceVersionId, chapterId, workId])
   @@index([runId])
   @@index([chapterId, factType])
   @@map("chapter_fact_candidates")
+}
+
+/// 章节事实候选的终态决定（A2-F-A）。
+///
+/// - **只记录决定**：接受只表示"可作为后续写回输入"，不修改任何实体 / 物品事件；
+/// - `UNIQUE(candidateId)`：每个候选最多一条决定；同决定重复提交幂等，
+///   不同决定拒绝（不提供改判 / 撤销）；
+/// - 复合外键绑定 candidate / chapter / sourceVersion / work：
+///   跨作品 / 跨章节 / 跨版本的组合由数据库直接拒绝；
+/// - append-only：UPDATE / DELETE 由触发器拒绝；
+/// - 表里没有正文、payload 副本、prompt 或模型原始响应。
+model ChapterFactDecision {
+  id              String   @id @default(uuid()) @db.Uuid
+  workId          String   @map("work_id") @db.Uuid
+  chapterId       String   @map("chapter_id") @db.Uuid
+  sourceVersionId String   @map("source_version_id") @db.Uuid
+  candidateId     String   @map("candidate_id") @db.Uuid
+  /// accepted | rejected
+  decision        String
+  decidedBy       String   @map("decided_by") @db.Uuid
+  decidedAt       DateTime @default(dbgenerated("clock_timestamp()")) @map("decided_at") @db.Timestamptz(3)
+
+  work          Work                 @relation("WorkChapterFactDecisions", fields: [workId], references: [id], onDelete: Restrict)
+  chapter       Chapter              @relation("ChapterChapterFactDecisions", fields: [chapterId, workId], references: [id, workId], onDelete: Restrict)
+  sourceVersion ChapterVersion       @relation("VersionChapterFactDecisions", fields: [sourceVersionId, chapterId, workId], references: [id, chapterId, workId], onDelete: Restrict)
+  candidate     ChapterFactCandidate @relation("CandidateChapterFactDecisions", fields: [candidateId, sourceVersionId, chapterId, workId], references: [id, sourceVersionId, chapterId, workId], onDelete: Restrict)
+  decidedByUser User                 @relation("UserChapterFactDecisions", fields: [decidedBy], references: [id], onDelete: Restrict)
+
+  @@unique([candidateId])
+  @@index([chapterId, decidedAt])
+  @@map("chapter_fact_decisions")
 }
 
 /// 章节候选审阅运行（A2-C-B）。

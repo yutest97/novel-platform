@@ -90,6 +90,9 @@ export type ApiErrorCode =
   | 'CONTINUITY_EXTRACTION_LEASE_LOST'
   | 'CONTINUITY_FACTS_INVALID'
   | 'CONTINUITY_EXTRACTION_FAILED'
+  // 事实候选决策（A2-F-A）
+  | 'CONTINUITY_FACT_DECISION_STALE'
+  | 'CONTINUITY_FACT_ALREADY_DECIDED'
   // 审阅结果（A2-C-D）：没有审阅任务 / 不属于该作品章节候选
   | 'REVIEW_NOT_FOUND'
   // 章节摘要（A2-D-D）：该版本还没有成功落盘的摘要
@@ -139,6 +142,8 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CONTINUITY_EXTRACTION_LEASE_LOST: '该连续性提取任务已由新的尝试接管',
   CONTINUITY_FACTS_INVALID: '模型输出的连续性事实不合法',
   CONTINUITY_EXTRACTION_FAILED: '连续性事实提取失败，请稍后重试',
+  CONTINUITY_FACT_DECISION_STALE: '该事实候选已过期：章节或版本已变化',
+  CONTINUITY_FACT_ALREADY_DECIDED: '该事实候选已做出不同决定，不能改判',
   REVIEW_NOT_FOUND: '该候选还没有审阅结果',
   SUMMARY_NOT_FOUND: '该版本还没有摘要',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
@@ -1208,6 +1213,39 @@ export async function fetchChapterFactCandidate(
     `${chapterFactsBasePath(workId, chapterId)}/${encodeURIComponent(candidateId)}`,
   );
   return body as ChapterFactCandidateDetail;
+}
+
+/** 事实候选决定的取值。 */
+export type ChapterFactDecisionValue = 'accepted' | 'rejected';
+
+/** 决定结果（**不含 payload / 正文**）。 */
+export interface ChapterFactDecisionResult {
+  readonly candidateId: string;
+  readonly decision: ChapterFactDecisionValue;
+  readonly decidedAt: string;
+  /** `true` 表示同一决定的幂等重试，没有新增行、没有新增审计。 */
+  readonly deduplicated: boolean;
+}
+
+/**
+ * 记录作者对一条事实候选的决定（A2-F-A，写接口）。
+ *
+ * - 只允许成功 run、当前定稿且仍是最新版本的候选；
+ * - 同决定重复提交 → `deduplicated=true`；不同决定 → 409，不翻转；
+ * - **不写回任何实体或物品事件**：接受只表示"可作为后续写回输入"；
+ * - 响应只含 candidateId / decision / decidedAt / deduplicated。
+ */
+export async function decideChapterFactFromApi(
+  workId: string,
+  chapterId: string,
+  candidateId: string,
+  decision: ChapterFactDecisionValue,
+): Promise<ChapterFactDecisionResult> {
+  const { body } = await apiRequest(
+    `${chapterFactsBasePath(workId, chapterId)}/${encodeURIComponent(candidateId)}/decision`,
+    { method: 'POST', body: { decision } },
+  );
+  return (body as { decision: ChapterFactDecisionResult }).decision;
 }
 
 /** 读取一次提取运行的状态（不含 `attemptToken` 与原始错误消息）。 */
