@@ -3,8 +3,8 @@
 - 更新日期：2026-11-06
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；产品入口转向 N1 新建小说向导，N1-A 为下一阶段；
-  事实写回与高级审阅门禁后移
+- 当前产品阶段：A1 / A2 已验收；产品入口转向 C1 单 Coordinator Agent 创作运行时，
+  C1-A 为下一阶段；事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -214,14 +214,15 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-产品方向已根据作者反馈重新收敛：现有“先建作品再逐章生成”的入口不再是最终体验。
-下一步进入 **N1 新建小说向导**，先交付 N1-A：
+产品方向已根据作者选择重新收敛：只保留一个语义调度中心——Coordinator Agent。
+现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
+硬编码小说创作阶段顺序。
 
-`docs/tasks/N1-A-novel-blueprint-wizard.md`
+完整方案：`docs/plans/C1-coordinator-agent-runtime.md`。
 
-完整方案：`docs/plans/N1-novel-creation-wizard.md`。
+下一张实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（执行方 Trae）。
 
-事实写回、摘要批量视图、高级 Reviewer 门禁均后移到 N1-A/N1-B/N1-C 之后。
+事实写回、摘要批量视图、高级 Reviewer 门禁均后移到 C1 阶段之后。
 
 A2 的 Agent 功能链已经通过 CI #25：
 
@@ -419,7 +420,7 @@ A2-F-C 附带把 A2-E E2E 的「事实区没有任何接受 / 拒绝 / 写回入
     这是"旧响应不覆盖新列表"的取舍，与 A2-E 的筛选行为一致。
 34. 现有入口仍是“先建作品、再逐章生成”，世界观和人物通过设定中心手工维护；
     缺少作者期望的“核心创意 → 世界观 → 人物 → 全书/分卷/章节大纲 → 开始写作”
-    统一向导。N1-A 先修入口与数据，N1-B 才接 AI 生成。
+    动态创作入口。C1-A 先交付 Coordinator Runtime，C1-B 再接入故事规划 Agent。
 
 ---
 
@@ -485,6 +486,9 @@ D-034 回显只给 `value + decidedAt`：`decidedBy` 不外露，异常 `value`
 D-035 凭据处理不进入仓库工具：本地 E2E 的共享口令轮换由既有测试流程
       （`admin-flow` / `item-events-flow` + `.e2e-author.json`）处理，
       不新增读取口令文件、改写账号口令的脚本；单文件重跑以干净库为前提。
+D-036 用户明确选择单 Coordinator Agent：Coordinator 是唯一决定小说创作下一步的语义调度中心；
+      WorkflowKernel 降级为持久化、租约、重试、幂等、工具执行和作者确认门禁。
+      旧固定 N1 八步向导方案废弃；动态动作仍受 Runtime 白名单、预算和作者确认约束。
 ```
 
 ---

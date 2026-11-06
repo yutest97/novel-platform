@@ -35,9 +35,13 @@
 
 ## 3. 核心架构不可擅自改变
 
-- 工作流是控制层：步骤顺序、状态迁移、租约、重试、取消、幂等、门禁和落库由代码决定；
+- 现有固定工作流仍由代码控制步骤顺序、状态迁移、租约、重试、取消、幂等、门禁和落库；
+- C1 小说创作使用**单 Coordinator Agent** 作为唯一语义调度中心：Coordinator 输出
+  结构化下一步 action，Runtime 校验工具白名单、预算、状态迁移和作者确认后执行；
 - Agent 是语义节点：只把结构化输入变成严格 Schema 的结构化输出；
-- Agent 不直接访问数据库、不决定下一步、不自动采纳、不自动写回实体；
+- 除 Coordinator 外，Agent 不决定下一步；
+- Agent 不直接访问数据库、不自动采纳、不自动写回实体；
+- Coordinator 不直接访问数据库，也不绕过 Runtime 或作者确认；
 - 作者是最终签发者：正文候选、事实候选、检查建议都必须由作者确认；
 - PostgreSQL 是任务状态和正文版本的权威来源，不使用文件式 `status.md`；
 - 正式正文版本 append-only；
@@ -58,9 +62,11 @@
 - A2：Reviewer Agent、Summarizer Agent；
 - FactExtractor 已在 A2-A/A2-B 提前完成后端能力，只产出候选；
 - A3：Consistency Agent、检索与图谱（按实际需要）；
+- C1：单 Coordinator Agent 调度小说创作，专用 Agent 作为其受控工具；
 - Reviewer 默认应以结构化问题提示为主，不应直接替代作者做最终采纳决定；
 - Summarizer 只处理正式定稿版本，输出必须幂等、可追溯；
-- 不允许 Agent 间自由对话、自选下一步或无限自动重写。
+- 不允许专用 Agent 间自由对话、自选下一步或无限自动重写；
+- Coordinator 的动态调度必须有动作白名单、步骤/token 预算、重复动作熔断和作者确认门禁。
 
 ## 6. 实现要求
 
