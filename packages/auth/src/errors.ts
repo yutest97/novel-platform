@@ -53,6 +53,8 @@ export type AuthErrorCode =
   | 'CONTINUITY_EXTRACTION_FAILED'
   // Reviewer 结果只读接口（A2-C-D）：候选没有审阅任务，或归属不匹配
   | 'REVIEW_NOT_FOUND'
+  // 章节版本摘要只读接口（A2-D-D）：该版本还没有成功落库的摘要
+  | 'SUMMARY_NOT_FOUND'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -123,6 +125,8 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   CONTINUITY_EXTRACTION_FAILED: 502,
   // 审阅结果不存在（含"不是你的作品 / 章节 / 候选"与"没有审阅任务"）
   REVIEW_NOT_FOUND: 404,
+  // 摘要不存在（含"不是你的作品 / 章节 / 版本"与"尚未生成"）
+  SUMMARY_NOT_FOUND: 404,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -181,6 +185,8 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   CONTINUITY_EXTRACTION_FAILED: '连续性事实提取失败，请稍后重试',
   // 统一 404：不区分"没有审阅结果"与"不是你的"，避免探测
   REVIEW_NOT_FOUND: '审阅结果不存在',
+  // 同样统一 404，不区分"尚未生成"与"不是你的"
+  SUMMARY_NOT_FOUND: '章节摘要不存在',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

@@ -4,7 +4,7 @@
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
 - 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E 均本地完成，待复审**
+  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -183,7 +183,7 @@ Agent 产出候选
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
 | A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 只读 API + A2-C-E 结果展示 UI 均本地完成** |
-| A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）本地完成；**A2-D-C `priorSummaries` 接线本地完成待复审** |
+| A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）/ A2-D-C `priorSummaries` 本地完成；**A2-D-D 摘要只读 API 本地完成待复审**（无 UI） |
 | A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
@@ -199,7 +199,7 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E
+A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D
 均已在本地完成，等待负责人复审：
 
 - `docs/tasks/A2-C-B-REV-01-review-integrity.md`（已完成修复的追溯记录，不再派发）
@@ -209,13 +209,14 @@ A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-
 - `docs/tasks/A2-D-C-prior-summaries.md`（Reviewer 前章摘要接线）
 - `docs/tasks/A2-C-D-review-results-api.md`（Reviewer 结果只读 API）
 - `docs/tasks/A2-C-E-review-ui.md`（Reviewer 结果展示 UI）
+- `docs/tasks/A2-D-D-summary-read-api.md`（章节版本摘要只读 API）
 
-A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E 的本地实现已通过代码复审；当前等待整体复审 / CI。
+A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D 的本地实现已通过代码复审；
+当前等待整体复审 / CI。
 
 复审通过前不推送。复审通过后的候选顺序：
 
-1. 摘要读取 API（卡已备：`docs/tasks/A2-D-D-summary-read-api.md`；
-   摘要已落库、Reviewer 已在用，但作者看不到）；摘要 UI 随后单独开卡；
+1. 摘要 UI（读接口已就绪：版本阅读器展示对应版本的摘要）；
 2. A2-E 事实候选只读审阅 UI；
 3. 是否给 high severity 加采纳门禁——仍需产品确认；
 4. 是否允许作者手动重新检查（当前每次生成只审一次，UI 只提供"重新读取"）。
@@ -267,7 +268,7 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **1011**（web 358 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **1026**（web 373 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | 浏览器 E2E | **127** |
 | migrations | **13** |
 | 数据表 | **23** |
@@ -281,8 +282,9 @@ A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`�
 A2-D-C 新增 12 个 workflow 用例（前章摘要选择规则）；
 A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 响应解析用例（`chapter-review-view.test.ts`）；A2-C-E 再新增 17 个面板纯函数用例
-（`chapter-review-panel.test.ts`）与 9 个浏览器 E2E（`chapter-review-ui.spec.ts`），
-因此 web **358**、全量 **1011**、E2E **127**。
+（`chapter-review-panel.test.ts`）与 9 个浏览器 E2E（`chapter-review-ui.spec.ts`）；
+A2-D-D 再新增 7 个摘要只读 API 用例（`chapter-summary-api.test.ts`）与 8 个
+响应解析用例（`chapter-summary-view.test.ts`），因此 web **373**、全量 **1026**、E2E **127**。
 
 最近新增质量门禁：
 
@@ -300,7 +302,9 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 - 审阅结果只读接口按 `work + chapter + taskType + requestId + 快照 candidateId` 五重定位，
   run / issues 用 RepeatableRead 同快照读取；只回显白名单错误码与三步名；
 - UI 侧以**单调序号**（不是候选 id）作审阅请求身份，旧请求 / 旧轮询一律静默；
-  evidence 与 suggestion 全程纯文本渲染，high severity 不改变采纳可用性。
+  evidence 与 suggestion 全程纯文本渲染，high severity 不改变采纳可用性；
+- 摘要只读接口按 `source_version_id + chapter_id + work_id` 三条件定位，
+  历史版本读自己的摘要；HTTP 层只回显 8 个字段，无正文 / 任务 / provider。
 
 ---
 
@@ -320,8 +324,8 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 10. 每次正文生成都会多出一个 `chapter.review` 任务，Worker 吞吐与真实模型成本相应增加；
 11. `summarizer.chapter@1.0.0` 只有契约，摘要既不落库也无人消费；真实摘要质量与
     长度分布尚未经过样本验证；
-12. 摘要已落库但**没有读取接口 / UI**，作者看不到；Reviewer 侧已在 A2-D-C 接线
-    （覆盖范围限制见风险 16）；
+12. 摘要已有只读 API（A2-D-D），但**没有 UI**：作者仍需直接请求接口才能看到；
+    Reviewer 侧已在 A2-D-C 接线（覆盖范围限制见风险 16）；
 13. 定稿后再人工 revision 会让已排队的旧摘要任务以
     `SUMMARY_CHAPTER_NOT_FINALIZED` / `SOURCE_VERSION_STALE` 失败（预期行为，
     但会在任务列表里留下失败记录，后续需要只读 UI 时要注意展示口径）；
@@ -335,7 +339,11 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 18. 候选预览期间会按 1s → 2s → 5s 轮询审阅结果：单作者单页面可接受，但多候选反复预览
     会产生额外只读请求；页面隐藏后不会继续安排轮询，但隐藏瞬间已排定的一个请求仍可能完成；
 19. 审阅面板只覆盖"当前选中的候选"：候选列表本身不显示审阅徽标，作者仍需逐个预览才能
-    看到有没有问题。
+    看到有没有问题；
+20. 摘要接口只有 404 一种"没有"语义：前端无法区分"摘要任务还在排队"与"从未生成"，
+    做 UI 时需要额外查询 `chapter.summarize` 任务状态，或接受统一文案；
+21. 历史版本摘要可读，但**没有列表接口**：作者必须知道版本 id 才能查询，
+    做 UI 时需要按版本逐个请求（当前没有批量能力）。
 
 ---
 
@@ -374,6 +382,10 @@ D-021 Reviewer 结果只做展示：面板不改正文、不写存储、不参�
       high / medium / low 都不禁用采纳，只有读取失败才提供"重新读取"（同一候选的重试）。
 D-022 审阅请求身份用单调序号而非候选 id（同一候选重新读取 / 切换后再切回 id 相同）；
       旧请求与旧轮询必须完全静默，不得覆盖新候选的 review / error / loading。
+D-023 摘要按 sourceVersionId 定位，不按"当前最新版本"：历史版本必须读到自己的摘要；
+      查询必须同时带 chapter_id + work_id，缺失任一条件都可能跨章节 / 跨作品泄漏。
+D-024 摘要只读接口只回显 8 个字段（id / chapterId / sourceVersionId / versionNo /
+      summary / agentName / agentVersion / createdAt），不返回任务、provider / model、正文。
 ```
 
 ---

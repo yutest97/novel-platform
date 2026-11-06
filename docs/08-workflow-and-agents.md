@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v2.2
+- 版本：v2.3
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -2105,3 +2105,65 @@ high severity 采纳门禁、摘要读取 API / UI、事实 UI、migration、RAG
 
 手动重检 / 重试 / 取消审阅、high severity 采纳门禁、自动重写正文、
 摘要读取 API / UI、事实 UI、后端 / migration 修改。
+
+## 30. A2-D-D：章节版本摘要只读 API
+
+> 让作者读到某个**正式版本**已成功生成的摘要。
+> **只读**：不触发摘要任务、不重试、不重建，也不写审计；不做 UI。
+
+### 30.1 接口
+
+```text
+GET /api/works/:workId/chapters/:chapterId/versions/:versionId/summary
+```
+
+```json
+{
+  "summary": {
+    "id": "uuid",
+    "chapterId": "uuid",
+    "sourceVersionId": "uuid",
+    "versionNo": 3,
+    "summary": "章节摘要",
+    "agentName": "summarizer.chapter",
+    "agentVersion": "1.0.0",
+    "createdAt": "ISO-8601"
+  }
+}
+```
+
+- 摘要按 **`sourceVersionId`** 定位：历史版本读到的是**那个版本**的摘要，
+  不会被"当前最新版本"的摘要替换；
+- `versionNo` 由 `chapter_versions` 关联读取（JOIN），不信任客户端或记忆中的版本号；
+- 只返回已成功落库的摘要行；不返回 generation task、provider / model、prompt、
+  租约或正文全文；
+- `summary` 已由数据库 CHECK 保证 1..1000 且非空；
+- 响应头 `Cache-Control: no-store`（沿用 `authJson`）。
+
+### 30.2 查询与 404 语义
+
+实现：`packages/workflow/src/chapter/summary-read.ts` 的
+`getChapterVersionSummaryForAuthor`。
+
+1. `requireOwnedWork`（会话里的作者 id）→ 他人作品 404 `NOT_FOUND`；
+2. `requireChapterInWork` → 章节不属于作品 404 `NOT_FOUND`；
+3. 单条查询同时取摘要与版本号，`where` 必须同时满足
+   `source_version_id + chapter_id + work_id`：只按来源版本会让跨章节 / 跨作品
+   读到别人的摘要；`chapter_summaries` 的复合外键
+   `(source_version_id, chapter_id, work_id)` 保证三者一致；
+4. 任一不满足（含"版本存在但还没有摘要""任务仍在排队 / 失败 / 被取消"）→
+   统一 404 `SUMMARY_NOT_FOUND`，不区分"尚未生成"与"不是你的"。
+
+### 30.3 前端
+
+`apps/web/src/lib/chapter-summary-view.ts` + `fetchChapterVersionSummary()`：
+
+- 严格解析：字段缺失 / 空串、`versionNo` 非正整数、`createdAt` 不可解析、
+  摘要超长（>1000）→ 整份拒绝，收敛为 `ApiError('INTERNAL_ERROR')`；
+- 404 保留 `SUMMARY_NOT_FOUND`，文案"该版本还没有摘要"；
+- 只读接口不做 Origin 校验（与其它只读 GET 一致）；**本轮不加任何 UI 状态**。
+
+### 30.4 未做
+
+摘要 UI（版本阅读器里的摘要展示）、手动重试 / 重建、摘要回写正文、
+Reviewer UI 修改、事实 UI、migration、RAG / 图谱。

@@ -89,6 +89,11 @@ export {
   type ChapterFactView,
 } from './fact-read.js';
 export {
+  getChapterVersionSummaryForAuthor,
+  type ChapterSummaryRecordView,
+  type GetChapterVersionSummaryInput,
+} from './summary-read.js';
+export {
   REVIEW_RUN_STATUSES,
   REVIEW_TASK_STATUSES,
   REVIEW_TASK_STEPS,

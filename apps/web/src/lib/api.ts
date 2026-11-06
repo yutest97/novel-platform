@@ -17,6 +17,11 @@ import {
   parseChapterReview,
   type ChapterReviewView,
 } from './chapter-review-view';
+import {
+  SummaryPayloadError,
+  parseChapterVersionSummary,
+  type ChapterSummaryRecord,
+} from './chapter-summary-view';
 
 export type {
   ChapterDiffLine,
@@ -25,6 +30,7 @@ export type {
   ChapterDiffVersionRef,
   ChapterVersionDiff,
 } from './chapter-diff-view';
+export type { ChapterSummaryRecord } from './chapter-summary-view';
 export type {
   ChapterReviewIssueView,
   ChapterReviewRunView,
@@ -86,6 +92,8 @@ export type ApiErrorCode =
   | 'CONTINUITY_EXTRACTION_FAILED'
   // 审阅结果（A2-C-D）：没有审阅任务 / 不属于该作品章节候选
   | 'REVIEW_NOT_FOUND'
+  // 章节摘要（A2-D-D）：该版本还没有成功落盘的摘要
+  | 'SUMMARY_NOT_FOUND'
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突/死锁（HTTP 409）
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND'
@@ -132,6 +140,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   CONTINUITY_FACTS_INVALID: '模型输出的连续性事实不合法',
   CONTINUITY_EXTRACTION_FAILED: '连续性事实提取失败，请稍后重试',
   REVIEW_NOT_FOUND: '该候选还没有审阅结果',
+  SUMMARY_NOT_FOUND: '该版本还没有摘要',
   // 并发修改冲突：可重试提示，**不**触发登录跳转
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '目标不存在',
@@ -1246,6 +1255,39 @@ export async function fetchChapterReview(
     return parseChapterReview(body);
   } catch (error) {
     if (error instanceof ReviewPayloadError) {
+      throw new ApiError('INTERNAL_ERROR', 500);
+    }
+    throw error;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 章节版本摘要只读（A2-D-D）                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 读取某个正式版本已成功生成的章节摘要（只读，不触发摘要任务）。
+ *
+ * - 摘要按 `versionId`（sourceVersionId）定位：历史版本读到的是**那个版本**的摘要，
+ *   不会被当前最新版本的摘要替换；
+ * - 版本不属于该作品 / 章节、或该版本还没有摘要 → 404 `SUMMARY_NOT_FOUND`；
+ * - 响应严格解析：字段缺失、摘要为空或超长、时间戳不可解析 → `INTERNAL_ERROR`；
+ * - 不包含正文全文、generation task、provider / model 或 prompt。
+ */
+export async function fetchChapterVersionSummary(
+  workId: string,
+  chapterId: string,
+  versionId: string,
+): Promise<ChapterSummaryRecord> {
+  const { body } = await apiRequest(
+    `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
+      chapterId,
+    )}/versions/${encodeURIComponent(versionId)}/summary`,
+  );
+  try {
+    return parseChapterVersionSummary(body);
+  } catch (error) {
+    if (error instanceof SummaryPayloadError) {
       throw new ApiError('INTERNAL_ERROR', 500);
     }
     throw error;
