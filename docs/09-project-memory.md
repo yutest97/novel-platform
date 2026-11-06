@@ -4,7 +4,7 @@
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
 - 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A 均本地完成，待复审**
+  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A、A2-F-B 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -53,7 +53,9 @@
   两种空态与局部重读；**只读**，无接受 / 拒绝 / 写回入口；
 - 事实候选决策 API：`chapter_fact_decisions`（UNIQUE(candidate_id) + 复合外键 +
   append-only），接受 / 拒绝只记录决定，**不写回任何实体或物品事件**；
-  同决定幂等、不同决定 409、过期候选 409。
+  同决定幂等、不同决定 409、过期候选 409；
+- 事实列表 / 详情回显 `decision: { value, decidedAt } | null`（单条 SQL LEFT JOIN、
+  无 N+1），只暴露 value 与时间，不含 decidedBy。
 
 ### A2-C-A Reviewer Agent 契约（已验收）
 
@@ -190,7 +192,7 @@ Agent 产出候选
 | A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 只读 API + A2-C-E 结果展示 UI 均本地完成** |
 | A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）/ A2-D-C `priorSummaries` / A2-D-D 摘要只读 API / **A2-D-E 摘要展示 UI** 均本地完成待复审 |
 | A2-E | 事实候选只读审阅 UI | **本地完成待复审**：定稿最新版显式提取、六类筛选、total / truncated、两种空态、局部重试；无接受 / 写回 |
-| A2-F | 事实候选决策 | A2-F-A（记录 + API）**本地完成待复审**：接受 / 拒绝只记录、不写回；无 UI / 批量 / 改判 |
+| A2-F | 事实候选决策 | A2-F-A（记录 + API）+ A2-F-B（决策读取模型）**本地完成待复审**：接受 / 拒绝只记录、不写回；列表 / 详情回显 decision；无 UI / 批量 / 改判 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
 
 说明：
@@ -219,15 +221,16 @@ A2-D-E、A2-E 均已在本地完成，等待负责人复审：
 - `docs/tasks/A2-D-E-summary-ui.md`（章节版本摘要展示 UI）
 - `docs/tasks/A2-E-fact-candidates-ui.md`（事实候选只读审阅 UI）
 - `docs/tasks/A2-F-A-fact-decisions.md`（事实候选决策记录与 API）
+- `docs/tasks/A2-F-B-fact-decision-read.md`（事实决策状态读取模型）
 
-A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A 的本地实现
-已通过代码复审；当前等待整体复审 / CI。
+A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A、A2-F-B 的
+本地实现已通过代码复审；当前等待整体复审 / CI。
 
-复审通过前不推送。事实侧"提取 → 只读审阅 → 决策记录"已经闭环，复审通过后的候选顺序：
+复审通过前不推送。事实侧"提取 → 只读审阅 → 决策记录 → 决策回显"已经闭环，
+复审通过后的候选顺序：
 
-1. A2-F-B 事实决策状态读取模型（卡已备：
-   `docs/tasks/A2-F-B-fact-decision-read.md`）；完成后才能接决策 UI；
-2. 实体 / 物品事件 **写回**（A2-F-B 起）：需要先确认写回语义、冲突处理与可撤销性，
+1. 事实决策 **UI**（决策 API 与读取模型都已就绪，但没有按钮 / 已决标记）；
+2. 实体 / 物品事件 **写回**（A2-F-C 起）：需要先确认写回语义、冲突处理与可撤销性，
    当前接受只表示"可作为后续写回输入"；
 3. 摘要任务状态查询（现在 404 无法区分"仍在生成"，UI 只能给统一文案）；
 4. 事实 / 摘要的批量视图（当前都必须逐章、逐版本点开）；
@@ -281,7 +284,7 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **1094**（web 422 / workflow 357 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 全量单测 | **1108**（web 425 / workflow 368 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
 | 浏览器 E2E | **148** |
 | migrations | **14** |
 | 数据表 | **24** |
@@ -302,8 +305,10 @@ A2-D-D 再新增 7 个摘要只读 API 用例（`chapter-summary-api.test.ts`）
 A2-E 再新增 24 个事实面板纯函数用例（`chapter-facts-panel.test.ts`）与 12 个浏览器 E2E
 （`chapter-facts-ui.spec.ts`）；A2-F-A 再新增 19 个决策服务集成用例
 （`chapter-fact-decision.test.ts`）与 14 个决策 API 用例
-（`chapter-fact-decision-api.test.ts`），因此 web **422**、workflow **357**、
-全量 **1094**、E2E **148**（A2-F-A 不含 UI，E2E 未新增）。
+（`chapter-fact-decision-api.test.ts`）；A2-F-B 再新增 11 个决策读取集成用例
+（`chapter-fact-decision-read.test.ts`，含单条 SQL / 无 N+1 的计数代理守卫）
+与 3 个 HTTP 层决策回显用例（并入 `chapter-facts-api.test.ts`），
+因此 web **425**、workflow **368**、全量 **1108**、E2E **148**（A2-F-B 不含 UI）。
 
 最近新增质量门禁：
 
@@ -326,6 +331,8 @@ A2-E 再新增 24 个事实面板纯函数用例（`chapter-facts-panel.test.ts`
   提取入口同时受"定稿 + 最新版本 + 空闲"三重门禁；
 - 事实决策 `UNIQUE(candidate_id)` + 复合候选外键 + append-only：同决定幂等、
   不同决定 409、过期候选 409，数据库最多一行、审计最多一条；
+- 事实列表用单条 SQL LEFT JOIN 带出决策（不放大行数、不做 N+1），
+  测试用计数代理守卫「1 次 `$queryRaw`、0 次决定代理访问」；
 - 摘要只读接口按 `source_version_id + chapter_id + work_id` 三条件定位，
   历史版本读自己的摘要；HTTP 层只回显 8 个字段，无正文 / 任务 / provider；
 - 摘要卡片以**单调序号 + abort** 隔离旧请求，摘要正文走 React 文本节点（pre-wrap），
@@ -385,7 +392,13 @@ A2-E 再新增 24 个事实面板纯函数用例（`chapter-facts-panel.test.ts`
     真正写回实体 / 物品事件时仍需一方校验"决定仍有效"，否则可能出现
     "候选已过期但决定被当作最新"的错觉；
 29. 决策不区分"谁看过"：可以决定一条从未在 UI 展示过的候选（当前也没有 UI），
-    审计只记录决定本身，不记录来源（手动 / 批量 / 未来自动）。
+    审计只记录决定本身，不记录来源（手动 / 批量 / 未来自动）；
+30. 列表 / 详情回显的 `decision` 是**读取时快照**：页面拿到后不会自动刷新，
+    同一候选在别处被决定后，当前页面要重新读取才能看到（决策 UI 需要自带刷新策略）；
+31. 回显只有 `value` 与 `decidedAt`，没有 `decidedBy`：多人协作或未来引入编辑角色时，
+    无法从页面回答"这是谁决定的"（审计日志里有，但不对外开放）；
+32. 决定与候选一对一、候选按**章节**聚合：旧版本候选的 `decision` 仍会显示（历史记录），
+    但按 A2-F-A 已不能再对它做新决定——UI 必须自己区分"可决策"与"仅历史"。
 
 ---
 
@@ -444,6 +457,10 @@ D-031 决策 append-only 且不提供改判：同决定幂等（200 deduplicated
       不同决定 409；撤销 / 改判若要做，必须新开表或新开阶段，不复用这一行。
 D-032 决策只允许「成功 run + 当前定稿 + 该版本仍是最新」的候选，
       过期候选一律 409 STALE，即使此前已有决定也不再接受新的决定请求。
+D-033 决策状态通过**单条 SQL LEFT JOIN** 带出，不新增按候选的二次查询：
+      列表必须保持一次 `$queryRaw`，`total` 与集合仍在同一快照。
+D-034 回显只给 `value + decidedAt`：`decidedBy` 不外露，异常 `value`
+      只按"未决定"处理，绝不把数据库里的脏枚举带到界面。
 ```
 
 ---

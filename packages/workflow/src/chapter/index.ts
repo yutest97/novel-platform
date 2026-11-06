@@ -91,6 +91,7 @@ export {
   getChapterFactRun,
   listChapterFacts,
   type ChapterFactCandidateDetail,
+  type ChapterFactDecisionView,
   type ChapterFactListResult,
   type ChapterFactRunSummary,
   type ChapterFactView,

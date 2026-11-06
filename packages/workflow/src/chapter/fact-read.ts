@@ -13,6 +13,7 @@ import type { PrismaClient } from '@novel/db';
 import { normalizeUuid, requireOwnedWork } from '@novel/works';
 
 import type { ChapterFactType } from './facts.js';
+import { CHAPTER_FACT_DECISIONS, type ChapterFactDecisionValue } from './fact-decision.js';
 import { requireChapterInWork } from './service.js';
 
 /**
@@ -21,6 +22,16 @@ import { requireChapterInWork } from './service.js';
  * 超过时**不静默截断**：响应带 `truncated: true` 与完整 `total`。
  */
 export const MAX_CHAPTER_FACT_LIST = 200;
+
+/**
+ * 作者对该候选的决定（A2-F-B 读取模型）。
+ *
+ * 只暴露 `value` 与 `decidedAt`：不返回 `decidedBy`、payload 副本或任何内部字段。
+ */
+export interface ChapterFactDecisionView {
+  readonly value: ChapterFactDecisionValue;
+  readonly decidedAt: string;
+}
 
 /** 一条候选的对外视图（不含正文 / prompt / attempt_token）。 */
 export interface ChapterFactView {
@@ -36,6 +47,8 @@ export interface ChapterFactView {
   readonly name: string | null;
   readonly threadStatus: string | null;
   readonly createdAt: string;
+  /** `null` 表示作者尚未对该候选做决定。 */
+  readonly decision: ChapterFactDecisionView | null;
 }
 
 /** 候选列表结果。 */
@@ -120,9 +133,16 @@ export async function listChapterFacts(
             c."fact_type" AS "fact_type",
             c."payload" AS "payload",
             c."created_at" AS "created_at",
+            d."decision" AS "decision",
+            d."decided_at" AS "decided_at",
             COUNT(*) OVER() AS "total"
           FROM "chapter_fact_candidates" c
           JOIN "chapter_fact_runs" r ON r."id" = c."run_id"
+          -- 决定按 candidate + 作品 + 章节三重归属读取（UNIQUE(candidate_id) 保证 1:1）
+          LEFT JOIN "chapter_fact_decisions" d
+            ON d."candidate_id" = c."id"
+           AND d."work_id" = c."work_id"
+           AND d."chapter_id" = c."chapter_id"
           WHERE c."work_id" = ${workId}::uuid
             AND c."chapter_id" = ${chapterId}::uuid
             AND r."status" = 'succeeded'
@@ -137,9 +157,16 @@ export async function listChapterFacts(
             c."fact_type" AS "fact_type",
             c."payload" AS "payload",
             c."created_at" AS "created_at",
+            d."decision" AS "decision",
+            d."decided_at" AS "decided_at",
             COUNT(*) OVER() AS "total"
           FROM "chapter_fact_candidates" c
           JOIN "chapter_fact_runs" r ON r."id" = c."run_id"
+          -- 决定按 candidate + 作品 + 章节三重归属读取（UNIQUE(candidate_id) 保证 1:1）
+          LEFT JOIN "chapter_fact_decisions" d
+            ON d."candidate_id" = c."id"
+           AND d."work_id" = c."work_id"
+           AND d."chapter_id" = c."chapter_id"
           WHERE c."work_id" = ${workId}::uuid
             AND c."chapter_id" = ${chapterId}::uuid
             AND c."fact_type" = ${input.factType}
@@ -167,6 +194,8 @@ export async function listChapterFacts(
         factType: row.fact_type,
         payload: row.payload,
         createdAt: row.created_at,
+        decision: row.decision,
+        decidedAt: row.decided_at,
       },
       versionNos,
     ),
@@ -183,6 +212,9 @@ interface FactListRow {
   readonly fact_type: string;
   readonly payload: unknown;
   readonly created_at: Date;
+  /** LEFT JOIN 未命中时为 null。 */
+  readonly decision: string | null;
+  readonly decided_at: Date | null;
   readonly total: bigint;
 }
 
@@ -230,10 +262,24 @@ export async function getChapterFactCandidate(
     throw new AuthError('NOT_FOUND', '候选不存在');
   }
 
+  // 决定按 candidate + 作品 + 章节三重归属读取：只按 candidate 也能命中
+  // （candidate_id 全局唯一），但显式带上归属条件，避免将来放宽唯一性后跨章节泄漏。
+  const decision = await input.db.chapterFactDecision.findFirst({
+    where: { candidateId, chapterId, workId },
+    select: { decision: true, decidedAt: true },
+  });
+
   const versionNos = await loadVersionNos(input.db, workId, chapterId, [candidate.sourceVersionId]);
 
   return {
-    fact: toFactView(candidate, versionNos),
+    fact: toFactView(
+      {
+        ...candidate,
+        decision: decision?.decision ?? null,
+        decidedAt: decision?.decidedAt ?? null,
+      },
+      versionNos,
+    ),
     run: {
       runId: candidate.run.id,
       sourceVersionId: candidate.sourceVersionId,
@@ -331,6 +377,8 @@ interface CandidateRow {
   readonly factType: string;
   readonly payload: unknown;
   readonly createdAt: Date;
+  readonly decision: string | null;
+  readonly decidedAt: Date | null;
 }
 
 /** 候选 payload → 稳定视图（字段固定，不夹带任何额外内容）。 */
@@ -349,7 +397,29 @@ function toFactView(row: CandidateRow, versionNos: ReadonlyMap<string, number>):
     name: asNullableString(payload['name']),
     threadStatus: asNullableString(payload['threadStatus']),
     createdAt: row.createdAt.toISOString(),
+    decision: toFactDecisionView(row.decision, row.decidedAt),
   };
+}
+
+/**
+ * 决定行 → 对外视图。
+ *
+ * - 未决定（LEFT JOIN 未命中）→ `null`；
+ * - 只接受 `accepted` / `rejected`：历史 / 损坏值一律按"未决定"处理，
+ *   不把数据库里的异常枚举带到界面上。
+ */
+export function toFactDecisionView(
+  value: string | null,
+  decidedAt: Date | null,
+): ChapterFactDecisionView | null {
+  if (!isFactDecisionValue(value) || decidedAt === null) {
+    return null;
+  }
+  return { value, decidedAt: decidedAt.toISOString() };
+}
+
+function isFactDecisionValue(value: unknown): value is ChapterFactDecisionValue {
+  return typeof value === 'string' && (CHAPTER_FACT_DECISIONS as readonly string[]).includes(value);
 }
 
 function asString(value: unknown): string {

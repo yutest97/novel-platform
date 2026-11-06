@@ -249,6 +249,7 @@ export {
   type ExtractChapterFactsInput,
   type ChapterFactCandidateDetail,
   type ChapterFactDecisionResult,
+  type ChapterFactDecisionView,
   type ChapterFactDecisionValue,
   type ChapterFactListResult,
   type ChapterFactRunSummary,

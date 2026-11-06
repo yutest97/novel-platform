@@ -48,6 +48,7 @@ function fact(overrides: Partial<ChapterFactListItem> = {}): ChapterFactListItem
     name: null,
     threadStatus: null,
     createdAt: '2026-11-06T03:00:00.000Z',
+    decision: null,
     ...overrides,
   };
 }

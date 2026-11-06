@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v2.6
+- 版本：v2.7
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -2366,3 +2366,59 @@ POST /api/works/:workId/chapters/:chapterId/facts/:candidateId/decision
 
 实体 / 物品事件写回、批量决定、撤销 / 改判、决策 UI、决策历史视图、
 自动采纳、事实候选质量评估、RAG / embedding / 图谱。
+
+## 34. A2-F-B：事实决策状态读取模型
+
+> 让事实列表与候选详情回显作者已有的决定，供后续决策 UI 消费。
+> **只读**：不新增写接口、不改任何表、不做 UI、不做统计汇总。
+
+### 34.1 契约
+
+```json
+{
+  "decision": {
+    "value": "accepted | rejected",
+    "decidedAt": "ISO-8601"
+  }
+}
+```
+
+- `GET /api/works/:workId/chapters/:chapterId/facts` 的**每条** fact 增加
+  `decision: { value, decidedAt } | null`；
+- `GET /api/works/:workId/chapters/:chapterId/facts/:candidateId` 的 `fact` 同样增加；
+- 未决定（LEFT JOIN 未命中）→ `decision = null`；
+- 已有字段语义不变：排序仍是 `created_at desc → id desc`，`total` / `truncated` 不变，
+  仍只包含**成功 run** 的候选；
+- **不返回** `decidedBy`、payload 副本、正文、prompt、provider / model；
+- 只读：不写审计、不改 task / run / candidate / decision。
+
+### 34.2 查询
+
+```sql
+FROM "chapter_fact_candidates" c
+JOIN "chapter_fact_runs" r ON r."id" = c."run_id"
+LEFT JOIN "chapter_fact_decisions" d
+  ON d."candidate_id" = c."id"
+ AND d."work_id" = c."work_id"
+ AND d."chapter_id" = c."chapter_id"
+WHERE ... AND r."status" = 'succeeded'
+```
+
+- **单条 SQL**：列表仍只有一次 `$queryRaw`，`count(*) over()` 与集合同快照；
+  `UNIQUE(candidate_id)` 保证 LEFT JOIN 不会放大行数，因此 `total` 不受影响；
+- 不做 N+1：列表路径**不访问** `chapterFactDecision` 代理（测试用计数代理守卫）；
+- 详情路径按 `candidateId + chapterId + workId` 三条件读取决定；
+- 三条件中的 `candidate_id` 是决定性的（决定与候选一一对应）；
+  `work_id` / `chapter_id` 是纵深防御——数据库的复合外键已经保证三者一致，
+  单独移除这两个条件在现有约束下不可观测，但保留可以防止将来放宽唯一性后跨章节串读。
+
+### 34.3 异常值处理
+
+- `value` 只接受 `accepted` / `rejected`；历史 / 损坏值一律按"未决定"处理（`null`），
+  不把数据库里的异常枚举带到界面上；
+- 决定行缺少 `decidedAt` 同样按"未决定"处理（不显示半个决定）。
+
+### 34.4 未做
+
+决策 UI（接受 / 拒绝按钮、已决标记）、决策统计、批量决定、撤销 / 改判、
+实体写回、migration、新的写接口。

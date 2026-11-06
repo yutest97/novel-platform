@@ -103,6 +103,8 @@ function factItem(stub: FactStub = {}): unknown {
     name: stub.name ?? null,
     threadStatus: stub.threadStatus ?? null,
     createdAt: '2026-11-06T03:00:00.000Z',
+    // A2-F-B：读取模型新增 decision（本卡 UI 不渲染，桩里保持未决定）
+    decision: null,
   };
 }
 

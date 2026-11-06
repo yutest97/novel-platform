@@ -1115,6 +1115,12 @@ export interface ChapterFactExtractionSummary {
   readonly factTypeCounts: Readonly<Record<string, number>>;
 }
 
+/** 作者对该候选的决定（A2-F-B）；`null` 表示尚未决定。 */
+export interface ChapterFactDecisionView {
+  readonly value: ChapterFactDecisionValue;
+  readonly decidedAt: string;
+}
+
 /** 一条候选（只读视图）。 */
 export interface ChapterFactListItem {
   readonly id: string;
@@ -1129,6 +1135,8 @@ export interface ChapterFactListItem {
   readonly name: string | null;
   readonly threadStatus: string | null;
   readonly createdAt: string;
+  /** 作者已有的决定；未决定为 `null`。不含 decidedBy / payload 副本。 */
+  readonly decision: ChapterFactDecisionView | null;
 }
 
 /** 候选列表（最多 200 条；被截断时 `truncated=true`）。 */

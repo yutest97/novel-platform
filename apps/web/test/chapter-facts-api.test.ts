@@ -351,9 +351,11 @@ afterAll(async () => {
   for (const workId of works) {
     await db.$transaction(
       async (tx) => {
+        await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_decisions" DISABLE TRIGGER USER');
         await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_candidates" DISABLE TRIGGER USER');
         await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_runs" DISABLE TRIGGER USER');
         await tx.$executeRawUnsafe('ALTER TABLE "chapter_versions" DISABLE TRIGGER USER');
+        await tx.chapterFactDecision.deleteMany({ where: { workId } });
         await tx.chapterFactCandidate.deleteMany({ where: { workId } });
         await tx.chapterFactRun.deleteMany({ where: { workId } });
         await tx.chapterVersion.deleteMany({ where: { workId } });
@@ -364,6 +366,7 @@ afterAll(async () => {
         await tx.$executeRawUnsafe('ALTER TABLE "chapter_versions" ENABLE TRIGGER USER');
         await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_runs" ENABLE TRIGGER USER');
         await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_candidates" ENABLE TRIGGER USER');
+        await tx.$executeRawUnsafe('ALTER TABLE "chapter_fact_decisions" ENABLE TRIGGER USER');
       },
       { maxWait: 15_000, timeout: 30_000 },
     );
@@ -982,5 +985,148 @@ describe('列表快照一致性（A2-B-REV-01）', () => {
     expect(finalTotal).toBe(150 + inserted);
     expect(finalFacts.length).toBe(Math.min(200, finalTotal));
     expect(final.json['truncated']).toBe(finalTotal > finalFacts.length);
+  });
+});
+
+describe('决策回显（A2-F-B）', () => {
+  /** 提取一批候选（stub Provider，3 条），按 createdAt 排序返回。 */
+  async function seedFacts(fixture: Fixture) {
+    const { versionId } = await seedVersion(fixture, 1, { finalize: true });
+    setChapterFactProvider(stubProvider(sampleFacts(fixture)));
+    const created = await extract(fixture, { sourceVersionId: versionId });
+    expect(created.status).toBe(201);
+    return db.chapterFactCandidate.findMany({
+      where: { workId: fixture.workId },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, factType: true },
+    });
+  }
+
+  it('未决定 → 列表与详情的 decision 都是 null', async () => {
+    const fixture = await createFixture();
+    const candidates = await seedFacts(fixture);
+
+    const list = await listFacts(fixture);
+    expect(list.status).toBe(200);
+    const facts = list.json['facts'] as { id: string; decision: unknown }[];
+    expect(facts).toHaveLength(3);
+    expect(facts.every((fact) => fact.decision === null)).toBe(true);
+
+    const detail = await factDetail(fixture, candidates[0]?.id ?? '');
+    expect(detail.status).toBe(200);
+    expect((detail.json['fact'] as { decision: unknown }).decision).toBeNull();
+  });
+
+  it('accepted / rejected 回显 value 与 ISO 时间，且不含 decidedBy', async () => {
+    const fixture = await createFixture();
+    const candidates = await seedFacts(fixture);
+    const accepted = candidates[0];
+    const rejected = candidates[1];
+    expect(accepted).toBeDefined();
+    expect(rejected).toBeDefined();
+
+    const acceptedAt = new Date('2026-11-06T04:00:00.000Z');
+    const rejectedAt = new Date('2026-11-06T05:00:00.000Z');
+    await db.chapterFactDecision.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        sourceVersionId: (
+          await db.chapterFactCandidate.findUniqueOrThrow({
+            where: { id: accepted?.id ?? '' },
+            select: { sourceVersionId: true },
+          })
+        ).sourceVersionId,
+        candidateId: accepted?.id ?? '',
+        decision: 'accepted',
+        decidedBy: fixture.authorId,
+        decidedAt: acceptedAt,
+      },
+    });
+    await db.chapterFactDecision.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        sourceVersionId: (
+          await db.chapterFactCandidate.findUniqueOrThrow({
+            where: { id: rejected?.id ?? '' },
+            select: { sourceVersionId: true },
+          })
+        ).sourceVersionId,
+        candidateId: rejected?.id ?? '',
+        decision: 'rejected',
+        decidedBy: fixture.authorId,
+        decidedAt: rejectedAt,
+      },
+    });
+
+    const list = await listFacts(fixture);
+    const facts = list.json['facts'] as {
+      id: string;
+      decision: { value: string; decidedAt: string } | null;
+    }[];
+    const byId = new Map(facts.map((fact) => [fact.id, fact.decision]));
+    expect(byId.get(accepted?.id ?? '')).toEqual({
+      value: 'accepted',
+      decidedAt: acceptedAt.toISOString(),
+    });
+    expect(byId.get(rejected?.id ?? '')).toEqual({
+      value: 'rejected',
+      decidedAt: rejectedAt.toISOString(),
+    });
+    expect(facts.filter((fact) => fact.decision === null)).toHaveLength(1);
+
+    // 响应与详情都不得出现 decidedBy / payload 副本
+    const text = JSON.stringify(list.json);
+    expect(text).not.toContain('decidedBy');
+    expect(text).not.toContain('decided_by');
+
+    const detail = await factDetail(fixture, accepted?.id ?? '');
+    expect((detail.json['fact'] as { decision: unknown }).decision).toEqual({
+      value: 'accepted',
+      decidedAt: acceptedAt.toISOString(),
+    });
+    expect(Object.keys(detail.json['fact'] as object)).not.toContain('payload');
+    expect(JSON.stringify(detail.json)).not.toContain('decidedBy');
+  });
+
+  it('过滤后仍带 decision，total / truncated 语义不变', async () => {
+    const fixture = await createFixture();
+    const candidates = await seedFacts(fixture);
+    const target = candidates.find((candidate) => candidate.factType === 'plot_thread');
+    expect(target).toBeDefined();
+    const sourceVersionId = (
+      await db.chapterFactCandidate.findUniqueOrThrow({
+        where: { id: target?.id ?? '' },
+        select: { sourceVersionId: true },
+      })
+    ).sourceVersionId;
+    await db.chapterFactDecision.create({
+      data: {
+        workId: fixture.workId,
+        chapterId: fixture.chapterId,
+        sourceVersionId,
+        candidateId: target?.id ?? '',
+        decision: 'accepted',
+        decidedBy: fixture.authorId,
+      },
+    });
+
+    const filtered = await listFacts(fixture, '?factType=plot_thread');
+    expect(filtered.status).toBe(200);
+    expect(filtered.json['total']).toBe(1);
+    expect(filtered.json['truncated']).toBe(false);
+    const facts = filtered.json['facts'] as {
+      id: string;
+      decision: { value: string } | null;
+    }[];
+    expect(facts).toHaveLength(1);
+    expect(facts[0]?.id).toBe(target?.id);
+    expect(facts[0]?.decision?.value).toBe('accepted');
+
+    // 其它类型仍为未决定
+    const others = await listFacts(fixture, '?factType=character_state');
+    const otherFacts = others.json['facts'] as { decision: unknown }[];
+    expect(otherFacts.every((fact) => fact.decision === null)).toBe(true);
   });
 });
