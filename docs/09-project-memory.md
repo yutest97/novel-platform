@@ -234,8 +234,18 @@ A2-D-E、A2-E 均已在本地完成，等待负责人复审：
 A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E、A2-D-D、A2-D-E、A2-E、A2-F-A、A2-F-B、A2-F-C 的
 本地实现已通过代码复审；当前等待整体复审 / CI。
 
-A2-F-C 另有一张范围清理卡：`docs/tasks/A2-F-C-REV-01-remove-e2e-helper.md`。
-该卡只移除越界新增的 E2E 口令重置脚本；A2-E 的“无采纳 / 写回 / 批量入口”测试更新保留。
+A2-F-C-REV-01（`docs/tasks/A2-F-C-REV-01-remove-e2e-helper.md`）已在本地完成：
+`59bf06f` 越界新增的 E2E 口令重置脚本（`packages/auth/scripts/` 下的单个文件）已删除，
+**没有**替代脚本，事实决策 UI 与 A2-E 的“无采纳 / 写回 / 批量入口”测试更新都保持不变。
+
+本地 E2E 的口令轮换仍由**既有测试流程**处理，本阶段不引入新工具：
+
+- 共享作者 `e2e-author` 的口令由 `admin-flow.spec.ts` 创建 / 改密后写入
+  `apps/web/.e2e-author.json`，`item-events-flow.spec.ts` 再经管理员重置；
+- 这两个凭据文件（`.e2e-admin-password` / `.e2e-author.json`）都在 `.gitignore` 内，
+  凭据不进仓库，也不新增读取 / 改写口令的脚本；
+- 单文件重跑必须在**干净库**上跑（完整 E2E 会改写共享口令），
+  或整库重建后重跑 `pnpm db:deploy` + `pnpm admin:create`。
 
 复审通过前不推送。事实侧"提取 → 只读审阅 → 决策记录 → 决策回显 → 决策 UI"已经闭环，
 复审通过后的候选顺序：
@@ -486,6 +496,9 @@ D-033 决策状态通过**单条 SQL LEFT JOIN** 带出，不新增按候选的�
       列表必须保持一次 `$queryRaw`，`total` 与集合仍在同一快照。
 D-034 回显只给 `value + decidedAt`：`decidedBy` 不外露，异常 `value`
       只按"未决定"处理，绝不把数据库里的脏枚举带到界面。
+D-035 凭据处理不进入仓库工具：本地 E2E 的共享口令轮换由既有测试流程
+      （`admin-flow` / `item-events-flow` + `.e2e-author.json`）处理，
+      不新增读取口令文件、改写账号口令的脚本；单文件重跑以干净库为前提。
 ```
 
 ---
