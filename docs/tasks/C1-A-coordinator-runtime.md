@@ -1,101 +1,248 @@
-# Trae 任务卡：C1-A 单 Coordinator Runtime 与持久化
+# Trae 任务卡：C1-A Coordinator Runtime、持久化与动态问答壳
 
 ## 开始前
 
-读取 `AGENTS.md`、`docs/09-project-memory.md`、`docs/07-master-roadmap.md`、
-`docs/plans/C1-coordinator-agent-runtime.md`、本卡，并按需读取当前 AgentRunner、
-WorkerRunner、WorkflowKernel、generation task 和 migration 模式。
+读取：
 
-基线：`07cb346`，工作区干净。执行方是 Trae。
+1. `AGENTS.md`
+2. `docs/09-project-memory.md`
+3. `docs/07-master-roadmap.md`
+4. `docs/plans/C1-coordinator-agent-runtime.md`
+5. 本卡
+
+再按需读取当前 `AgentRunner`、`WorkflowKernel`、`WorkerRunner`、Worker supervisor、
+generation task、Web API、章节工作台轮询和 migration 模式。
+
+产品代码验收基线是 `07cb346`；执行前以交付给 Trae 的最新本地 HEAD 为准。
+执行方是 Trae。未得到用户明确要求，不推送远端。
 
 ## 目标
 
-建立唯一 Coordinator 调度循环：
+交付 C1 的第一个可感知纵向切片：
 
 ```text
-load run state → Coordinator decides → Runtime validates
-→ execute one tool → persist step/state → continue | wait user | finish
+作者点击“写新小说”
+→ 打开 Coordinator 动态问答页
+→ Coordinator 根据目标决定问什么
+→ 作者回答
+→ run / step / call 持久化
+→ 继续提问或结束
 ```
 
-C1-A 只做运行时、持久化、动作 Schema、Mock 和最小 API：
+C1-A 只开放 `ask_user` 和 `finish`。这是为了先证明唯一 Coordinator 调度循环、
+作者等待点和持久化边界，不是固定问卷：后续 C1-B 会加入故事规划工具，Runtime 不写死
+“世界观 → 人物 → 大纲”的顺序。
 
-- 不接 Concept / World / Character / Outline / Writer；
-- 不做完整创作 UI；
-- 不写形成品设定或大纲。
+## 架构决定
+
+### 为什么不是直接复用 `generation_tasks`
+
+现有 `generation_tasks.work_id` 非空，而“新小说”可能在 `Work` 建立前就开始问答。
+C1-A 使用独立的 run 队列表，不修改已验收的 `generation_tasks`：
+
+- 语义调度中心仍只有 Coordinator；
+- 基础设施可以有不同队列；
+- Worker 进程同时轮询现有 generation tasks 和 novel runs；
+- 后续若抽象出安全可复用的 lease adapter，再做重构，不在本卡大改 WorkerRunner。
+
+不得创建一个假的 `Work`、临时作者或占位 genre rule package 来绕过约束。
+
+### 控制流
+
+```text
+load queued run
+→ acquire run lease
+→ load state + latest author answer
+→ call Coordinator Agent
+→ validate strict action
+→ execute one tool
+→ persist agent call + step + state/version atomically
+→ continue | waiting_user | finish | fail
+```
 
 ## Coordinator Agent
 
-新增 `novel.coordinator@1.0.0`：
+新增 `novel.coordinator@1.0.0`，复用现有 `AgentRunner` / `AgentDefinition` /
+Provider，不直接访问数据库。
 
-- 输入：用户目标、最新回答、结构化 run state 摘要、可用工具清单、剩余预算；
-- 输出严格 JSON：`action / objective / tool / input / decisionSummary`；
-- 一次只允许一个 action；
-- 未知字段拒绝；
-- 不输出 SQL、文件路径、shell 或数据库命令。
-
-C1-A 只开放工具：
+输入只允许：
 
 ```text
-ask_user
-finish
+requestText
+latestAnswer nullable
+stateSummary
+allowedTools
+remainingSteps
 ```
 
-后续阶段再扩展白名单，但 Coordinator 契约不得要求 Runtime 写死创作阶段。
+输入中不得包含其它作者的数据、prompt、密钥或无限历史。
 
-## Runtime
+### 严格输出
 
-新增独立 `NovelCoordinatorRuntime`（或等价命名），复用现有 Worker/任务底层：
+使用当前 JSON Schema 校验器支持的结构，避免不可用的 `oneOf`。顶层只允许：
 
-- 加载 `novel_runs`；
-- 调 Coordinator Agent；
-- 校验动作白名单和 input Schema；
-- 预算、最大步骤数、重复动作保护；
-- 执行一个工具；
-- append step；
-- 原子更新 run state/version；
-- 等待用户 / 完成 / 失败。
+```json
+{
+  "action": "ask_user",
+  "objective": "确认故事题材",
+  "input": {
+    "question": "你更想写哪一种故事？",
+    "options": ["玄幻升级", "都市异能", "悬疑推理", "自定义"],
+    "finishReason": null
+  },
+  "decisionSummary": "缺少题材，先询问作者。"
+}
+```
 
-说明：
+或：
 
-- Agent 不访问数据库；
-- Runtime 不根据固定“世界观→人物→大纲”顺序推进；
-- `ask_user` 后 run status=`waiting_user`；
-- 用户回答后版本校验并启动下一轮；
-- 所有写操作幂等，重试不得重复 step。
+```json
+{
+  "action": "finish",
+  "objective": "结束本次问答",
+  "input": {
+    "question": null,
+    "options": [],
+    "finishReason": "author_requested_finish"
+  },
+  "decisionSummary": "作者明确要求结束。"
+}
+```
 
-## 数据表
+Schema + 代码侧语义校验要求：
 
-新增 migration：
+- `action` 只允许 `ask_user` / `finish`；
+- `ask_user`：question 非空、options 0..6、finishReason 必须为 null；
+- `finish`：question 必须为 null、options 必须为空、finishReason 非空；
+- objective / question / option / finishReason / decisionSummary 都限制长度；
+- 顶层与 input 都拒绝未知字段；
+- 不接受 SQL、Prisma、文件路径、shell、工具调用或任意 HTML；
+- 输出不合法统一 `AGENT_OUTPUT_INVALID`，原始响应不进入业务状态或日志。
+
+## Mock
+
+新增 `createNovelCoordinatorMockProvider()`：
+
+- 无 latestAnswer：确定性地 `ask_user`，询问题材或核心创意；
+- 有 latestAnswer 且未明确结束：确定性地追问一个人物/目标读者问题；
+- latestAnswer 为明确结束指令（例如 `结束` / `先到这里`）：
+  确定性 `finish`；
+- 不读时钟、不随机、不联网、不读环境 Key；
+- 输出必须是通过同一严格校验的合法 JSON。
+
+不得使用通用 Mock 的任意合法 JSON，也不得靠测试替换整个 Runtime。
+
+## Runtime 与 Worker
+
+新增 `NovelCoordinatorRuntime`（或等价命名）：
+
+- 只调度一个 action；
+- 工具白名单由 Runtime 按状态计算，不信任模型；
+- 校验 step/token 预算；
+- 重复 action 超过阈值返回 `COORDINATOR_LOOP_DETECTED`；
+- `ask_user` 成功后 status=`waiting_user`；
+- `finish` 成功后 status=`completed`；
+- 失败写稳定错误码，不泄露 Provider 原始异常；
+- 每次实际 Coordinator 模型调用写且只写一条 `novel_agent_calls`；
+- `novel_run_steps` 只记录最终提交的 action；瞬时失败重试不重复成功 step；
+- 永久失败可记录一个 failed step 后结束，唯一键仍保证不重复。
+
+新增 Coordinator Worker poller：
+
+- 领取 `queued` run，使用 `FOR UPDATE SKIP LOCKED`；
+- 设置 `locked_by` / `lease_until` / `heartbeat_at`；
+- 过期 lease 可被接管；
+- 取消信号在模型调用前、调用后和提交前检查；
+- 提交必须同时满足 run id、当前 `state_version`、`locked_by` 与未取消；
+- 旧 Worker 晚返回得到 `NOVEL_RUN_LEASE_LOST`，不能写 step、调用日志或 state；
+- 进程退出仍由现有 Worker supervisor 管理；
+- 不改变 `chapter.draft` / `chapter.review` / `chapter.summarize` 注册与行为。
+
+## 数据库 migration
+
+新增一份 migration，不改已验收历史 migration。
 
 ### `novel_runs`
 
 ```text
-id, author_id, work_id nullable,
-status(running|waiting_user|completed|failed|cancelled),
-request_text, state jsonb, state_version,
-current_goal, last_decision_summary,
-step_count, max_steps,
-created_at, updated_at, completed_at
-```
-
-### `novel_run_steps`
-
-```text
-id, run_id, step_no,
-decision jsonb, tool_name, input_hash, output jsonb,
-status(started|succeeded|failed), error_code,
-started_at, finished_at
-UNIQUE(run_id, step_no)
+id uuid pk
+author_id uuid not null -> users
+work_id uuid null
+status text not null
+request_text text not null
+state_summary jsonb not null
+state_version integer not null default 0
+current_goal text not null
+last_decision_summary text not null
+step_count integer not null default 0
+max_steps integer not null
+locked_by text null
+lease_until timestamptz(3) null
+heartbeat_at timestamptz(3) null
+cancel_requested_at timestamptz(3) null
+created_at / updated_at / completed_at
 ```
 
 约束：
 
-- 作者只能访问自己的 run；
-- step append-only；
-- 旧 run version / 旧 step 晚返回不能覆盖新状态；
-- run 终态不可回 running；
-- 不保存 prompt、正文、API Key 或模型原始响应；
-- steps 记录工具输入 hash，不复制长正文。
+- status 只允许 `queued|running|waiting_user|waiting_approval|completed|failed|cancelled`；
+  C1-A 不产生 `waiting_approval`，但预留稳定枚举；
+- requestText、currentGoal、lastDecisionSummary 长度受限；
+- `max_steps` 1..100；
+- `step_count` 0..max_steps；
+- 终态 `completed|failed|cancelled` 不可重新进入 running；
+- run status 与 `completed_at` 自洽；
+- author 只能访问自己的 run，管理员普通接口 403；
+- `work_id` 在 C1-A 保持 null；若未来非空，必须验证作品属于 author。
+
+### `novel_run_steps`
+
+```text
+id uuid pk
+run_id uuid not null -> novel_runs
+step_no integer not null
+decision jsonb not null
+tool_name text not null
+input_hash text not null
+output_summary jsonb not null
+status text not null
+error_code text null
+created_at / finished_at
+UNIQUE(run_id, step_no)
+```
+
+- `status` 只允许 `succeeded|failed`；
+- UPDATE / DELETE 由触发器拒绝；
+- `decision` 只保存通过校验的动作，不保存 prompt / 原始响应；
+- `output_summary` 只保存安全展示字段；
+- failed step 的 errorCode 只允许稳定错误码。
+
+### `novel_agent_calls`
+
+```text
+id uuid pk
+run_id uuid not null -> novel_runs
+step_id uuid null -> novel_run_steps
+call_kind text not null
+agent_name text not null
+agent_version text not null
+provider text not null
+model text not null
+prompt_tokens integer not null
+completion_tokens integer not null
+latency_ms integer not null
+success boolean not null
+error_code text null
+created_at
+```
+
+- `call_kind` C1-A 只允许 `coordinator`；
+- token / latency 非负；
+- success=false 必须有稳定 errorCode；success=true 必须无 errorCode；
+- append-only；
+- 不保存 prompt、回答、正文、模型原始响应、Key。
+
+所有新表必须在全新空库验证。不要通过修改 `07cb346` 的历史 migration 实现。
 
 ## 最小 API
 
@@ -106,50 +253,110 @@ POST /api/novel-runs/:runId/answer
 POST /api/novel-runs/:runId/cancel
 ```
 
-- start 接收创作目标；
-- answer 接收 `expectedVersion + answer`；
-- start/answer 幂等；
-- 作者归属 404，管理员 403，未登录 401；
-- 写接口严格 Origin；
-- 返回状态、当前问题、摘要、版本、stepCount，不返回内部 prompt。
+### start
 
-## Worker
+请求只允许：
 
-- 注册协调执行任务（例如 `novel.coordinator.step`）；
-- 不改变现有 chapter.draft / review / summarize 工作流；
-- 同一 run 同一时刻只允许一个执行 attempt；
-- 租约丢失、取消、重试继续使用现有基础设施；
-- 重复 action 超过阈值时进入 failed 并产生稳定错误码。
+```json
+{ "requestText": "我想写一本东方玄幻长篇" }
+```
 
-## Mock
+返回 `runId / status / version`。服务端创建 `queued` run，由 Worker 执行第一次
+Coordinator 决策。不接受 authorId、status、tool、provider 或 model。
 
-新增 `createNovelCoordinatorMockProvider()`：
+### read
 
-- 无用户目标时 `ask_user`；
-- 有回答但未结束时可继续 `ask_user`；
-- 收到明确结束指令时 `finish`；
-- 输出严格、确定、不联网、不读时钟。
+只回显：
+
+```text
+runId
+status
+version
+currentGoal
+decisionSummary
+question nullable
+options[]
+stepCount
+createdAt / updatedAt
+```
+
+不返回 prompt、stateSummary、lockedBy、lease、agent raw output、provider/model。
+
+### answer
+
+请求只允许：
+
+```json
+{ "expectedVersion": 3, "answer": "东方玄幻，偏群像" }
+```
+
+- 只有 `waiting_user` 可回答；
+- version 不匹配返回 409 `NOVEL_RUN_VERSION_CONFLICT`；
+- answer 长度受限；
+- 成功后清空 pending question、status=`queued`、version+1；
+- 同一 `expectedVersion + same answer` 重试幂等，不重复入队；
+- 同一 version 不同 answer → `NOVEL_RUN_ANSWER_CONFLICT`。
+
+### cancel
+
+- 作者可取消 queued/running/waiting_user；
+- 已终态保持原状态并幂等返回；
+- 终态不可恢复；
+- 取消后不执行未开始工具。
+
+所有接口：
+
+- 未登录 401；
+- 普通作者只能访问自己的 run，越权与随机 id 统一 404 `NOVEL_RUN_NOT_FOUND`；
+- 管理员普通接口 403；
+- 写接口强制 Origin；
+- 返回 `Cache-Control: no-store`；
+- 错误码稳定，不返回原始异常或模型响应。
+
+## 前端动态问答壳
+
+在作品列表页增加主入口「写新小说」，点击后：
+
+1. 弹出一个简洁目标输入，或进入“描述你想写的故事”页；
+2. 成功后跳转 `/novel-runs/:runId`；
+3. 页面只显示 Coordinator 当前目标、最新说明、问题、选项和自定义回答；
+4. `queued/running` 显示“正在整理下一步…”并按 1s → 2s → 5s 轮询；
+5. `waiting_user` 停止轮询，显示问题与回答框；
+6. `completed` 停止轮询并显示“本次创作准备已结束”；
+7. `failed/cancelled` 显示稳定文案；
+8. 页面隐藏暂停轮询，恢复可见补一次；
+9. 请求使用**单调序号 + AbortController**，旧响应不得覆盖新 run；
+10. 回答提交中禁止重复提交，冲突时重新读取而不是覆盖。
 
 ## 测试
 
-1. 合法 Coordinator 动作通过；未知 action/tool/字段拒绝；
-2. start → ask_user → waiting_user；
-3. answer 后恢复并记录 step；
-4. finish 后终态；
-5. 预算/step 上限；
-6. 重复动作熔断；
-7. 重试不重复 step；
-8. old run version / lease 晚返回隔离；
-9. cancel / crash recovery；
-10. 作者隔离、管理员 403、未登录 401、Origin；
-11. API 响应脱敏；
-12. 数据库 run/steps 约束。
+至少覆盖：
 
-真实 PostgreSQL，不联网、不 skip。
+1. Coordinator 合法 ask_user / finish；未知 action、字段、空问题、错误 finish 拒绝；
+2. start → worker → waiting_user，页面可读到 question/options；
+3. answer → 新 version → worker → next question；
+4. finish → completed；
+5. 工具白名单：C1-A 虚构 `generate_world` / SQL / 文件路径输出被拒绝；
+6. max step / duplicate action 熔断；
+7. 同一 answer 幂等，不同 answer 冲突；
+8. 旧 Worker 晚返回不能写 step / call / state；
+9. 租约过期接管，失败重试不产生重复成功 step；
+10. cancel 与终态不可恢复；
+11. author 隔离、管理员 403、未登录 401、Origin；
+12. API 与页面脱敏：无 prompt、stateSummary、lease、provider/model；
+13. 每次模型调用恰好一条 `novel_agent_calls`，语义失败记 success=false；
+14. migration 状态 CHECK、step/call append-only、run 终态约束；
+15. 前端轮询暂停/恢复、旧响应静默、回答冲突重新读取；
+16. 浏览器 E2E：新小说 → 动态问题 → 回答 → 下一问题 → 完成/取消。
+
+真实 PostgreSQL，不联网、不 skip、不使用 fixme。
 
 ## 文档与验证
 
 新增/更新 `docs/03`、`docs/08`、`docs/09`、`docs/07`。
+`docs/03` 记录新表与约束；`docs/08` 记录 Coordinator 动作和 Runtime 边界；
+`docs/09` 更新能力、下一步、测试数、migration/表/触发器、风险与决策；
+`docs/07` 更新 C1 阶段状态。
 
 ```bash
 pnpm --filter @novel/db generate
@@ -159,28 +366,52 @@ pnpm --filter @novel/workflow build
 pnpm --filter @novel/workflow typecheck
 pnpm --filter @novel/workflow test
 pnpm --filter @novel/web test
+pnpm --filter @novel/web typecheck
+pnpm --filter @novel/worker test
 pnpm format:check
 pnpm lint
 pnpm typecheck
 pnpm build
 git diff --check
+git show --check
 ```
 
-灵敏度：
+另外必须验证：
 
-1. 跳过 Runtime 动作白名单 → 恶意 tool 用例失败；
-2. 去掉 run version / step fence → 旧响应覆盖用例失败。
+- 全新空库 migration；
+- 浏览器 E2E；
+- 至少两次灵敏度验证，恢复后相关测试全绿。
+
+建议灵敏度：
+
+1. 跳过 Runtime 工具白名单 → 恶意 tool / 文件路径用例失败；
+2. 去掉 run version + `locked_by` fence → 旧 Worker 晚返回用例失败；
+3. 把 `ask_user` 直接改成固定三步问卷 → 动态路径测试和 Mock 分派失败。
 
 ## 不做
 
-- 创意 / 世界观 / 人物 / 大纲 Agent；
-- Writer 接入；
-- 完整创作 UI；
-- 正式故事圣经写入；
+- 创意 / 世界观 / 人物 / 剧情 / 全书/分卷/章节大纲 Agent；
+- `novel_artifacts` / 作者确认 / 故事圣经写回；
+- Writer、Reviser、Continuity、Librarian、伏笔和质量裁定；
+- 完整故事圣经 / 大纲 UI；
+- 固定八步问卷；
+- 修改 `generation_tasks` 或既有章节工作流语义；
+- 自动创建假的 Work；
+- 长正文进入 run state / step / call 日志；
 - RAG / 图谱；
 - 推送远端。
 
 ## 交付
 
-本地提交，不推送。汇报提交号、Agent/Runtime、数据表、API、预算和恢复证据、
-测试与门禁、两次灵敏度、未做项和工作区状态，等待复审。
+本地提交，不推送。汇报：
+
+- 提交号、工作区状态、HEAD；
+- Coordinator Agent / Runtime / Worker 的实现位置；
+- 3 张表及 migration / 表 / 触发器数量；
+- 4 个 API 与最小动态问答页；
+- 预算、循环、租约、取消、幂等和脱敏证据；
+- 测试数、E2E、build / typecheck / lint / format；
+- 空库 migration；
+- 至少两次灵敏度结果；
+- 未做项；
+- 等待用户复审。
