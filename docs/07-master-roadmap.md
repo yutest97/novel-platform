@@ -56,7 +56,7 @@
 | **A2-B** | 连续性事实 API 与候选读取模型 | `POST /chapters/:chapterId/facts/extract`（严格白名单 `sourceVersionId`、201/200 幂等、409 四态）、`GET /facts`（factType 过滤、排序、200 条上限 + `truncated`）、`GET /facts/:candidateId`、`GET /fact-runs/:runId`；`listChapterFacts` / `getChapterFactCandidate` / `getChapterFactRun` 显式 DTO、只读不写审计；**无 UI / 采纳 / 写回** | **本轮完成** |
 | **A2-C** | Reviewer Agent | Writer 后对正文、合同和前文进行结构化检查；默认以问题提示为主，不直接重写或替代作者；严格 JSON 输出 | A2-C-A 已验收（CI #24）；**A2-C-B、A2-C-D、A2-C-E、A2-D-C 本地完成待复审** |
 | **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | **A2-D-A / A2-D-B（含 REV-01）/ A2-D-C / A2-D-D / A2-D-E 本地完成待复审** |
-| **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 待开始 |
+| **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 任务卡已备 |
 | **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | 待评估 |
 | **A3** | 检索与图谱（可选） | 设定检索、RAG、关系图；按个人版实际痛点决定是否引入 | 待评估 |
 | **M2-B4** | 资源余额流水 | 表、API、UI、E2E | **暂停**（不删除） |
