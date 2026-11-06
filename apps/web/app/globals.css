@@ -782,6 +782,115 @@ fieldset.field legend {
   margin: 1rem 0;
 }
 
+/* --------------------------------------------------------------------------
+   Reviewer 结果面板（A2-C-E）
+   - 只做展示：颜色只表达"结论语义"，不放大 high severity；
+   - 长 evidence / suggestion 必须自然换行，移动端不得横向撑破。
+   -------------------------------------------------------------------------- */
+.review {
+  margin: 1rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfc;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review--info {
+  border-left-color: #4a76a8;
+  background: #f4f7fb;
+}
+
+.review--ok {
+  border-left-color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.review--warn {
+  border-left-color: #b57b12;
+  background: #fffaf0;
+}
+
+.review--danger {
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.review--muted {
+  background: #f7f8fa;
+}
+
+.review__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.review__head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.review__status {
+  margin: 0.4rem 0 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.review__status--ok {
+  color: var(--ok);
+}
+
+.review__status--warn {
+  color: #8a5a00;
+}
+
+.review__status--danger {
+  color: var(--danger);
+}
+
+.review__issues {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.review__issue {
+  min-width: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review__issue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0 0.3rem;
+}
+
+.review__issue-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.review__issue-suggestion {
+  margin-top: 0.3rem;
+  color: var(--muted);
+}
+
 .version-list {
   list-style: none;
   margin: 0 0 1rem;

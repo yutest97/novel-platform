@@ -4,7 +4,7 @@
 - 最后已验收产品基线：`1482573`（A2-C-A）
 - 对应 CI：A2-C-A，CI #24 绿色
 - 当前产品阶段：A1 已完成；A2-A / A2-B / A2-C-A 已验收；
-  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D 均本地完成，待复审**
+  **A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E 均本地完成，待复审**
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -182,7 +182,7 @@ Agent 产出候选
 | --- | --- | --- |
 | A1 | Planner、Writer | 已完成 |
 | A2-A/B | FactExtractor 后端与 API | 已完成；提前实现 |
-| A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 结果只读 API 本地完成**（无 UI） |
+| A2-C | Reviewer Agent | A2-C-A 已验收；A2-C-B（含 REV-01）本地完成待复审；**A2-C-D 只读 API + A2-C-E 结果展示 UI 均本地完成** |
 | A2-D | Summarizer Agent | A2-D-A / A2-D-B（含 REV-01）本地完成；**A2-D-C `priorSummaries` 接线本地完成待复审** |
 | A2-E | 事实候选只读审阅 UI | 待开始；Reviewer 问题展示也未做 |
 | A3 | Consistency Agent、检索/图谱 | 待评估 |
@@ -199,8 +199,8 @@ Agent 产出候选
 
 ## 4. 当前下一步
 
-A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C 均已在本地完成，
-等待负责人复审：
+A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C、A2-C-D、A2-C-E
+均已在本地完成，等待负责人复审：
 
 - `docs/tasks/A2-C-B-REV-01-review-integrity.md`（已完成修复的追溯记录，不再派发）
 - `docs/tasks/A2-D-A-summarizer-agent.md`（契约层）
@@ -208,24 +208,23 @@ A2-C-B（含 REV-01）、A2-D-A、A2-D-B（含 REV-01）、A2-D-C 均已在本�
 - `docs/tasks/A2-D-B-REV-01-finalize-resilience.md`（定稿不被摘要配置阻断）
 - `docs/tasks/A2-D-C-prior-summaries.md`（Reviewer 前章摘要接线）
 - `docs/tasks/A2-C-D-review-results-api.md`（Reviewer 结果只读 API）
+- `docs/tasks/A2-C-E-review-ui.md`（Reviewer 结果展示 UI）
 
-A2-D-B-REV-01、A2-D-C、A2-C-D 的本地实现已通过代码复审；当前等待整体复审 / CI。
+A2-D-B-REV-01、A2-D-C、A2-C-D、A2-C-E 的本地实现已通过代码复审；当前等待整体复审 / CI。
 
 复审通过前不推送。复审通过后的候选顺序：
 
-1. Reviewer 结果**展示 UI**（卡已备：
-   `docs/tasks/A2-C-E-review-ui.md`；读接口已就绪，可轮询
-   `run=null → succeeded`）；
-2. 摘要读取 API / UI（摘要已落库但作者看不到）；
-3. A2-E 事实候选只读审阅 UI；
-4. 是否给 high severity 加采纳门禁——仍需产品确认。
+1. 摘要读取 API / UI（摘要已落库、Reviewer 已在用，但作者看不到）；
+2. A2-E 事实候选只读审阅 UI；
+3. 是否给 high severity 加采纳门禁——仍需产品确认；
+4. 是否允许作者手动重新检查（当前每次生成只审一次，UI 只提供"重新读取"）。
 
 尚待产品确认：
 
-- high severity 是否阻止候选展示/采纳，还是只警告（当前实现只落库、不阻断）；
+- high severity 是否阻止候选展示/采纳，还是只警告（当前实现落库 + 页面展示，**不阻断**采纳）；
 - Reviewer 是否每次 Writer 后自动运行（当前是自动入队，但没有开关）；
 - Reviewer 失败是否影响正文候选保存（当前明确不影响）；
-- 是否允许作者手动重新检查（当前没有入口）。
+- 是否允许作者手动重新检查（当前没有入口，只有读取失败时的"重新读取"）。
 
 建议默认（已按此实现）：
 
@@ -267,8 +266,8 @@ A2-C-B（本地，未推送）后的当前数字：
 
 | 项目 | 数量 |
 | --- | --- |
-| 全量单测 | **994**（web 341 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
-| 浏览器 E2E | **118** |
+| 全量单测 | **1011**（web 358 / workflow 338 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 浏览器 E2E | **127** |
 | migrations | **13** |
 | 数据表 | **23** |
 | 数据库触发器 | **15** |
@@ -280,7 +279,9 @@ A2-D-B 新增 20 个 workflow 集成测试（`chapter-summary-workflow.test.ts`�
 与 1 个定稿 API 用例；A2-D-B-REV-01 再补 5 个定稿 API 用例与 2 个 workflow 用例；
 A2-D-C 新增 12 个 workflow 用例（前章摘要选择规则）；
 A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
-响应解析用例（`chapter-review-view.test.ts`），因此 web **341**、全量 **994**。
+响应解析用例（`chapter-review-view.test.ts`）；A2-C-E 再新增 17 个面板纯函数用例
+（`chapter-review-panel.test.ts`）与 9 个浏览器 E2E（`chapter-review-ui.spec.ts`），
+因此 web **358**、全量 **1011**、E2E **127**。
 
 最近新增质量门禁：
 
@@ -296,7 +297,9 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 - review 任务终态时由触发器关闭 running run（取消不留下永久 running）；
 - 元数据摘要（实体摘要加载）在事实提取与 Reviewer 之间共用同一套 secret 过滤；
 - 审阅结果只读接口按 `work + chapter + taskType + requestId + 快照 candidateId` 五重定位，
-  run / issues 用 RepeatableRead 同快照读取；只回显白名单错误码与三步名。
+  run / issues 用 RepeatableRead 同快照读取；只回显白名单错误码与三步名；
+- UI 侧以**单调序号**（不是候选 id）作审阅请求身份，旧请求 / 旧轮询一律静默；
+  evidence 与 suggestion 全程纯文本渲染，high severity 不改变采纳可用性。
 
 ---
 
@@ -309,8 +312,8 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
 5. 事实候选质量尚未经过真实章节批量审阅；
 6. 本地 PostgreSQL 可能被后台进程回收，测试前必须确认连接；
 7. Prisma/应用时间写库与数据库时钟在部分环境可能有偏移，关键租约和时间戳优先使用数据库时钟；
-8. Reviewer run / issues 已有只读 API（A2-C-D），但**没有 UI**：作者仍需直接请求接口
-   才能看到审阅结论，页面上仍是一片空白；
+8. Reviewer 结论已在候选面板展示（A2-C-E），但 UI 只反映**最近一次** run：问题 append-only、
+   run 复用同一行，重新审阅会覆盖作者的看到的历史结论；没有"审阅历史"视图；
 9. 只读接口用确定性 `review:<candidateId>` 定位任务：A2-C-B 之前的历史候选没有审阅任务，
    统一 404 `REVIEW_NOT_FOUND`，前端必须把这种情况展示成"未审阅"而不是错误；
 10. 每次正文生成都会多出一个 `chapter.review` 任务，Worker 吞吐与真实模型成本相应增加；
@@ -326,8 +329,12 @@ A2-C-D 新增 17 个只读 API 用例（`chapter-review-api.test.ts`）与 9 个
     当前没有手动重建入口，也没有提示；配置长期不可用会让摘要长期缺失；
 16. `priorSummaries` 只覆盖「已定稿且有摘要」的前 20 章：未定稿章节、摘要失败或
     配置长期不可用期间定稿的章节会静默缺失，Reviewer 无法感知"这里本该有摘要"；
-17. 审阅问题的 `evidence` 是正文原句，会随只读接口原样返回给作者；当前只对作品作者可见
-    （管理员 403），若将来开放给编辑 / 读者角色，需要重新评估这一字段的暴露边界。
+17. 审阅问题的 `evidence` 是正文原句，会随只读接口与页面原样展示给作者；当前只对作品作者
+    可见（管理员 403），若将来开放给编辑 / 读者角色，需要重新评估这一字段的暴露边界；
+18. 候选预览期间会按 1s → 2s → 5s 轮询审阅结果：单作者单页面可接受，但多候选反复预览
+    会产生额外只读请求；页面隐藏时已暂停，恢复可见时立即补一次；
+19. 审阅面板只覆盖"当前选中的候选"：候选列表本身不显示审阅徽标，作者仍需逐个预览才能
+    看到有没有问题。
 
 ---
 
@@ -362,6 +369,10 @@ D-019 Reviewer 结果是只读资源：接口不触发审阅、不写审计、�
       任一不符统一 404 `REVIEW_NOT_FOUND`（不泄露存在性）。
 D-020 只读 GET 不做 Origin 校验（同源 fetch 不带 Origin，写接口仍强制）；
       审阅结果的 run / issues 在 RepeatableRead 同快照内读取，不返回 provider / model。
+D-021 Reviewer 结果只做展示：面板不改正文、不写存储、不参与采纳判定；
+      high / medium / low 都不禁用采纳，只有读取失败才提供"重新读取"（同一候选的重试）。
+D-022 审阅请求身份用单调序号而非候选 id（同一候选重新读取 / 切换后再切回 id 相同）；
+      旧请求与旧轮询必须完全静默，不得覆盖新候选的 review / error / loading。
 ```
 
 ---

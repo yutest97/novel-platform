@@ -32,6 +32,7 @@ import {
   cancelGenerationTask,
   fetchChapter,
   fetchChapterCandidate,
+  fetchChapterReview,
   fetchChapterVersion,
   fetchChapterVersionDiff,
   fetchChapterVersions,
@@ -45,6 +46,7 @@ import {
   startChapterGeneration,
   type ChapterCandidateDetail,
   type ChapterDetail,
+  type ChapterReviewView,
   type ChapterVersionDetail,
   type ChapterVersionDiff,
   type ChapterVersionListItem,
@@ -98,6 +100,16 @@ import {
   type LeaveKind,
   type PendingLeave,
 } from '@/lib/chapter-editor';
+import {
+  nextReviewPollDelay,
+  reviewCountsLabel,
+  reviewPanelView,
+  reviewSeverityLabel,
+  reviewSeverityTone,
+  reviewTypeLabel,
+  shouldPollReview,
+  type ReviewLoadState,
+} from '@/lib/chapter-review-panel';
 import { handleSessionError } from '@/lib/session-errors';
 import { logoutAndRedirect, useRequireSession } from '@/lib/use-session';
 
@@ -131,6 +143,21 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const [selectedCandidate, setSelectedCandidate] = useState<ChapterCandidateDetail | null>(null);
   const [candidateLoadingId, setCandidateLoadingId] = useState<string | null>(null);
   const [candidateError, setCandidateError] = useState('');
+
+  // Reviewer 结果（A2-C-E）：只读、按候选加载；状态全在组件内存，不写存储。
+  const [review, setReview] = useState<ChapterReviewView | null>(null);
+  const [reviewState, setReviewState] = useState<ReviewLoadState>('idle');
+  const [reviewError, setReviewError] = useState('');
+  /**
+   * 审阅请求的单调序号（请求身份）。
+   *
+   * 候选 id 不足以区分"同一候选的旧请求"：切换候选后再切回会得到相同的 id，
+   * 旧请求晚返回就会覆盖新状态。每次加载 / 切换 / 重新读取都自增，
+   * 只有拿到最新序号的那次请求可以写 review / error / loading。
+   */
+  const reviewSeqRef = useRef(0);
+  /** 审阅轮询的下一次间隔（1s → 2s → 5s）；换候选 / 重新读取时归零。 */
+  const reviewDelayRef = useRef(1_000);
 
   const [adoptTargetId, setAdoptTargetId] = useState<string | null>(null);
   const [adopting, setAdopting] = useState(false);
@@ -595,6 +622,92 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
     };
   }, [latestTask?.id, latestTask?.status, workId, router, refreshDetailAndVersions]);
 
+  /**
+   * 审阅结果轮询（A2-C-E）。
+   *
+   * - 只在 `queued / processing` 或 run `running` 时轮询，终态立即停止；
+   * - 退避 1s → 2s → 5s（`nextReviewPollDelay`），间隔存在 ref 里：
+   *   effect 会因 `review` 变化重跑，退避不能被重置回 1s；
+   * - 序号变化（切换候选 / 重新读取）或组件卸载时旧循环立即退出。
+   */
+  useEffect(() => {
+    if (reviewState !== 'ready' || review === null || !shouldPollReview(review)) {
+      return;
+    }
+    const candidateId = review.candidateId;
+    const seq = reviewSeqRef.current;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (): void => {
+      if (disposed || document.visibilityState === 'hidden') {
+        return;
+      }
+      timer = setTimeout(() => {
+        void tick();
+      }, reviewDelayRef.current);
+    };
+
+    const failWith = (caught: unknown): void => {
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      setReview(null);
+      if (caught instanceof ApiError && caught.code === 'REVIEW_NOT_FOUND') {
+        setReviewError('');
+        setReviewState('notfound');
+        return;
+      }
+      setReviewError(messageOf(caught));
+      setReviewState('error');
+    };
+
+    const tick = async (): Promise<void> => {
+      if (disposed) {
+        return;
+      }
+      try {
+        const next = await fetchChapterReview(workId, chapterId, candidateId);
+        if (disposed || reviewSeqRef.current !== seq) {
+          return;
+        }
+        setReview(next);
+        if (shouldPollReview(next)) {
+          reviewDelayRef.current = nextReviewPollDelay(reviewDelayRef.current);
+          schedule();
+        }
+      } catch (caught) {
+        if (disposed || reviewSeqRef.current !== seq) {
+          return;
+        }
+        failWith(caught);
+      }
+    };
+
+    const onVisible = (): void => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      void tick();
+    };
+
+    schedule();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      disposed = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [reviewState, review, workId, chapterId, router]);
+
   /* ----------------------------- 人工编辑 ----------------------------- */
   const draftDirty = editor !== null && isDraftDirty(draft, editor.baseline);
 
@@ -944,6 +1057,46 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   }
 
   /* ----------------------------- 候选 ----------------------------- */
+  /**
+   * 读取候选的审阅结果（A2-C-E）。
+   *
+   * 请求身份是**单调序号**而不是候选 id：同一候选「重新读取」、切换后再切回，
+   * 都会得到相同 id，只有序号能区分新旧请求。旧请求一律静默：
+   * 不写 review / error，也不改变 loading。
+   */
+  async function loadReview(candidateId: string): Promise<void> {
+    const seq = ++reviewSeqRef.current;
+    reviewDelayRef.current = 1_000;
+    setReview(null);
+    setReviewState('loading');
+    setReviewError('');
+    try {
+      const next = await fetchChapterReview(workId, chapterId, candidateId);
+      if (reviewSeqRef.current !== seq) {
+        return;
+      }
+      setReview(next);
+      setReviewState('ready');
+    } catch (caught) {
+      if (reviewSeqRef.current !== seq) {
+        return;
+      }
+      if (handleSessionError(caught, router)) {
+        return;
+      }
+      if (caught instanceof ApiError && caught.code === 'REVIEW_NOT_FOUND') {
+        // 历史候选没有审阅任务：信息态，不是红色错误，也不影响采纳。
+        setReview(null);
+        setReviewError('');
+        setReviewState('notfound');
+        return;
+      }
+      setReview(null);
+      setReviewError(messageOf(caught));
+      setReviewState('error');
+    }
+  }
+
   async function openCandidate(candidateId: string): Promise<void> {
     if (candidateLoadingId !== null) {
       return;
@@ -954,6 +1107,7 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
       const candidate = await fetchChapterCandidate(workId, chapterId, candidateId);
       setSelectedCandidate(candidate);
       void refreshSession();
+      void loadReview(candidate.id);
     } catch (caught) {
       if (handleSessionError(caught, router)) {
         return;
@@ -1011,6 +1165,12 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
   const generatable = detail === null ? false : canGenerateChapter(detail.chapter.status);
   const taskActive = latestTask !== null && shouldPollTask(latestTask.status);
   const plan = selectedCandidate === null ? null : displayPlan(selectedCandidate.structuredPlan);
+  const reviewPanel = reviewPanelView({
+    state: reviewState,
+    review,
+    errorText: reviewError,
+  });
+  const reviewIssues = review?.run?.issues ?? [];
   const adoptCandidate =
     detail?.candidates.find((candidate) => candidate.id === adoptTargetId) ?? null;
   const latestVersion = versions[0] ?? null;
@@ -1316,6 +1476,78 @@ export default function ChapterWorkbenchPage(): React.ReactElement {
               <pre className="chapter-text" data-testid="candidate-content">
                 {selectedCandidate.content}
               </pre>
+
+              <section
+                className={`review review--${reviewPanel.tone}`}
+                data-testid="review-panel"
+                aria-live="polite"
+              >
+                <div className="review__head">
+                  <h3>审阅结果</h3>
+                  {reviewPanel.counts === null ? null : (
+                    <span className="hint" data-testid="review-counts">
+                      {reviewCountsLabel(reviewPanel.counts)}
+                    </span>
+                  )}
+                </div>
+                <p
+                  className={`review__status review__status--${reviewPanel.tone}`}
+                  data-testid="review-status"
+                >
+                  {reviewPanel.text}
+                </p>
+                {reviewPanel.detail === '' ? null : (
+                  <p className="hint" data-testid="review-detail">
+                    {reviewPanel.detail}
+                  </p>
+                )}
+                {reviewPanel.canRetry ? (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small"
+                    onClick={() => {
+                      void loadReview(selectedCandidate.id);
+                    }}
+                    data-testid="review-retry"
+                  >
+                    重新读取
+                  </button>
+                ) : null}
+                {reviewIssues.length === 0 ? null : (
+                  <ol className="review__issues" data-testid="review-issues">
+                    {reviewIssues.map((issue) => (
+                      <li className="review__issue" key={issue.id} data-testid="review-issue">
+                        <p className="review__issue-meta">
+                          <span
+                            className={`badge badge--${reviewSeverityTone(issue.severity)}`}
+                            data-testid="review-issue-severity"
+                          >
+                            {reviewSeverityLabel(issue.severity)}
+                          </span>
+                          <span className="badge" data-testid="review-issue-type">
+                            {reviewTypeLabel(issue.type)}
+                          </span>
+                        </p>
+                        {/* 纯文本渲染：evidence 是正文原句，可能包含 <、> 或 HTML 片段 */}
+                        <p className="review__issue-text" data-testid="review-issue-evidence">
+                          {issue.evidence}
+                        </p>
+                        <p
+                          className="review__issue-text review__issue-suggestion"
+                          data-testid="review-issue-suggestion"
+                        >
+                          建议：{issue.suggestion}
+                        </p>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                {reviewPanel.tone === 'ok' || reviewPanel.tone === 'warn' ? (
+                  <p className="hint" data-testid="review-hint">
+                    检查结果仅供作者参考，不会自动修改正文，也不阻止采纳。
+                  </p>
+                ) : null}
+              </section>
 
               {selectedCandidate.status === 'candidate' ? (
                 generatable ? (

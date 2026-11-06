@@ -223,7 +223,7 @@ interface ApiResponse {
  */
 export async function apiRequest(
   path: string,
-  init: { method?: string; body?: unknown } = {},
+  init: { method?: string; body?: unknown; signal?: AbortSignal } = {},
 ): Promise<ApiResponse> {
   const method = init.method ?? 'GET';
   const headers: Record<string, string> = { accept: 'application/json' };
@@ -237,6 +237,7 @@ export async function apiRequest(
     // 同源请求由浏览器自动附带 Cookie 与 Origin 头
     credentials: 'same-origin',
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    ...(init.signal === undefined ? {} : { signal: init.signal }),
     cache: 'no-store',
   });
 
@@ -1225,16 +1226,21 @@ export async function fetchChapterFactRun(
  * - 任务已入队但 run 尚未创建 → `run === null`（可轮询）；
  * - 响应严格解析：形状不符或结论不自洽时抛 `INTERNAL_ERROR`，不展示半截数据；
  * - 不返回正文全文、prompt、provider / model、租约或内部任务字段。
+ *
+ * `options.signal` 可选（A2-C-E）：切换候选 / 离开页面时中止在途请求；
+ * 不传时行为与之前完全一致。
  */
 export async function fetchChapterReview(
   workId: string,
   chapterId: string,
   candidateId: string,
+  options: { readonly signal?: AbortSignal } = {},
 ): Promise<ChapterReviewView> {
   const { body } = await apiRequest(
     `/api/works/${encodeURIComponent(workId)}/chapters/${encodeURIComponent(
       chapterId,
     )}/candidates/${encodeURIComponent(candidateId)}/review`,
+    options.signal === undefined ? {} : { signal: options.signal },
   );
   try {
     return parseChapterReview(body);

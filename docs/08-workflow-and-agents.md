@@ -1,6 +1,6 @@
 # 08 工作流与 Agent（A1-1 / A1-2 / A1-3 / A1-4 / A2）
 
-- 版本：v2.1
+- 版本：v2.2
 - 日期：2026-11-06
 - 对应代码：`packages/workflow`、`apps/web/app/api/works/**`、`apps/worker`
 - 对应迁移：`20261104010000_a1_workflow_kernel`、`20261104020000_a1_chapter_draft`、
@@ -2036,3 +2036,72 @@ GET /api/works/:workId/chapters/:chapterId/candidates/:candidateId/review
 
 Reviewer UI（问题列表 / 严重度筛选 / 采纳前确认）、手动重检 / 重试 / 取消、
 high severity 采纳门禁、摘要读取 API / UI、事实 UI、migration、RAG / 图谱。
+
+## 29. A2-C-E：Reviewer 结果展示 UI
+
+> 在章节工作台的候选面板里展示审阅状态与结构化问题。
+> **只读展示**：不改后端、不改 review 数据、不加手动重检、不加采纳门禁。
+
+### 29.1 数据流
+
+```
+点击候选「预览」
+  ├─ GET /candidates/:candidateId            （正文，既有）
+  └─ GET /candidates/:candidateId/review     （审阅，A2-C-D）
+       ├─ queued / processing / run.running → 轮询（1s → 2s → 5s）
+       └─ 终态 → 停止轮询
+```
+
+- 审阅状态只存在组件内存（`useState`），不写 `localStorage` / `sessionStorage`，也不进 URL；
+- 页面**不**因为审阅读取失败而影响候选正文、采纳按钮或其它区块；
+- 生成 / 采纳 / 版本流程完全复用既有实现，审阅面板只是新增一块只读区域。
+
+### 29.2 旧请求隔离
+
+- 请求身份是**单调序号**（`reviewSeqRef`），不是候选 id：同一候选「重新读取」、
+  切换后再切回都会得到相同 id，只有序号能区分新旧请求；
+- 每次加载 / 切换 / 手动重试都自增；旧请求（无论先发后到）完全静默：
+  不写 review、不写 error、不改变 loading；
+- 轮询循环同样带序号：切换候选后旧循环的下一次响应直接被丢弃并停止调度；
+- 卸载 / 切换时清理定时器与 `visibilitychange` / `focus` 监听。
+
+### 29.3 状态文案
+
+| 条件 | 文案 | 色调 |
+| --- | --- | --- |
+| 选择候选后立即 | 正在读取审阅结果… | info |
+| task `queued` | 等待审阅… | info |
+| task `processing` | 按步骤：准备审阅上下文… / 模型审阅中… / 保存审阅结果… | info |
+| run `succeeded` + `passed` | 未发现结构性问题 | ok |
+| run `succeeded` + `!passed` | 发现 N 个问题 + `高 x · 中 y · 低 z` | warn |
+| run / task `failed` | 审阅未完成，不影响当前候选采纳 | warn |
+| task `cancelled` | 审阅已取消 | muted |
+| task `succeeded` 但 `run=null` | 审阅结果异常（可「重新读取」，**不轮询**） | danger |
+| `REVIEW_NOT_FOUND` | 暂无审阅结果 + 该候选还没有审阅记录，不影响预览与采纳。 | muted |
+| 网络 / 500 | 审阅结果读取失败 + 局部「重新读取」 | danger |
+
+- 未知 severity / type / step 一律回退到安全文案（`未标注严重度` / `其它问题` / `审阅中…`），
+  不暴露内部枚举值，也不抛错；
+- 通过时不显示分档统计（全 0 是噪音）。
+
+### 29.4 问题展示与安全
+
+- 按 `ordinal` 升序；severity 徽章 `高 / 中 / 低`（high = danger、medium = warn、low = 中性），
+  type 用中文标签（合同偏离 / 设定矛盾 / 时间线冲突 / 物品状态冲突 / 情节线冲突 /
+  人物一致性 / 文风问题）；
+- `evidence` 与 `suggestion` 用 **React 文本节点**渲染，全链路无
+  `dangerouslySetInnerHTML`：`<script>` / `<img onerror>` 只会作为文字显示；
+  保留换行（`white-space: pre-wrap`）；
+- 长文本 `overflow-wrap: anywhere` + `min-width: 0`，移动端不横向撑破。
+
+### 29.5 采纳边界
+
+- 采纳按钮的可用性**只**由既有章节 / 候选状态决定（`generatable` + 候选状态）；
+- high / medium / low 一律不禁用、不二次确认、不追加门禁；
+- 通过时提示"检查结果仅供作者参考，不会自动修改正文"，有问题时同样不免除作者的最终决定权；
+- 面板不提供「重新审阅」按钮（本轮无手动重检），只有失败时的「重新读取」（同一次读取的重试）。
+
+### 29.6 未做
+
+手动重检 / 重试 / 取消审阅、high severity 采纳门禁、自动重写正文、
+摘要读取 API / UI、事实 UI、后端 / migration 修改。
