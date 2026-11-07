@@ -55,6 +55,19 @@ export interface ModelTextResult {
   readonly latencyMs: number;
 }
 
+/**
+ * 已完成调用的安全元数据。
+ *
+ * 只含 provider / model / usage / latency；不得附 prompt、原始响应、
+ * 正文或底层异常，用于调用失败后仍能保留已发生的 token 成本。
+ */
+export interface ModelCallMetadata {
+  readonly provider: string;
+  readonly model: string;
+  readonly usage: ModelUsage;
+  readonly latencyMs: number;
+}
+
 /** Provider 统一接口。 */
 export interface ModelProvider {
   readonly name: string;
@@ -92,16 +105,21 @@ export type ModelErrorCode = Extract<
 export class ModelProviderError extends WorkflowError {
   /** 仅在 HTTP 错误时存在。 */
   readonly status?: number;
+  /** Provider 已完成调用并读到 usage 时的安全元数据；失败前无调用则为空。 */
+  readonly callMetadata?: ModelCallMetadata;
 
   constructor(
     code: ModelErrorCode,
     message: string,
-    options: { retryable?: boolean; status?: number } = {},
+    options: { retryable?: boolean; status?: number; callMetadata?: ModelCallMetadata } = {},
   ) {
     super(code, message, { retryable: options.retryable ?? false });
     this.name = 'ModelProviderError';
     if (options.status !== undefined) {
       this.status = options.status;
+    }
+    if (options.callMetadata !== undefined) {
+      this.callMetadata = options.callMetadata;
     }
   }
 }

@@ -3,8 +3,7 @@
 - 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；C1-A-REV-01 代码修复完成，但复审仍发现
-  token 计量、数据库时钟租约和文档收尾 3 个 P2；`C1-A-REV-02` 为下一步，
+- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 代码修复完成，等待复审；
   C1-B 必须等待复审通过；事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
@@ -152,6 +151,12 @@
 - `novel_agent_calls` 是调用遥测：每次实际调用完成后立即追加（`step_id` 可为空），
   与 step / state 提交解耦；旧 Worker 可补真实调用遥测，但不得写 step / state；
   token 预算统计所有实际调用；
+- 失败调用的 usage 保留：Schema 校验失败或内容 JSON 解析失败时，Provider 已返回的
+  provider / model / usage / latency 会附在安全错误上并写入调用遥测；只有 Provider
+  确实未返回 usage 时才记 0；错误与日志不含 prompt、原始输出或底层异常；
+- 租约有效性由 PostgreSQL `clock_timestamp()` 判断，应用时钟漂移不影响 fence；
+  `commitSuccess` / `commitFailure` / `failWithoutStep` 的条件 UPDATE 都再次校验
+  `lease_until > clock_timestamp()`；
 - `novel_runs` / `novel_run_steps` / `novel_agent_calls`：
   CHECK + 触发器保证状态迁移合法、`request_text` / `max_steps` / 归属不可变、
   step 与 call append-only、run 不可删除；
@@ -227,7 +232,7 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-01 代码修复完成，但复审仍有 P2：失败调用 usage 丢失、lease fence 用应用时钟、docs/07/09 未收尾；`C1-A-REV-02` 待执行 |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-01 / REV-02 代码修复完成，等待复审：失败调用 usage 已保留、lease fence 改数据库时钟、docs/07/08/09 已同步 |
 | C1-B | 故事规划与确认 | 待 C1-A-REV-02 复审通过后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
@@ -250,16 +255,16 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
 硬编码小说创作阶段顺序。
 
-### C1-A 现状（REV-01 复审不通过，待 REV-02）
+### C1-A 现状（REV-02 代码修复完成，等待复审）
 
 - Runtime / 工具工作流 / 三张表 / Worker 轮询 / 4 个 API / 动态问答页与浏览器 E2E 已完成；
 - `C1-A-REV-01` 已修复六类复审问题：超时/租约分离、即时调用遥测、Mock 脱敏、
   隐藏页真正暂停轮询、`ask_user.options` 0..6、`readNovelRun()` 同快照读取；
-- REV-01 复审确认主路径实现和 1179 单测 / 160 E2E 已通过，但仍有 3 个 P2：
-  Schema-invalid / invalid-JSON 调用的 usage 仍可能记 0；lease fence 仍用应用
-  `Date.now()`；`docs/07` / `docs/09` 状态、测试数和已修复风险未同步；
+- `C1-A-REV-02` 已修复三个 P2：Schema-invalid / invalid-JSON 失败调用保留已发生的
+  usage；lease fence 与最终条件 UPDATE 改由数据库 `clock_timestamp()` 判断；
+  `docs/07` / `docs/08` / `docs/09` 状态、测试数和已修复风险已同步；
 - 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
-- 下一张卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`；
+- 当前下一步是 `C1-A-REV-02` 复审通过；
 - `C1-A-REV-02` 复审通过前不进入 C1-B；
 - C1-B 前置：`novel_runs.work_id` 在 C1-A migration 中不可变。C1-B 开工前必须
   设计受控的一次性绑定方案（专用绑定表，或新的未发布 migration 允许
@@ -289,8 +294,9 @@ Agent 与工作流按两个维度落地：
 C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（首次实现已提交 `a5e3707`，
 复审不通过）。
 C1-A-REV-01 卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（代码已提交
-`a40a0dd`，复审仍有 P2）。
-C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（下一步）。
+`a40a0dd`）。
+C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（代码已修复，
+本轮本地提交，等待复审）。
 C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
@@ -383,7 +389,7 @@ A2-F-C 再新增 20 个决策面板纯函数用例（`chapter-fact-decision.test
 与 10 个浏览器 E2E（`chapter-fact-decision-ui.spec.ts`），
 因此 web **445**、workflow **368**、全量 **1128**、E2E **158**。
 
-C1-A 完成后的当前数字：
+C1-A 首次完成（REV-01 修复前）的历史数字：
 
 | 项目 | 数量 |
 | --- | --- |
@@ -393,16 +399,36 @@ C1-A 完成后的当前数字：
 | 数据表 | **26**（不含 `_prisma_migrations`） |
 | 数据库触发器 | **19** |
 
-C1-A 新增 30 个 workflow 用例（`novel-coordinator.test.ts` 8 +
-`novel-runtime.test.ts` 22）、12 个 web 用例（`novel-runs-api.test.ts` 8 +
-`novel-run-view.test.ts` 4）与 1 个浏览器 E2E（`novel-run-flow.spec.ts`）。
+C1-A-REV-01 修复完成后的当前数字：
 
-C1-A 的两处灵敏度验证：
+| 项目 | 数量 |
+| --- | --- |
+| 全量单测 | **1179**（web 458 / workflow 406 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 浏览器 E2E | **160** |
+| migrations | **15** |
+| 数据表 | **26**（不含 `_prisma_migrations`） |
+| 数据库触发器 | **19** |
 
-1. 把重复动作熔断阈值从 `MAX_REPEAT_ACTIONS - 1` 改为永不触发 →
-   「连续重复同一 action」用例失败；
-2. 把步数预算判断从 `<= 0` 改成 `< 0` → 「步数预算耗尽」用例失败；
+REV-01 新增 8 个 workflow 用例、1 个 web 用例与 1 个浏览器 E2E
+（`novel-run-visibility.spec.ts`）。两处灵敏度验证：
+
+1. Mock 输出回显作者原文（移除脱敏过滤）→ Mock 安全用例失败；
+2. 模型硬超时复用 lease abort → 「超时不应误判为 lease-lost」用例失败；
    恢复后相关测试全绿。
+
+C1-A-REV-02 修复后的当前数字：
+
+| 项目 | 数量 |
+| --- | --- |
+| 全量单测 | **1189**（web 458 / workflow 416 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 浏览器 E2E | **160** |
+| migrations | **15** |
+| 数据表 | **26**（不含 `_prisma_migrations`） |
+| 数据库触发器 | **19** |
+
+REV-02 新增 10 个 workflow 用例（`novel-runtime.test.ts`）：
+5 个失败调用 usage 保留 / token 预算累计，5 个数据库时钟租约 fence
+（应用时钟偏快 / 偏慢、fence 后 UPDATE 前过期、心跳 locked_by / state_version）。
 
 
 A2-F-C 的两处灵敏度验证：
@@ -527,10 +553,11 @@ A2-F-C 附带把 A2-E E2E 的「事实区没有任何接受 / 拒绝 / 写回入
     要等 sweep 周期才会重排；期间该 run 不会被第二个 Worker 领取，表现为短暂停滞。
 42. `novel_runs` 的状态迁移白名单目前只覆盖 C1-A 的 `ask_user` / `finish`；
     C1-B 引入 `waiting_approval` 或新工具时必须新增 migration，不允许绕过 CHECK。
-43. C1-A 的模型硬超时当前与 lease abort 混用：超时会被误判为 lease-lost，
-    且实际调用可在租约过期后反复重试；C1-A-REV-01 必须拆成独立 signal 并保证有限失败。
-44. C1-A 的调用日志当前随 step/state 事务提交，取消或 lease-lost 的真实调用成本会丢失；
-    修复前 token 预算无法覆盖所有实际模型调用。
+43. （已修复，C1-A-REV-01）模型硬超时已与 lease abort 拆成独立 signal，
+    `attemptAbort` 不参与 fence；超时不再被误判为 lease-lost，且有有限重试上限。
+44. （已修复，C1-A-REV-01 / REV-02）调用日志已与 step/state 提交解耦；
+    Schema-invalid / invalid-JSON 失败调用也会保留 Provider 已返回的 usage，
+    token 预算覆盖所有实际模型调用；只有 Provider 未返回 usage 时才记 0。
 45. `novel_runs.work_id` 当前不可变，而 C1-B 规划需要把 run 绑定到 Work；
     C1-B 开工前必须设计一次性受控绑定，不允许直接放开任意更新。
 

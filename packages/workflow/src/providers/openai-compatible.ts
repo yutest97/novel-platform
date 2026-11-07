@@ -123,8 +123,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
     try {
       json = JSON.parse(stripCodeFence(result.content)) as unknown;
     } catch {
-      // 不回显 content：模型输出可能含敏感内容。
-      throw new ModelProviderError('MODEL_INVALID_RESPONSE', '模型返回的不是合法 JSON');
+      // 不回显 content：模型输出可能含敏感内容；但 Provider 已完成调用，
+      // 外层 usage 已经读到，必须保留到安全错误上供调用遥测使用。
+      throw new ModelProviderError('MODEL_INVALID_RESPONSE', '模型返回的不是合法 JSON', {
+        callMetadata: {
+          provider: this.name,
+          model: result.model,
+          usage: result.usage,
+          latencyMs: result.latencyMs,
+        },
+      });
     }
     return {
       json,

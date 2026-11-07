@@ -12,7 +12,7 @@
 import { WorkflowError } from './errors.js';
 import type { JsonIssue, JsonSchema } from './json-schema.js';
 import { assertJsonSchema, validateJson } from './json-schema.js';
-import type { ModelProvider, ModelUsage } from './model-types.js';
+import type { ModelCallMetadata, ModelProvider, ModelUsage } from './model-types.js';
 
 /** Agent 定义（可序列化、可版本化）。 */
 export interface AgentDefinition {
@@ -63,16 +63,29 @@ export class AgentInputInvalidError extends WorkflowError {
   }
 }
 
-/** 输出不合法（模型输出不进入业务逻辑）。 */
+/**
+ * 输出不合法（模型输出不进入业务逻辑）。
+ *
+ * Provider 已经完成调用时，附带安全元数据（provider / model / usage / latency），
+ * 让调用方仍能记录本次真实 token 成本；不携带原始输出、prompt 或底层异常。
+ */
 export class AgentOutputInvalidError extends WorkflowError {
   readonly issues: readonly JsonIssue[];
-  constructor(agent: AgentDefinition, issues: readonly JsonIssue[]) {
+  readonly callMetadata?: ModelCallMetadata;
+  constructor(
+    agent: AgentDefinition,
+    issues: readonly JsonIssue[],
+    callMetadata?: ModelCallMetadata,
+  ) {
     super(
       'AGENT_OUTPUT_INVALID',
       `Agent ${agent.name}@${agent.promptVersion} 输出不合法（${issues.length} 处）`,
     );
     this.name = 'AgentOutputInvalidError';
     this.issues = issues;
+    if (callMetadata !== undefined) {
+      this.callMetadata = callMetadata;
+    }
   }
 }
 
@@ -218,7 +231,12 @@ export class AgentRunner {
 
     const outputIssues = validateJson(agent.outputSchema, result.json);
     if (outputIssues.length > 0) {
-      throw new AgentOutputInvalidError(agent, outputIssues);
+      throw new AgentOutputInvalidError(agent, outputIssues, {
+        provider: result.provider,
+        model: result.model,
+        usage: result.usage,
+        latencyMs: result.latencyMs,
+      });
     }
 
     return {

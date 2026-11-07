@@ -19,7 +19,7 @@ import type { Prisma, PrismaClient } from '@novel/db';
 import { AgentInputInvalidError, AgentOutputInvalidError, AgentRunner } from '../agent.js';
 import { sanitizeTaskError } from '../errors.js';
 import { validateJson } from '../json-schema.js';
-import { ModelProviderError, type ModelProvider } from '../model-types.js';
+import { ModelProviderError, type ModelCallMetadata, type ModelProvider } from '../model-types.js';
 import { hashTaskRequest } from '../request-hash.js';
 import {
   NOVEL_COORDINATOR_AGENT,
@@ -250,22 +250,25 @@ export class NovelCoordinatorWorker {
   }
 
   /**
-   * 真实 fence：只以数据库状态为准。
+   * 真实 fence：只以数据库状态与数据库时钟为准。
    *
    * 模型超时使用的 attempt signal **不得**参与这里的判断，
-   * 否则一次可重试超时会被误判成租约丢失。
+   * 否则一次可重试超时会被误判成租约丢失；
+   * `lease_until` 的有效性也必须由 PostgreSQL 计算，避免应用时钟漂移误判。
    */
   private async checkFence(runId: string, stateVersion: number): Promise<boolean> {
-    const state = await this.getExecutionState(runId);
-    return (
-      state !== null &&
-      state.status === 'running' &&
-      state.locked_by === this.workerId &&
-      state.state_version === stateVersion &&
-      state.cancel_requested_at === null &&
-      state.lease_until !== null &&
-      state.lease_until.getTime() > Date.now()
-    );
+    const rows = await this.db.$queryRaw<{ id: string }[]>`
+      SELECT "id"
+      FROM "novel_runs"
+      WHERE "id" = ${runId}::uuid
+        AND "status" = 'running'
+        AND "locked_by" = ${this.workerId}
+        AND "state_version" = ${stateVersion}
+        AND "cancel_requested_at" IS NULL
+        AND "lease_until" IS NOT NULL
+        AND "lease_until" > clock_timestamp()
+    `;
+    return rows.length > 0;
   }
 
   private async heartbeat(runId: string, stateVersion: number): Promise<boolean> {
@@ -484,16 +487,19 @@ export class NovelCoordinatorWorker {
       if (error instanceof AgentInputInvalidError) {
         return { kind: 'stop', errorCode: safe.code };
       }
+      // Provider 已完成调用但输出 Schema / JSON 非法时，安全错误上仍带着
+      // provider / model / usage / latency；调用遥测优先使用这些真实值。
+      const metadata = this.errorCallMetadata(error);
       await this.appendCall({
         callId,
         runId,
         agentName: NOVEL_COORDINATOR_AGENT.name,
         agentVersion: NOVEL_COORDINATOR_AGENT.promptVersion,
-        provider: this.provider.name,
-        model: this.runner.resolveModel(NOVEL_COORDINATOR_AGENT),
-        promptTokens: 0,
-        completionTokens: 0,
-        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        provider: metadata?.provider ?? this.provider.name,
+        model: metadata?.model ?? this.runner.resolveModel(NOVEL_COORDINATOR_AGENT),
+        promptTokens: metadata?.usage.promptTokens ?? 0,
+        completionTokens: metadata?.usage.completionTokens ?? 0,
+        latencyMs: metadata?.latencyMs ?? Math.max(0, Math.round(performance.now() - startedAt)),
         success: false,
         errorCode: safe.code,
       });
@@ -511,6 +517,17 @@ export class NovelCoordinatorWorker {
         leaseSignal.removeEventListener('abort', onLeaseAbort);
       }
     }
+  }
+
+  /** 从安全错误里读取已完成调用的元数据；没有实际调用则返回 null。 */
+  private errorCallMetadata(error: unknown): ModelCallMetadata | null {
+    if (error instanceof AgentOutputInvalidError) {
+      return error.callMetadata ?? null;
+    }
+    if (error instanceof ModelProviderError) {
+      return error.callMetadata ?? null;
+    }
+    return null;
   }
 
   /**
@@ -613,6 +630,7 @@ export class NovelCoordinatorWorker {
           AND "locked_by" = ${this.workerId}
           AND "state_version" = ${fresh.state_version}
           AND "cancel_requested_at" IS NULL
+          AND "lease_until" > clock_timestamp()
         RETURNING "id"
       `;
       if (updated.length === 0) {
@@ -658,6 +676,7 @@ export class NovelCoordinatorWorker {
           AND "locked_by" = ${this.workerId}
           AND "state_version" = ${fresh.state_version}
           AND "cancel_requested_at" IS NULL
+          AND "lease_until" > clock_timestamp()
         RETURNING "id"
       `;
       if (updated.length === 0) {
@@ -696,6 +715,7 @@ export class NovelCoordinatorWorker {
         AND "locked_by" = ${this.workerId}
         AND "state_version" = ${stateVersion}
         AND "cancel_requested_at" IS NULL
+        AND "lease_until" > clock_timestamp()
       RETURNING "id"
     `;
     if (updated.length === 0) {

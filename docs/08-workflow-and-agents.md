@@ -2544,8 +2544,10 @@ C1-A **不产生 `waiting_approval`**，也不创建 Work、章节或正文。
 - 过期租约回收：有 `cancel_requested_at` 的 running run 直接 `cancelled`，否则重排 `queued`；
 - `FOR UPDATE SKIP LOCKED` 领取单条 run，写 `locked_by / lease_until / heartbeat_at`；
 - 心跳与 fence：所有提交条件都带 `status = 'running' AND locked_by = 本 Worker
-  AND state_version = 读取时版本 AND cancel_requested_at IS NULL`，并确认 `lease_until`
-  尚未过期；
+  AND state_version = 读取时版本 AND cancel_requested_at IS NULL AND
+  lease_until > clock_timestamp()`；租约是否有效由 PostgreSQL 计算，禁止应用进程用
+  `Date.now()` 比较 `lease_until`。fence 通过后、最终条件 UPDATE 前租约若过期，
+  UPDATE 必须返回 0 行并放弃 step / state 提交；
 - 两个独立信号：`leaseAbort` 只由心跳失败、取消或真实 fence 失败触发；每次 attempt
   使用独立的 `attemptAbort`，只负责单次模型调用超时。`attemptAbort` 不参与
   `checkFence`，超时不得被误判为租约丢失；
@@ -2557,6 +2559,11 @@ C1-A **不产生 `waiting_approval`**，也不创建 Work、章节或正文。
   `novel_agent_calls`（`step_id = NULL`），使用调用级稳定 UUID 作为主键，同一逻辑
   调用只写一次。旧 Worker 晚返回时可以补写它实际发生的调用日志，但不得写 step、
   state、问题或任何创作资料；
+- 失败调用的 usage 保留：Provider 已返回 usage 后，即使输出 Schema 校验失败
+  或内容 JSON 解析失败，也必须把 `provider / model / promptTokens /
+  completionTokens / latencyMs` 附在安全错误上，由 Runtime 写入调用遥测；
+  只有 Provider 确实没有返回 usage 时才记 0。错误与调用日志不得携带 prompt、
+  原始输出、正文或底层异常；
 - 预算：`remainingSteps <= 0` 直接失败且不写 step；token 预算读取所有实际调用日志
   （含失败重试、超时、取消），超限写 failed step 并记录
   `NOVEL_RUN_BUDGET_EXCEEDED`；

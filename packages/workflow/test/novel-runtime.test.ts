@@ -7,15 +7,18 @@
  */
 
 import type { PrismaClient } from '@novel/db';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Client } from 'pg';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   ModelJsonInput,
   ModelJsonResult,
   ModelProvider,
   ModelTextResult,
+  ModelUsage,
 } from '../src/model-types.js';
 import { MockProvider, type MockJsonValue } from '../src/providers/mock.js';
+import { OpenAICompatibleProvider, type FetchLike } from '../src/providers/openai-compatible.js';
 import { createNovelCoordinatorMockProvider } from '../src/novel/coordinator-mock-provider.js';
 import { NovelCoordinatorWorker } from '../src/novel/runtime.js';
 import {
@@ -146,6 +149,55 @@ class FlakySchemaProvider implements ModelProvider {
   }
 }
 
+/** 返回 Schema 非法再返回合法 action，可指定两次调用的 usage。 */
+class UsageFlakyProvider implements ModelProvider {
+  readonly name = 'usage-flaky';
+  readonly defaultModel = 'usage-model';
+  calls = 0;
+
+  constructor(
+    private readonly failedUsage: ModelUsage,
+    private readonly successUsage: ModelUsage = { promptTokens: 10, completionTokens: 10 },
+  ) {}
+
+  generateJson(input: ModelJsonInput): Promise<ModelJsonResult> {
+    this.calls += 1;
+    const json = this.calls === 1 ? { unexpected: true } : ASK_ACTION;
+    const usage = this.calls === 1 ? this.failedUsage : this.successUsage;
+    return Promise.resolve({
+      json,
+      provider: this.name,
+      model: input.model,
+      usage,
+      latencyMs: 5,
+    });
+  }
+
+  generateText(): Promise<ModelTextResult> {
+    throw new Error('不支持文本输出');
+  }
+}
+
+/** 始终返回 Schema 非法且 usage 为 0：验证 Provider 未返回 usage 时安全记 0。 */
+class SchemaInvalidWithoutUsageProvider implements ModelProvider {
+  readonly name = 'no-usage';
+  readonly defaultModel = 'no-usage-model';
+
+  generateJson(input: ModelJsonInput): Promise<ModelJsonResult> {
+    return Promise.resolve({
+      json: { unexpected: true },
+      provider: this.name,
+      model: input.model,
+      usage: { promptTokens: 0, completionTokens: 0 },
+      latencyMs: 0,
+    });
+  }
+
+  generateText(): Promise<ModelTextResult> {
+    throw new Error('不支持文本输出');
+  }
+}
+
 /** 可阻塞的真实调用：用于旧 Worker 晚返回。 */
 class GatedProvider implements ModelProvider {
   readonly name = 'gated';
@@ -226,6 +278,26 @@ class TimeoutThenSuccessProvider implements ModelProvider {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * 绕过 Prisma 连接池的原始连接。
+ *
+ * 用于在测试里独立持有一个行锁，避免占满 Prisma 池导致 Worker 无法通过 fence。
+ */
+function openRawClient(): Client {
+  const raw = process.env['DATABASE_URL'];
+  if (!raw) {
+    throw new Error('DATABASE_URL is required');
+  }
+  const url = new URL(raw);
+  return new Client({
+    host: url.hostname,
+    port: Number(url.port || 5432),
+    user: decodeURIComponent(url.username),
+    password: url.password ? decodeURIComponent(url.password) : undefined,
+    database: url.pathname.replace(/^\//, ''),
   });
 }
 
@@ -563,6 +635,173 @@ describe('租约与并发', () => {
   });
 });
 
+describe('数据库时钟租约 fence', () => {
+  it('租约有效且心跳按数据库时钟续期：应用时钟偏快 1 小时仍可提交', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new GatedProvider();
+    const worker = coordinatorWorker(provider, {
+      workerId: 'clock-fast-worker',
+      leaseMs: 500,
+      heartbeatIntervalMs: 100,
+      sweepIntervalMs: 1,
+    });
+
+    const pending = worker.runOnce();
+    await waitFor(async () => provider.calls === 1);
+
+    const realNow = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow + 3_600_000);
+    try {
+      // 应用时钟快 1 小时；数据库时钟续租后租约仍有效，旧实现会误判过期。
+      await sleep(700);
+      const lease = await db.$queryRaw<{ valid: boolean }[]>`
+        SELECT ("lease_until" > clock_timestamp()) AS "valid"
+        FROM "novel_runs"
+        WHERE "id" = ${runId}::uuid
+      `;
+      expect(lease[0]?.valid).toBe(true);
+      provider.release();
+      expect(await pending).toBe('waiting_user');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(1);
+    expect(rows.succeededCalls).toBe(1);
+  });
+
+  it('数据库租约已过期、应用时钟偏慢 1 小时时不得提交', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new GatedProvider();
+    const worker = coordinatorWorker(provider, {
+      workerId: 'clock-slow-worker',
+      leaseMs: 100,
+      heartbeatIntervalMs: 10_000,
+      maxAttempts: 1,
+      sweepIntervalMs: 1,
+    });
+
+    const pending = worker.runOnce();
+    await waitFor(async () => provider.calls === 1);
+
+    const realNow = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow - 3_600_000);
+    try {
+      // 数据库租约已经过期；应用时钟慢 1 小时时旧实现会误判仍有效。
+      await sleep(300);
+      provider.release();
+      expect(await pending).toBe('lease-lost');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(0);
+    expect(rows.calls).toBe(1);
+    const view = await readNovelRun(db, { authorId, runId });
+    expect(view.status).toBe('running');
+    expect(view.version).toBe(0);
+    expect(view.question).toBeNull();
+  });
+
+  it('fence 通过后、UPDATE 前租约过期：条件 UPDATE 无行且不写 step / state', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new GatedProvider();
+    const worker = coordinatorWorker(provider, {
+      workerId: 'late-update-worker',
+      leaseMs: 5_000,
+      heartbeatIntervalMs: 10_000,
+      maxAttempts: 1,
+      sweepIntervalMs: 1,
+    });
+
+    const pending = worker.runOnce();
+    await waitFor(async () => provider.calls === 1);
+
+    const lockerClient = openRawClient();
+    await lockerClient.connect();
+    try {
+      await lockerClient.query('BEGIN');
+      await lockerClient.query('SELECT "id" FROM "novel_runs" WHERE "id" = $1 FOR NO KEY UPDATE', [
+        runId,
+      ]);
+      // 持有行锁期间 Worker 仍能通过 fence 与追加调用遥测（外键 KEY SHARE 不冲突）；
+      // 随后它阻塞在条件 UPDATE 上。
+      provider.release();
+      await sleep(800);
+      await lockerClient.query(
+        `UPDATE "novel_runs"
+         SET "lease_until" = clock_timestamp() - interval '1 minute'
+         WHERE "id" = $1`,
+        [runId],
+      );
+      await lockerClient.query('COMMIT');
+    } finally {
+      await lockerClient.end();
+    }
+    expect(await pending).toBe('lease-lost');
+
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(0);
+    expect(rows.calls).toBe(1);
+    const view = await readNovelRun(db, { authorId, runId });
+    expect(view.status).toBe('running');
+    expect(view.version).toBe(0);
+    expect(view.question).toBeNull();
+  });
+
+  it('心跳以 locked_by 为准：被其它 Worker 接管后立即 lease-lost', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new GatedProvider();
+    const worker = coordinatorWorker(provider, {
+      workerId: 'hb-locked-worker',
+      leaseMs: 2_000,
+      heartbeatIntervalMs: 50,
+      maxAttempts: 1,
+      sweepIntervalMs: 1,
+    });
+
+    const pending = worker.runOnce();
+    await waitFor(async () => provider.calls === 1);
+    await db.$executeRaw`
+      UPDATE "novel_runs" SET "locked_by" = 'worker-thief' WHERE "id" = ${runId}::uuid
+    `;
+    expect(await pending).toBe('lease-lost');
+    provider.release();
+
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(0);
+    expect(rows.calls).toBe(1);
+  });
+
+  it('心跳以 state_version 为准：版本变化后立即 lease-lost', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new GatedProvider();
+    const worker = coordinatorWorker(provider, {
+      workerId: 'hb-version-worker',
+      leaseMs: 2_000,
+      heartbeatIntervalMs: 50,
+      maxAttempts: 1,
+      sweepIntervalMs: 1,
+    });
+
+    const pending = worker.runOnce();
+    await waitFor(async () => provider.calls === 1);
+    await db.$executeRaw`
+      UPDATE "novel_runs"
+      SET "state_version" = "state_version" + 1
+      WHERE "id" = ${runId}::uuid
+    `;
+    expect(await pending).toBe('lease-lost');
+    provider.release();
+
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(0);
+    expect(rows.calls).toBe(1);
+  });
+});
+
 describe('模型硬超时与租约分离', () => {
   it('Provider 不返回且不监听 signal 时，被 Promise.race 硬截断为 MODEL_TIMEOUT', async () => {
     const runId = await trackRun('写一个故事');
@@ -661,8 +900,8 @@ describe('模型硬超时与租约分离', () => {
   it('token 预算统计所有实际调用，包含失败重试', async () => {
     const runId = await trackRun('写一个故事');
     const provider = new FlakySchemaProvider();
-    // 第一次 Schema 失败在 AgentRunner 内部抛出，usage 未知记 0；
-    // 第二次成功记 20。预算必须把这两次实际调用都算进去。
+    // Schema 失败调用由 AgentOutputInvalidError 携带 usage（10 + 10），
+    // 成功调用记 20。预算必须把这两次实际调用都算进去（合计 40）。
     const worker = coordinatorWorker(provider, { tokenBudget: 15 });
 
     expect(await worker.runOnce()).toBe('waiting_user');
@@ -671,7 +910,7 @@ describe('模型硬超时与租约分离', () => {
       where: { runId },
       _sum: { promptTokens: true, completionTokens: true },
     });
-    expect((consumed._sum.promptTokens ?? 0) + (consumed._sum.completionTokens ?? 0)).toBe(20);
+    expect((consumed._sum.promptTokens ?? 0) + (consumed._sum.completionTokens ?? 0)).toBe(40);
 
     await answerNovelRun(db, { authorId, runId, expectedVersion: 1, answer: '继续' });
     expect(await worker.runOnce()).toBe('failed');
@@ -683,6 +922,144 @@ describe('模型硬超时与租约分离', () => {
     });
     expect(step.errorCode).toBe('NOVEL_RUN_BUDGET_EXCEEDED');
     expect(await db.novelAgentCall.count({ where: { runId } })).toBe(2);
+  });
+});
+
+describe('失败调用的 usage 保留', () => {
+  it('Schema 校验失败时保留 Provider 已返回的 usage', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new UsageFlakyProvider({ promptTokens: 17, completionTokens: 23 });
+    const worker = coordinatorWorker(provider);
+
+    expect(await worker.runOnce()).toBe('waiting_user');
+    expect(provider.calls).toBe(2);
+
+    const calls = await db.novelAgentCall.findMany({
+      where: { runId },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({
+      success: false,
+      errorCode: 'AGENT_OUTPUT_INVALID',
+      provider: 'usage-flaky',
+      model: 'usage-model',
+      promptTokens: 17,
+      completionTokens: 23,
+    });
+    expect(calls[1]?.success).toBe(true);
+  });
+
+  it('内容 JSON 非法但外层响应含 usage 时，调用日志保留该 usage', async () => {
+    const runId = await trackRun('写一个故事');
+    const SECRET_OUTPUT = 'not-json SECRET-RAW-OUTPUT';
+    const fetchImpl: FetchLike = () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: SECRET_OUTPUT } }],
+            usage: { prompt_tokens: 21, completion_tokens: 4 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: 'https://model.example.test/v1',
+      apiKey: 'sk-test-rev02',
+      model: 'json-model',
+      fetchImpl,
+    });
+    const worker = coordinatorWorker(provider, { maxAttempts: 1 });
+
+    expect(await worker.runOnce()).toBe('failed');
+    const call = await db.novelAgentCall.findFirstOrThrow({ where: { runId } });
+    expect(call).toMatchObject({
+      success: false,
+      errorCode: 'MODEL_INVALID_RESPONSE',
+      provider: 'openai-compatible',
+      model: 'json-model',
+      promptTokens: 21,
+      completionTokens: 4,
+    });
+    // 错误与调用日志都不得回显模型原始输出。
+    expect(JSON.stringify(call)).not.toContain(SECRET_OUTPUT);
+  });
+
+  it('Provider 确实没有返回 usage 时才记 0', async () => {
+    const runId = await trackRun('写一个故事');
+    const worker = coordinatorWorker(new SchemaInvalidWithoutUsageProvider(), {
+      maxAttempts: 1,
+    });
+
+    expect(await worker.runOnce()).toBe('failed');
+    const call = await db.novelAgentCall.findFirstOrThrow({ where: { runId } });
+    expect(call).toMatchObject({
+      success: false,
+      errorCode: 'AGENT_OUTPUT_INVALID',
+      promptTokens: 0,
+      completionTokens: 0,
+    });
+  });
+
+  it('失败调用 40 + 成功调用 20 → token 预算累计 60', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new UsageFlakyProvider(
+      { promptTokens: 17, completionTokens: 23 },
+      { promptTokens: 12, completionTokens: 8 },
+    );
+    const worker = coordinatorWorker(provider, { tokenBudget: 60 });
+
+    expect(await worker.runOnce()).toBe('waiting_user');
+    const consumed = await db.novelAgentCall.aggregate({
+      where: { runId },
+      _sum: { promptTokens: true, completionTokens: true },
+    });
+    expect((consumed._sum.promptTokens ?? 0) + (consumed._sum.completionTokens ?? 0)).toBe(60);
+
+    await answerNovelRun(db, { authorId, runId, expectedVersion: 1, answer: '继续' });
+    expect(await worker.runOnce()).toBe('failed');
+    // 预算累计已达到上限，第二次 run 不再发起模型调用。
+    expect(provider.calls).toBe(2);
+    const step = await db.novelRunStep.findFirstOrThrow({
+      where: { runId },
+      orderBy: { stepNo: 'desc' },
+    });
+    expect(step.errorCode).toBe('NOVEL_RUN_BUDGET_EXCEEDED');
+    expect(await db.novelAgentCall.count({ where: { runId } })).toBe(2);
+  });
+
+  it('失败调用日志不包含 prompt、原始输出、正文或底层异常', async () => {
+    const SECRET_PROMPT = 'SECRET-AUTHOR-PROMPT-DO-NOT-STORE';
+    const SECRET_OUTPUT = 'SECRET-RAW-OUTPUT-DO-NOT-STORE';
+    const runId = await trackRun(`写一个故事 ${SECRET_PROMPT}`);
+    const provider: ModelProvider = {
+      name: 'secret-provider',
+      defaultModel: 'secret-model',
+      generateJson: (input) =>
+        Promise.resolve({
+          json: { secret: SECRET_OUTPUT },
+          provider: 'secret-provider',
+          model: input.model,
+          usage: { promptTokens: 9, completionTokens: 1 },
+          latencyMs: 0,
+        }),
+      generateText: () => Promise.reject(new Error(`provider failure ${SECRET_PROMPT}`)),
+    };
+    const worker = coordinatorWorker(provider, { maxAttempts: 1 });
+
+    expect(await worker.runOnce()).toBe('failed');
+    const calls = await db.novelAgentCall.findMany({ where: { runId } });
+    expect(calls.length).toBeGreaterThan(0);
+    const serialized = JSON.stringify(calls);
+    expect(serialized).not.toContain(SECRET_PROMPT);
+    expect(serialized).not.toContain(SECRET_OUTPUT);
+    expect(serialized).not.toContain('provider failure');
+    for (const call of calls) {
+      expect(call).not.toHaveProperty('prompt');
+      expect(call).not.toHaveProperty('output');
+      expect(call).not.toHaveProperty('content');
+      expect(call).not.toHaveProperty('decision');
+    }
   });
 });
 

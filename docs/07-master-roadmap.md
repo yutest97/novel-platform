@@ -60,7 +60,7 @@
 | **A2-D** | Summarizer Agent | 只对正式定稿版本生成幂等章节摘要，为后续连续性检查提供记忆 | 已验收（CI #25）：契约、定稿任务、落库、前章摘要接线、API 与 UI |
 | **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 已验收（CI #25） |
 | **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | A2-F-A/B/C 已验收（CI #25）；实体写回待产品语义确认 |
-| **C1-A** | Coordinator Runtime + 工作流 + 动态问答壳 | `novel.coordinator@1.0.0` 严格动作 Schema、ToolWorkflow guard/execute/validate/commit、run 状态机、`novel_runs` / `novel_run_steps` / `novel_agent_calls`、单 run 租约与 fence、预算/循环保护、ask_user/finish、4 个 API、可操作的“写新小说”问答页；不做专业创作 Agent | REV-01 代码修复完成；复审仍有 3 个 P2，C1-A-REV-02 待执行 |
+| **C1-A** | Coordinator Runtime + 工作流 + 动态问答壳 | `novel.coordinator@1.0.0` 严格动作 Schema、ToolWorkflow guard/execute/validate/commit、run 状态机、`novel_runs` / `novel_run_steps` / `novel_agent_calls`、单 run 租约与 fence、预算/循环保护、ask_user/finish、4 个 API、可操作的“写新小说”问答页；不做专业创作 Agent | REV-01 修复完成；REV-02 代码修复完成，等待复审（未推送） |
 | **C1-B** | 故事规划与确认 | 创意 / 世界观 / 人物 / 剧情 / 全书/分卷/章节大纲 Agent；候选 revision、作者编辑/确认/拒绝、故事圣经与大纲持久化及 UI | 待 C1-A-REV-02 复审通过 |
 | **C1-C** | 正文生产闭环 | Composer、Writer、Reviser；复用 Reviewer / Summarizer / FactExtractor；确认章节大纲驱动正文，支持采纳/退回修改/定稿 | 待 C1-B |
 | **C1-D** | 连续性与故事记忆 | Continuity、设定审查、文风审查、伏笔、Librarian 受控写回、故事一致性投影；作者确认事实后的资料更新 | 待 C1-C |
@@ -162,3 +162,4 @@
 | 2026-11-07 | C1-A 本地完成（未推送）：`novel.coordinator@1.0.0`（只允许 `ask_user` / `finish`，不产生 `waiting_approval`）、`NOVEL_TOOL_WORKFLOWS`、`novel_runs` / `novel_run_steps` / `novel_agent_calls`（CHECK + 触发器 + append-only）、Worker 独立 novel 轮询与健康合并、4 个 API、`/novel-runs/[runId]` 动态问答页；migrations / 表 / 触发器 15 / 26 / 19；全量单测 1170、E2E 159；下一步 C1-B 故事规划与确认 |
 | 2026-11-07 | C1-A 首次复审不通过：发现模型硬超时与 lease abort 混用导致误报 lease-lost / 可能重复调用、实际调用日志在取消或租约丢失时缺失、Mock 回显作者原文触发安全校验、隐藏页在途响应会继续轮询、`ask_user.options` 契约不一致、run 与问题分两次读取。新增 `C1-A-REV-01` 修复卡，C1-B 暂缓 |
 | 2026-11-07 | C1-A-REV-01 代码修复完成（`a40a0dd`，本地）：超时/租约分离、即时调用遥测、Mock 脱敏、隐藏页轮询、options 0..6、读取同快照；全量单测 1179、E2E 160。复审仍未通过：Schema-invalid / invalid-JSON 调用 usage 可能丢失、lease fence 仍用应用时钟、docs/07/09 未收尾。新增 `C1-A-REV-02`，C1-B 继续暂缓 |
+| 2026-11-07 | C1-A-REV-02 代码修复完成（本地）：Schema / invalid-JSON 失败调用保留已发生的 usage，Runtime 不再固定记 0；lease fence 与 `commitSuccess` / `commitFailure` / `failWithoutStep` 的条件 UPDATE 改由 PostgreSQL `clock_timestamp()` 判断；docs/07、docs/08、docs/09 同步；新增 10 个 workflow 用例，全量单测 1189、E2E 160，migrations / 表 / 触发器保持 15 / 26 / 19；等待复审 |
