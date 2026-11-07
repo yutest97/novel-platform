@@ -3,8 +3,8 @@
 - 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 本地复审通过；C1-B-A1 本地完成待复审
-  （均未推送、未过远端 CI）；下一步为 C1-B-A2 Coordinator 创意工具与确认 UI；
+- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 本地复审通过；C1-B-A1
+  首次复审不通过（均未推送、未过远端 CI）；下一步为 C1-B-A1-REV-01；
   事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
@@ -169,7 +169,7 @@
 - C1-A 只产生 `waiting_user` / `completed` / `failed` / `cancelled`，
   **不产生 `waiting_approval`**；不创建 Work、章节或正文。
 
-### C1-B-A1 故事候选域与 Concept Agent（本地完成，待复审）
+### C1-B-A1 故事候选域与 Concept Agent（首次复审不通过，待 REV-01）
 
 - 迁移 `20261107090000_c1b_a1_novel_artifacts`：三张 append-only 候选表
   `novel_artifacts` / `novel_artifact_revisions` / `novel_artifact_decisions`；
@@ -259,8 +259,8 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
 | C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-02 本地复审通过：失败调用 usage 保留、数据库时钟 lease fence、隐藏轮询与 options 已验收；未推送 / 未过远端 CI |
-| C1-B-A1 | 故事候选域与 Concept Agent | 本地完成待复审：artifact 三表、`novel.concept`、Mock、候选 / 决策服务；不接 API/UI |
-| C1-B-A2 | Coordinator 创意工具与确认 UI | 下一步：Coordinator 1.1、`concept.generate` / approval tool、API、UI、E2E |
+| C1-B-A1 | 故事候选域与 Concept Agent | 首次复审不通过：状态与 decision 最终一致性缺口，待 C1-B-A1-REV-01 |
+| C1-B-A2 | Coordinator 创意工具与确认 UI | 待 C1-B-A1-REV-01 复审通过：Coordinator 1.1、`concept.generate` / approval tool、API、UI、E2E |
 | C1-B-B | 世界观、人物与剧情 Agent | 待 C1-B-A2：扩展世界规则、人物关系与主线候选 |
 | C1-B-C | 三级大纲 | 待 C1-B-B：全书 / 分卷 / 章节大纲候选与确认门禁 |
 | C1-B-D | 故事圣经编辑与 Work 绑定 | 待 C1-B-C：完整编辑、历史 revision、确认投影与受控 Work 绑定 |
@@ -299,8 +299,10 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
   26 表 / 19 触发器；尚未推送，也未经过远端 CI；
 - C1-B-A1 已本地完成待复审：artifact 三表、Concept Agent / Mock / 服务层；
   全量单测 1227、E2E 160、16 migrations / 29 表 / 25 触发器；
-- 当前下一步：`C1-B-A2` Coordinator 1.1 与 `concept.generate` / approval tool、
-  HTTP API、最小候选 UI 与 E2E；
+- C1-B-A1 复审发现 P2：数据库允许 `approved` 搭配 `rejected` decision，
+  decision 插入后不更新 artifact 也可提交；
+- 当前下一步：`C1-B-A1-REV-01`，原地修改未推送 migration 并补最终一致性触发器；
+- REV-01 通过前不进入 C1-B-A2；
 - C1-B 前置：`novel_runs.work_id` 在 C1-A migration 中不可变。C1-B 开工前必须
   设计受控的一次性绑定方案（专用绑定表，或新的未发布 migration 允许
   `NULL → work_id` 单次迁移），校验作品属于同一作者且只能绑定一次；
@@ -331,8 +333,10 @@ C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（首次实现已提�
 C1-A-REV-01 卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（代码已提交
 `a40a0dd`）。
 C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（本地复审通过）。
-C1-B-A1 卡：`docs/tasks/C1-B-A1-story-artifact-concept.md`（本地完成待复审）。
-C1-B-A2 卡：下一张，Coordinator 1.1 与确认 UI。
+C1-B-A1 卡：`docs/tasks/C1-B-A1-story-artifact-concept.md`（首次复审不通过）。
+C1-B-A1-REV-01 卡：
+`docs/tasks/C1-B-A1-REV-01-artifact-decision-consistency.md`（下一步）。
+C1-B-A2 卡：待 REV-01 通过。
 C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
@@ -721,6 +725,9 @@ D-043 `ask_user.options` 恢复为 0..6：空数组表示开放式问题，页�
 D-044 已发生的模型调用必须保留 Provider 返回的 usage；Schema-invalid /
       invalid-JSON 也不得丢 token。租约有效性只由 PostgreSQL `clock_timestamp()` 判断，
       fence 与所有终态条件 UPDATE 都必须再次校验租约。
+D-045 artifact 进入 approved / rejected 时，状态必须与当前 revision decision 值完全相同；
+      decision 插入必须在事务提交时证明 artifact 已同步为同一状态，不允许
+      `pending_approval + decision` 或 `approved + rejected decision`。
 D-045 故事候选域按 artifact → revision → decision 三段 append-only：
       artifact 只保存当前指针与状态，revision 不可改不可删，decision 只追加；
       approved 为终态且禁止新 revision；revision / decision 必须通过复合外键
