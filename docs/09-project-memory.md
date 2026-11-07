@@ -3,8 +3,8 @@
 - 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 代码修复完成，等待复审；
-  C1-B 必须等待复审通过；事实写回与高级审阅门禁后移
+- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 本地复审通过（未推送、未过远端 CI）；
+  下一步为 C1-B-A1 故事候选域与 Concept Agent；事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -137,7 +137,7 @@
   不复制摘要正文；
 - 无 migration、无 API / UI。
 
-### C1-A Coordinator Runtime 与动态问答（C1-A-REV-01 修复完成，待复审）
+### C1-A Coordinator Runtime 与动态问答（REV-02 复审通过，本地未推送）
 
 - `novel.coordinator@1.0.0`：严格输入 / 输出 Schema，只允许 `ask_user` / `finish`；
   `ask_user` 允许 0–6 个选项（空数组表示开放式回答；非空时 trim 后非空且不重复），
@@ -232,8 +232,12 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-01 / REV-02 代码修复完成，等待复审：失败调用 usage 已保留、lease fence 改数据库时钟、docs/07/08/09 已同步 |
-| C1-B | 故事规划与确认 | 待 C1-A-REV-02 复审通过后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-02 本地复审通过：失败调用 usage 保留、数据库时钟 lease fence、隐藏轮询与 options 已验收；未推送 / 未过远端 CI |
+| C1-B-A1 | 故事候选域与 Concept Agent | 下一步：`novel_artifacts` / revisions / decisions、`novel.concept`、Mock、服务层；不接 API/UI |
+| C1-B-A2 | Coordinator 创意工具与确认 UI | 待 C1-B-A1：Coordinator 1.1、`concept.generate` / approval tool、API、UI、E2E |
+| C1-B-B | 世界观、人物与剧情 Agent | 待 C1-B-A2：扩展世界规则、人物关系与主线候选 |
+| C1-B-C | 三级大纲 | 待 C1-B-B：全书 / 分卷 / 章节大纲候选与确认门禁 |
+| C1-B-D | 故事圣经编辑与 Work 绑定 | 待 C1-B-C：完整编辑、历史 revision、确认投影与受控 Work 绑定 |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
 | C1-E | 高级可选能力 | 待 C1-D：多稿、质量裁定、文风 Skill、跨卷伏笔与批量记忆 |
@@ -255,7 +259,7 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
 硬编码小说创作阶段顺序。
 
-### C1-A 现状（REV-02 代码修复完成，等待复审）
+### C1-A 现状（REV-02 本地复审通过）
 
 - Runtime / 工具工作流 / 三张表 / Worker 轮询 / 4 个 API / 动态问答页与浏览器 E2E 已完成；
 - `C1-A-REV-01` 已修复六类复审问题：超时/租约分离、即时调用遥测、Mock 脱敏、
@@ -264,8 +268,9 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
   usage；lease fence 与最终条件 UPDATE 改由数据库 `clock_timestamp()` 判断；
   `docs/07` / `docs/08` / `docs/09` 状态、测试数和已修复风险已同步；
 - 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
-- 当前下一步是 `C1-A-REV-02` 复审通过；
-- `C1-A-REV-02` 复审通过前不进入 C1-B；
+- C1-A-REV-02 已本地复审通过：全量单测 1189、E2E 160、15 migrations /
+  26 表 / 19 触发器；尚未推送，也未经过远端 CI；
+- 当前下一步：`C1-B-A1` 故事候选域与 Concept Agent；
 - C1-B 前置：`novel_runs.work_id` 在 C1-A migration 中不可变。C1-B 开工前必须
   设计受控的一次性绑定方案（专用绑定表，或新的未发布 migration 允许
   `NULL → work_id` 单次迁移），校验作品属于同一作者且只能绑定一次；
@@ -295,8 +300,8 @@ C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（首次实现已提�
 复审不通过）。
 C1-A-REV-01 卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（代码已提交
 `a40a0dd`）。
-C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（代码已修复，
-本轮本地提交，等待复审）。
+C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（本地复审通过）。
+C1-B-A1 卡：`docs/tasks/C1-B-A1-story-artifact-concept.md`（下一步）。
 C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
@@ -648,6 +653,9 @@ D-042 `novel_agent_calls` 是实际调用遥测，不是业务状态提交：调
       本条替代 D-040 中“旧 Worker 一律不能写 call”的表述。
 D-043 `ask_user.options` 恢复为 0..6：空数组表示开放式问题，页面始终保留纯文本回答；
       有选项时仍必须非空、去重且最多 6 个。本条替代 D-040 中 1–6 的下限。
+D-044 已发生的模型调用必须保留 Provider 返回的 usage；Schema-invalid /
+      invalid-JSON 也不得丢 token。租约有效性只由 PostgreSQL `clock_timestamp()` 判断，
+      fence 与所有终态条件 UPDATE 都必须再次校验租约。
 ```
 
 ---

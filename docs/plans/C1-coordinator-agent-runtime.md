@@ -604,12 +604,41 @@ Coordinator 不能自行指定文件路径、加载任意 Skill 或读取本机�
 
 ### C1-B：故事规划与确认
 
-- 创意、世界观、人物、剧情、全书/分卷/章节大纲 Agent；
-- `novel_artifacts` / revisions / confirmation；
-- 作者编辑、重新生成、确认和拒绝；
-- 故事圣经与大纲面板；
-- 足够信息后确定性创建或绑定 `Work`；
+C1-B 按纵向切片拆分，避免单卡同时交付全部 Agent、确认模型和完整 UI：
+
+#### C1-B-A1：故事候选域与 Concept Agent
+
+- `novel_artifacts` / revisions / decisions；
+- `novel.concept@1.0.0`、严格 Schema、Mock；
+- 候选 / revision / author decision 服务；
+- 不接 Coordinator、不做 API / UI；
+- 不创建 Work、不做世界观 / 人物 / 大纲。
+
+#### C1-B-A2：Coordinator 创意工具与确认 UI
+
+- Coordinator 1.1 动作扩展与动态工具白名单；
+- `concept.generate` / `artifact.request_approval`；
+- 作者确认 API；
+- 最小概念候选 / 批准 / 拒绝 UI 与 E2E。
+
+#### C1-B-B：世界观、人物与剧情
+
+- Worldbuilding / Character / Plot Agent；
+- 复用候选 revision 与作者确认；
+- 允许 Coordinator 根据作者要求调整顺序。
+
+#### C1-B-C：三级大纲
+
+- 全书 / 分卷 / 章节大纲 Agent；
+- 结构化大纲节点；
 - 作者明确确认章节大纲后，创作准备阶段才完成。
+
+#### C1-B-D：完整编辑与 Work 绑定
+
+- 作者编辑、revision 历史、重新生成与确认投影；
+- 故事圣经 / 大纲完整面板；
+- 受控的一次性 Work 绑定；
+- 不在前面卡片中提前创建正式故事资料。
 
 ### C1-C：正文生产闭环
 
