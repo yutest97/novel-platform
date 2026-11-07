@@ -3,8 +3,9 @@
 - 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；C1-A 首次复审不通过，`C1-A-REV-01` 为下一步；
-  C1-B 故事规划必须等待修复复审通过；事实写回与高级审阅门禁后移
+- 当前产品阶段：A1 / A2 已验收；C1-A-REV-01 代码修复完成，但复审仍发现
+  token 计量、数据库时钟租约和文档收尾 3 个 P2；`C1-A-REV-02` 为下一步，
+  C1-B 必须等待复审通过；事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -226,8 +227,8 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | `C1-A-REV-01` 修复完成，待复审：超时/租约分离、即时调用遥测、Mock 脱敏、隐藏页轮询、options 0..6、读取同快照 |
-| C1-B | 故事规划与确认 | 待 C1-A-REV-01 复审通过后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-01 代码修复完成，但复审仍有 P2：失败调用 usage 丢失、lease fence 用应用时钟、docs/07/09 未收尾；`C1-A-REV-02` 待执行 |
+| C1-B | 故事规划与确认 | 待 C1-A-REV-02 复审通过后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
 | C1-E | 高级可选能力 | 待 C1-D：多稿、质量裁定、文风 Skill、跨卷伏笔与批量记忆 |
@@ -249,13 +250,17 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
 硬编码小说创作阶段顺序。
 
-### C1-A 现状（REV-01 修复完成，待复审）
+### C1-A 现状（REV-01 复审不通过，待 REV-02）
 
 - Runtime / 工具工作流 / 三张表 / Worker 轮询 / 4 个 API / 动态问答页与浏览器 E2E 已完成；
 - `C1-A-REV-01` 已修复六类复审问题：超时/租约分离、即时调用遥测、Mock 脱敏、
   隐藏页真正暂停轮询、`ask_user.options` 0..6、`readNovelRun()` 同快照读取；
+- REV-01 复审确认主路径实现和 1179 单测 / 160 E2E 已通过，但仍有 3 个 P2：
+  Schema-invalid / invalid-JSON 调用的 usage 仍可能记 0；lease fence 仍用应用
+  `Date.now()`；`docs/07` / `docs/09` 状态、测试数和已修复风险未同步；
 - 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
-- `C1-A-REV-01` 复审通过前不进入 C1-B；
+- 下一张卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`；
+- `C1-A-REV-02` 复审通过前不进入 C1-B；
 - C1-B 前置：`novel_runs.work_id` 在 C1-A migration 中不可变。C1-B 开工前必须
   设计受控的一次性绑定方案（专用绑定表，或新的未发布 migration 允许
   `NULL → work_id` 单次迁移），校验作品属于同一作者且只能绑定一次；
@@ -283,7 +288,9 @@ Agent 与工作流按两个维度落地：
 
 C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（首次实现已提交 `a5e3707`，
 复审不通过）。
-C1-A 修复卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（下一步）。
+C1-A-REV-01 卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（代码已提交
+`a40a0dd`，复审仍有 P2）。
+C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（下一步）。
 C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
