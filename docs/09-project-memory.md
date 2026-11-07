@@ -483,13 +483,15 @@ approved 终态、内容长度、revision / decision 一致性、幂等、双 fe
 跨作者 404、失败调用脱敏遥测）。空库 migration 与 E2E 都在全新库上重跑：
 29 表 / 16 migrations / 25 触发器 / 86 CHECK。
 
-C1-B-A1 的两处灵敏度验证：
+C1-B-A1 的三处灵敏度验证：
 
 1. 删除事务内 approved 门禁（保留调用前快照门禁）→
    「旧 Worker 晚返回：批准后不能覆盖新 artifact state」失败（1/454）；
 2. 删除 `decideConceptArtifact` 的 `expectedRunVersion` fence →
    「旧 expectedRunVersion / 旧 revision 使用稳定错误且不留决定」失败（1/454）；
-   两处改动均已还原，workflow 恢复全绿。
+3. 删除 tool 遥测的 `error_code` 字段 →
+   「失败调用仍写脱敏遥测（provider / model / usage / error_code）」失败（1/454）；
+   三处改动均已还原，workflow 恢复全绿。
 
 
 A2-F-C 的两处灵敏度验证：
