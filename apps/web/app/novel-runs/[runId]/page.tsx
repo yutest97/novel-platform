@@ -26,6 +26,7 @@ import {
 } from '@/lib/api';
 import {
   canCancelNovelRun,
+  isPageHidden,
   isTerminalNovelStatus,
   nextNovelPollDelay,
   novelStatusLabel,
@@ -75,8 +76,23 @@ export default function NovelRunPage(): React.ReactElement {
       }
     };
 
+    const scheduleNext = (): void => {
+      // 隐藏时不排新 timer：恢复可见由 visibilitychange 立即补一次并重置退避。
+      if (isPageHidden()) {
+        return;
+      }
+      timer = setTimeout(() => {
+        attempt += 1;
+        void tick();
+      }, nextNovelPollDelay(attempt));
+    };
+
     const tick = async (): Promise<void> => {
       clearTimer();
+      // 初始 tick 与每次 timer 触发前都检查可见性；隐藏时不发起请求。
+      if (isPageHidden()) {
+        return;
+      }
       controller?.abort();
       const current = ++seq;
       controller = new AbortController();
@@ -88,10 +104,7 @@ export default function NovelRunPage(): React.ReactElement {
         setRun(view);
         setLoadError('');
         if (shouldPollNovelRun(view.status)) {
-          timer = setTimeout(() => {
-            attempt += 1;
-            void tick();
-          }, nextNovelPollDelay(attempt));
+          scheduleNext();
         }
       } catch (error) {
         if (disposed || current !== seq) {
@@ -104,20 +117,18 @@ export default function NovelRunPage(): React.ReactElement {
           return;
         }
         setLoadError(messageOf(error));
-        timer = setTimeout(() => {
-          attempt += 1;
-          void tick();
-        }, nextNovelPollDelay(attempt));
+        scheduleNext();
       }
     };
 
     const onVisibility = (): void => {
-      if (document.visibilityState === 'visible') {
-        attempt = 0;
-        void tick();
-      } else {
+      if (isPageHidden()) {
         clearTimer();
+        return;
       }
+      // 恢复可见：立即拉取一次，并重置 1s → 2s → 5s 退避。
+      attempt = 0;
+      void tick();
     };
 
     void tick();

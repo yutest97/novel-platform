@@ -137,21 +137,28 @@
   不复制摘要正文；
 - 无 migration、无 API / UI。
 
-### C1-A Coordinator Runtime 与动态问答（本地完成，待复审）
+### C1-A Coordinator Runtime 与动态问答（C1-A-REV-01 修复完成，待复审）
 
 - `novel.coordinator@1.0.0`：严格输入 / 输出 Schema，只允许 `ask_user` / `finish`；
-  `ask_user` 必须带 1–6 个不重复短选项，`finish` 必须带结束原因；
-  输出中的 SQL / Prisma / 文件路径 / shell / HTML 片段一律拒绝；
+  `ask_user` 允许 0–6 个选项（空数组表示开放式回答；非空时 trim 后非空且不重复），
+  `finish` 必须带结束原因；输出中的 SQL / Prisma / 文件路径 / shell / HTML 片段一律拒绝；
 - `NOVEL_TOOL_WORKFLOWS`：每个工具声明允许状态、输入 Schema、成功迁移、
   sideEffect、重试上限与超时；Runtime 负责工具白名单、状态迁移、预算、
   重复动作熔断、取消优先、租约 fencing 与落库；
+- 超时与租约分离：`leaseAbort` 只响应心跳失败 / 取消 / 真实 fence 失败；
+  每次 attempt 的 `attemptAbort` 只负责单次模型硬超时（可注入
+  `modelCallTimeoutMs`，生产默认 60 秒）。超时记 `MODEL_TIMEOUT` 可重试调用；
+- `novel_agent_calls` 是调用遥测：每次实际调用完成后立即追加（`step_id` 可为空），
+  与 step / state 提交解耦；旧 Worker 可补真实调用遥测，但不得写 step / state；
+  token 预算统计所有实际调用；
 - `novel_runs` / `novel_run_steps` / `novel_agent_calls`：
   CHECK + 触发器保证状态迁移合法、`request_text` / `max_steps` / 归属不可变、
   step 与 call append-only、run 不可删除；
 - Worker 新增独立 novel 轮询循环，与 generation 循环共用健康检查端口并合并状态；
 - 4 个 API：创建、读取、回答（带 `expectedVersion`）、取消；
-- `/novel-runs/[runId]` 动态问答页：1s → 2s → 5s 轮询、页面隐藏暂停、
-  回答冲突提示并重取、终态停止轮询；
+  `readNovelRun()` 在 `RepeatableRead` 同一快照读取 run 与最新成功 step；
+- `/novel-runs/[runId]` 动态问答页：1s → 2s → 5s 轮询；页面隐藏时初始 tick 与
+  后续调度都真正暂停，恢复可见立即补一次并重置退避；回答冲突提示并重取；
 - C1-A 只产生 `waiting_user` / `completed` / `failed` / `cancelled`，
   **不产生 `waiting_approval`**；不创建 Work、章节或正文。
 
@@ -219,7 +226,7 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-D | Summarizer Agent | 已验收（CI #25）：契约、定稿任务、摘要落库、前章摘要接线、摘要 API 与 UI |
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
-| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | 首次复审不通过：超时 fencing、实际调用计量、Mock 回显、隐藏页轮询、options 与读取快照待 `C1-A-REV-01` 修复 |
+| C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | `C1-A-REV-01` 修复完成，待复审：超时/租约分离、即时调用遥测、Mock 脱敏、隐藏页轮询、options 0..6、读取同快照 |
 | C1-B | 故事规划与确认 | 待 C1-A-REV-01 复审通过后接入创意/世界观/人物/剧情/三级大纲 Agent、候选 revision、作者确认、故事圣经与大纲 UI |
 | C1-C | 正文生产闭环 | 待 C1-B：Composer/Writer/Reviser，复用 Reviewer/Summarizer/FactExtractor，确认大纲后写作 |
 | C1-D | 连续性与故事记忆 | 待 C1-C：Continuity/设定审查/文风审查/伏笔/Librarian 写回/故事一致性 |
@@ -242,18 +249,17 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 现有 WorkflowKernel / Worker 保留为持久化、租约、重试和工具执行基础设施，不再
 硬编码小说创作阶段顺序。
 
-### C1-A 现状（首次复审不通过，待 REV-01）
+### C1-A 现状（REV-01 修复完成，待复审）
 
 - Runtime / 工具工作流 / 三张表 / Worker 轮询 / 4 个 API / 动态问答页与浏览器 E2E 已完成；
-- 本地验证：全新空库 15 个 migration（26 张业务表、19 个触发器）、
-  全量单测 1170 全绿、E2E 159 全绿；两次灵敏度验证均先按预期暴露失败，恢复后全绿；
+- `C1-A-REV-01` 已修复六类复审问题：超时/租约分离、即时调用遥测、Mock 脱敏、
+  隐藏页真正暂停轮询、`ask_user.options` 0..6、`readNovelRun()` 同快照读取；
 - 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
-- 复审发现 P1：模型硬超时与 lease signal 共用，超时会被误判为 lease-lost，
-  实际调用重复但 run 不进入终态；必须先修复；
-- 复审发现 P2：取消 / lease-lost 时实际调用日志丢失、Mock 回显作者原文、
-  隐藏页在途请求返回后继续调度、`ask_user.options` 与原卡不一致、run 与问题分两次读取；
-- 下一张卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`；
-- `C1-A-REV-01` 复审通过前不进入 C1-B。
+- `C1-A-REV-01` 复审通过前不进入 C1-B；
+- C1-B 前置：`novel_runs.work_id` 在 C1-A migration 中不可变。C1-B 开工前必须
+  设计受控的一次性绑定方案（专用绑定表，或新的未发布 migration 允许
+  `NULL → work_id` 单次迁移），校验作品属于同一作者且只能绑定一次；
+  本卡不实现任何 Work 功能。
 
 C1 方案 v2 已把完整 Agent 能力地图纳入规划：创意、世界观、人物、剧情、全书/分卷/
 章节大纲、Composer、Writer、多稿、文风、Reviewer、Continuity、设定审查、文风审查、

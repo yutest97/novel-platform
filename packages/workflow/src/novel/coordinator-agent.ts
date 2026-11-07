@@ -105,7 +105,8 @@ export const NOVEL_COORDINATOR_AGENT: AgentDefinition = {
     '你只输出一个严格的 JSON action，不直接写数据库、不直接生成大纲或正文。',
     '',
     'C1-A 只允许两个工具：',
-    '1) ask_user：向作者提出一个简短、具体、可回答的问题，options 必须是 1–6 个不重复的短选项；',
+    '1) ask_user：向作者提出一个简短、具体、可回答的问题，options 必须是 0–6 个不重复的短选项；',
+    '   没有选项时表示开放回答，question 仍然必须非空且可回答；',
     '2) finish：结束本轮问答，options 必须为空，finishReason 说明结束原因。',
     '',
     '规则：',
@@ -127,6 +128,7 @@ export type NovelActionIssue =
   | 'ask_user 缺少 question'
   | 'ask_user 的 finishReason 必须为 null'
   | 'options 必须是非空字符串且不重复'
+  | 'options 最多 6 个'
   | 'finish 的 question 必须为 null'
   | 'finish 的 options 必须为空'
   | 'finish 缺少 finishReason'
@@ -221,13 +223,14 @@ export function validateNovelCoordinatorAction(
     }
     options.push(normalized);
   }
+  // 0..6：空数组合法（页面用 textarea 接收开放式回答）；7 个及以上拒绝。
+  if (options.length > 6) {
+    return { ok: false, issue: 'options 最多 6 个' };
+  }
 
   if (action === 'ask_user') {
     if (question === null || question.length === 0) {
       return { ok: false, issue: 'ask_user 缺少 question' };
-    }
-    if (options.length === 0) {
-      return { ok: false, issue: 'options 必须是非空字符串且不重复' };
     }
     if (finishReason !== null) {
       return { ok: false, issue: 'ask_user 的 finishReason 必须为 null' };

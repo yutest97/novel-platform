@@ -4,7 +4,12 @@ import { resolve } from 'node:path';
 
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
-import { ADMIN_EMAIL, ORIGIN, readAdminPassword } from './shared-credentials.js';
+import {
+  ADMIN_EMAIL,
+  ORIGIN,
+  readAdminPassword,
+  writeAuthorCredentials,
+} from './shared-credentials.js';
 import { recordSecret } from './secret-ledger.js';
 
 /**
@@ -643,6 +648,11 @@ test('11. 另一作者看不到事件（404）；管理员 403', async ({ browse
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();
   await firstLoginAndChangePassword(page, reusedEmail, resetPassword, AUTHOR_B_NEW_PASSWORD);
+  // 复用账号就是 admin-flow 建的 e2e-author：改密后必须同步共享凭据文件，
+  // 否则按字母序排在其后的 spec（novel-run-flow / visibility）会用旧口令登录。
+  if (reusedEmail.startsWith('e2e-author-')) {
+    writeAuthorCredentials(reusedEmail, AUTHOR_B_NEW_PASSWORD);
+  }
 
   // 取物品 id（作者 A 的会话）
   const authorContext = await browser.newContext({ ignoreHTTPSErrors: true });

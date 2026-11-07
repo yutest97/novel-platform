@@ -5,9 +5,10 @@
  * - Coordinator 只做语义决策；Runtime 负责工具白名单、状态迁移、预算、
  *   重复动作熔断、租约、取消优先级和落库；
  * - Runtime 不替作者确认产物，也不创建任何 Work、章节或正文；
- * - 旧 Worker 晚返回时必须因租约/版本 fence 失败而**丢弃全部结果**，
- *   不写 step、不写调用日志、不改 state；
- * - 每次实际模型调用都进入 novel_agent_calls，且只进入一次（重试不产生重复成功 step）。
+ * - 旧 Worker 晚返回时必须因租约/版本 fence 失败而**丢弃业务提交**，
+ *   不写 step、不改 state；但允许追加它实际发生的脱敏调用遥测（step_id 为空）；
+ * - 每次实际模型调用都立即写入 novel_agent_calls，且只写入一次；
+ * - 模型硬超时与租约丢失使用独立信号：超时只影响单次 attempt，租约丢失才终止执行。
  */
 
 import { randomUUID } from 'node:crypto';
@@ -18,7 +19,7 @@ import type { Prisma, PrismaClient } from '@novel/db';
 import { AgentInputInvalidError, AgentOutputInvalidError, AgentRunner } from '../agent.js';
 import { sanitizeTaskError } from '../errors.js';
 import { validateJson } from '../json-schema.js';
-import type { ModelProvider } from '../model-types.js';
+import { ModelProviderError, type ModelProvider } from '../model-types.js';
 import { hashTaskRequest } from '../request-hash.js';
 import {
   NOVEL_COORDINATOR_AGENT,
@@ -26,11 +27,7 @@ import {
   type NovelCoordinatorAction,
   type NovelCoordinatorInput,
 } from './coordinator-agent.js';
-import {
-  NOVEL_TOOL_WORKFLOWS,
-  getNovelToolWorkflow,
-  type NovelToolResult,
-} from './tool-workflows.js';
+import { getNovelToolWorkflow, type NovelToolResult } from './tool-workflows.js';
 import { NOVEL_ALLOWED_TOOLS, parseNovelStateSummary } from './types.js';
 
 export type NovelRunOutcome =
@@ -45,6 +42,8 @@ export interface NovelCoordinatorWorkerOptions {
   readonly maxAttempts?: number;
   /** 一轮问答累计 token 预算（prompt + completion）。 */
   readonly tokenBudget?: number;
+  /** 单次模型调用硬超时（毫秒）；生产默认 60 秒，测试可注入更短值。 */
+  readonly modelCallTimeoutMs?: number;
 }
 
 interface ClaimedNovelRun {
@@ -65,11 +64,14 @@ interface RunExecutionState {
   readonly max_steps: number;
   readonly request_text: string;
   readonly locked_by: string | null;
+  readonly lease_until: Date | null;
   readonly cancel_requested_at: Date | null;
 }
 
-interface PendingCall {
-  readonly callKind: 'coordinator';
+/** 每次实际模型调用的脱敏遥测；写入后不再修改。 */
+interface CallTelemetry {
+  readonly callId: string;
+  readonly runId: string;
   readonly agentName: string;
   readonly agentVersion: string;
   readonly provider: string;
@@ -81,6 +83,11 @@ interface PendingCall {
   readonly errorCode: string | null;
 }
 
+type AttemptOutcome =
+  | { readonly kind: 'success'; readonly action: NovelCoordinatorAction }
+  | { readonly kind: 'retry'; readonly errorCode: string }
+  | { readonly kind: 'stop'; readonly errorCode: string };
+
 class CommitAborted extends Error {
   constructor(readonly outcome: 'lease-lost') {
     super(outcome);
@@ -90,10 +97,8 @@ class CommitAborted extends Error {
 
 const MAX_REPEAT_ACTIONS = 3;
 const DEFAULT_TOKEN_BUDGET = 100_000;
-/** 单次 Coordinator 模型调用的硬超时：取所有已注册工具声明的最大值。 */
-const MODEL_CALL_TIMEOUT_MS = Math.max(
-  ...Object.values(NOVEL_TOOL_WORKFLOWS).map((workflow) => workflow.timeoutMs),
-);
+/** 单次模型调用硬超时（生产默认 60 秒；测试通过构造参数注入更短值）。 */
+const DEFAULT_MODEL_CALL_TIMEOUT_MS = 60_000;
 
 /**
  * 单进程内的 Coordinator Worker。
@@ -111,6 +116,7 @@ export class NovelCoordinatorWorker {
   private readonly sweepIntervalMs: number;
   private readonly maxAttempts: number;
   private readonly tokenBudget: number;
+  private readonly modelCallTimeoutMs: number;
   private lastSweepAt = 0;
   private stopped = false;
 
@@ -126,6 +132,10 @@ export class NovelCoordinatorWorker {
     this.sweepIntervalMs = options.sweepIntervalMs ?? 30_000;
     this.maxAttempts = Math.max(1, options.maxAttempts ?? 3);
     this.tokenBudget = options.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
+    this.modelCallTimeoutMs = Math.max(
+      1,
+      options.modelCallTimeoutMs ?? DEFAULT_MODEL_CALL_TIMEOUT_MS,
+    );
   }
 
   stop(): void {
@@ -231,6 +241,7 @@ export class NovelCoordinatorWorker {
         "max_steps",
         "request_text",
         "locked_by",
+        "lease_until",
         "cancel_requested_at"
       FROM "novel_runs"
       WHERE "id" = ${runId}::uuid
@@ -238,21 +249,22 @@ export class NovelCoordinatorWorker {
     return rows[0] ?? null;
   }
 
-  private async checkFence(
-    runId: string,
-    stateVersion: number,
-    signal: AbortSignal,
-  ): Promise<boolean> {
-    if (signal.aborted) {
-      return false;
-    }
+  /**
+   * 真实 fence：只以数据库状态为准。
+   *
+   * 模型超时使用的 attempt signal **不得**参与这里的判断，
+   * 否则一次可重试超时会被误判成租约丢失。
+   */
+  private async checkFence(runId: string, stateVersion: number): Promise<boolean> {
     const state = await this.getExecutionState(runId);
     return (
       state !== null &&
       state.status === 'running' &&
       state.locked_by === this.workerId &&
       state.state_version === stateVersion &&
-      state.cancel_requested_at === null
+      state.cancel_requested_at === null &&
+      state.lease_until !== null &&
+      state.lease_until.getTime() > Date.now()
     );
   }
 
@@ -288,7 +300,7 @@ export class NovelCoordinatorWorker {
 
     const usedTokens = await this.usedTokens(run.id);
     if (usedTokens >= this.tokenBudget) {
-      await this.commitFailure(run, fresh, 'NOVEL_RUN_BUDGET_EXCEEDED', [], 'none', true);
+      await this.commitFailure(run, fresh, 'NOVEL_RUN_BUDGET_EXCEEDED', 'none', true);
       return 'failed';
     }
 
@@ -300,157 +312,79 @@ export class NovelCoordinatorWorker {
       remainingSteps,
     };
 
-    const controller = new AbortController();
+    // leaseAbort 只由心跳失败 / 取消 / 真实 fence 失败触发；
+    // 单次模型调用超时使用 runModelAttempt 内部的独立 attemptAbort。
+    const leaseAbort = new AbortController();
     let leaseLost = false;
     const heartbeatTimer = setInterval(() => {
       void this.heartbeat(run.id, fresh.state_version)
         .then((alive) => {
           if (!alive) {
             leaseLost = true;
-            controller.abort();
+            leaseAbort.abort();
           }
         })
         .catch(() => {
           leaseLost = true;
-          controller.abort();
+          leaseAbort.abort();
         });
     }, this.heartbeatIntervalMs);
-    const abortTimer = setTimeout(() => controller.abort(), MODEL_CALL_TIMEOUT_MS);
 
-    const pendingCalls: PendingCall[] = [];
     let validated: NovelCoordinatorAction | null = null;
     let lastErrorCode = 'WORKFLOW_INTERNAL_ERROR';
 
     try {
       for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-        if (leaseLost || !(await this.checkFence(run.id, fresh.state_version, controller.signal))) {
+        if (leaseLost || !(await this.checkFence(run.id, fresh.state_version))) {
           return 'lease-lost';
         }
-        const startedAt = performance.now();
-        try {
-          const result = await this.runner.run<unknown>(NOVEL_COORDINATOR_AGENT, input, {
-            signal: controller.signal,
-            temperature: 0,
-          });
-          const semantic = validateNovelCoordinatorAction(result.output);
-          if (!semantic.ok) {
-            lastErrorCode = 'AGENT_OUTPUT_INVALID';
-            pendingCalls.push({
-              callKind: 'coordinator',
-              agentName: result.agentName,
-              agentVersion: result.promptVersion,
-              provider: result.provider,
-              model: result.model,
-              promptTokens: result.usage.promptTokens,
-              completionTokens: result.usage.completionTokens,
-              latencyMs: result.latencyMs,
-              success: false,
-              errorCode: 'AGENT_OUTPUT_INVALID',
-            });
-            continue;
-          }
-          validated = semantic.action;
-          pendingCalls.push({
-            callKind: 'coordinator',
-            agentName: result.agentName,
-            agentVersion: result.promptVersion,
-            provider: result.provider,
-            model: result.model,
-            promptTokens: result.usage.promptTokens,
-            completionTokens: result.usage.completionTokens,
-            latencyMs: result.latencyMs,
-            success: true,
-            errorCode: null,
-          });
+        const outcome = await this.runModelAttempt(run.id, input, leaseAbort.signal);
+        // 心跳已判定租约丢失 / 取消：本次结果不再作为业务失败提交。
+        if (leaseLost || leaseAbort.signal.aborted) {
+          return 'lease-lost';
+        }
+        if (outcome.kind === 'success') {
+          validated = outcome.action;
           break;
-        } catch (error) {
-          const safe = sanitizeTaskError(error);
-          lastErrorCode = safe.code;
-          if (!(error instanceof AgentInputInvalidError)) {
-            pendingCalls.push({
-              callKind: 'coordinator',
-              agentName: NOVEL_COORDINATOR_AGENT.name,
-              agentVersion: NOVEL_COORDINATOR_AGENT.promptVersion,
-              provider: this.provider.name,
-              model: this.runner.resolveModel(NOVEL_COORDINATOR_AGENT),
-              promptTokens: 0,
-              completionTokens: 0,
-              latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-              success: false,
-              errorCode: safe.code,
-            });
-          }
-          // 模型输出非法（Schema / 语义）与可重试错误都使用剩余 attempt 重新调用；
-          // 输入非法与永久 Provider 错误立即停止。
-          if (error instanceof AgentInputInvalidError) {
-            break;
-          }
-          if (!(error instanceof AgentOutputInvalidError) && !safe.retryable) {
-            break;
-          }
+        }
+        lastErrorCode = outcome.errorCode;
+        if (outcome.kind === 'stop') {
+          break;
         }
       }
     } finally {
       clearInterval(heartbeatTimer);
-      clearTimeout(abortTimer);
+      leaseAbort.abort();
     }
 
-    if (leaseLost || !(await this.checkFence(run.id, fresh.state_version, controller.signal))) {
+    if (leaseLost || !(await this.checkFence(run.id, fresh.state_version))) {
       return 'lease-lost';
     }
 
     if (validated === null) {
-      await this.commitFailure(run, fresh, lastErrorCode, pendingCalls, 'none', true);
+      await this.commitFailure(run, fresh, lastErrorCode, 'none', true);
       return 'failed';
     }
 
     // 工具白名单 → 状态可进入性 → 工具输入 Schema：全部由 Runtime 校验。
     const workflow = getNovelToolWorkflow(validated.action);
     if (workflow === null || !NOVEL_ALLOWED_TOOLS.includes(validated.action)) {
-      await this.commitFailure(
-        run,
-        fresh,
-        'NOVEL_RUN_TOOL_NOT_ALLOWED',
-        pendingCalls,
-        validated.action,
-        true,
-      );
+      await this.commitFailure(run, fresh, 'NOVEL_RUN_TOOL_NOT_ALLOWED', validated.action, true);
       return 'failed';
     }
     if (!workflow.allowedFromStatus.includes('running')) {
-      await this.commitFailure(
-        run,
-        fresh,
-        'NOVEL_RUN_INVALID_STATE',
-        pendingCalls,
-        validated.action,
-        true,
-      );
+      await this.commitFailure(run, fresh, 'NOVEL_RUN_INVALID_STATE', validated.action, true);
       return 'failed';
     }
     if (validateJson(workflow.inputSchema, validated.input).length > 0) {
-      await this.commitFailure(
-        run,
-        fresh,
-        'AGENT_OUTPUT_INVALID',
-        pendingCalls,
-        validated.action,
-        true,
-      );
+      await this.commitFailure(run, fresh, 'AGENT_OUTPUT_INVALID', validated.action, true);
       return 'failed';
     }
 
     const signature = this.actionSignature(validated);
     const repeatCount = summary.lastActionSignature === signature ? summary.repeatCount + 1 : 0;
     if (repeatCount >= MAX_REPEAT_ACTIONS - 1) {
-      await this.commitFailure(
-        run,
-        fresh,
-        'COORDINATOR_LOOP_DETECTED',
-        pendingCalls,
-        validated.action,
-        true,
-      );
+      await this.commitFailure(run, fresh, 'COORDINATOR_LOOP_DETECTED', validated.action, true);
       return 'failed';
     }
 
@@ -462,8 +396,147 @@ export class NovelCoordinatorWorker {
       signature,
       repeatCount,
     });
-    await this.commitSuccess(run, fresh, validated, toolResult, pendingCalls);
+    await this.commitSuccess(run, fresh, validated, toolResult);
     return toolResult.status === 'completed' ? 'completed' : 'waiting_user';
+  }
+
+  /**
+   * 单次模型调用 attempt。
+   *
+   * - 用 `Promise.race` 硬截断 Provider，即使 Provider 不监听 signal；
+   * - 超时只 abort 本次 attemptAbort，返回可重试的 `MODEL_TIMEOUT`；
+   * - 租约丢失通过 leaseSignal 让调用尽快停止，但不写业务失败；
+   * - 每次实际调用完成后立即 append 一条脱敏遥测（`step_id` 为空）。
+   */
+  private async runModelAttempt(
+    runId: string,
+    input: NovelCoordinatorInput,
+    leaseSignal: AbortSignal,
+  ): Promise<AttemptOutcome> {
+    const attemptAbort = new AbortController();
+    const callId = randomUUID();
+    const startedAt = performance.now();
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let onLeaseAbort: (() => void) | null = null;
+
+    try {
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timeoutTimer = setTimeout(() => {
+          attemptAbort.abort();
+          reject(new ModelProviderError('MODEL_TIMEOUT', '模型调用超时', { retryable: true }));
+        }, this.modelCallTimeoutMs);
+      });
+      const leaseFailure = new Promise<never>((_resolve, reject) => {
+        onLeaseAbort = () => {
+          reject(new ModelProviderError('MODEL_ABORTED', '模型调用已中止'));
+        };
+        if (leaseSignal.aborted) {
+          onLeaseAbort();
+        } else {
+          leaseSignal.addEventListener('abort', onLeaseAbort, { once: true });
+        }
+      });
+
+      const signal = AbortSignal.any([attemptAbort.signal, leaseSignal]);
+      const result = await Promise.race([
+        this.runner.run<unknown>(NOVEL_COORDINATOR_AGENT, input, {
+          signal,
+          temperature: 0,
+        }),
+        timeout,
+        leaseFailure,
+      ]);
+
+      const semantic = validateNovelCoordinatorAction(result.output);
+      if (!semantic.ok) {
+        await this.appendCall({
+          callId,
+          runId,
+          agentName: result.agentName,
+          agentVersion: result.promptVersion,
+          provider: result.provider,
+          model: result.model,
+          promptTokens: result.usage.promptTokens,
+          completionTokens: result.usage.completionTokens,
+          latencyMs: result.latencyMs,
+          success: false,
+          errorCode: 'AGENT_OUTPUT_INVALID',
+        });
+        return { kind: 'retry', errorCode: 'AGENT_OUTPUT_INVALID' };
+      }
+      await this.appendCall({
+        callId,
+        runId,
+        agentName: result.agentName,
+        agentVersion: result.promptVersion,
+        provider: result.provider,
+        model: result.model,
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+        latencyMs: result.latencyMs,
+        success: true,
+        errorCode: null,
+      });
+      return { kind: 'success', action: semantic.action };
+    } catch (error) {
+      const safe = sanitizeTaskError(error);
+      // 输入在调用 Provider 前就被拒绝，不产生实际模型调用，也不写调用日志。
+      if (error instanceof AgentInputInvalidError) {
+        return { kind: 'stop', errorCode: safe.code };
+      }
+      await this.appendCall({
+        callId,
+        runId,
+        agentName: NOVEL_COORDINATOR_AGENT.name,
+        agentVersion: NOVEL_COORDINATOR_AGENT.promptVersion,
+        provider: this.provider.name,
+        model: this.runner.resolveModel(NOVEL_COORDINATOR_AGENT),
+        promptTokens: 0,
+        completionTokens: 0,
+        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        success: false,
+        errorCode: safe.code,
+      });
+      // Schema 输出非法与可重试错误（含 MODEL_TIMEOUT）使用剩余 attempt；
+      // 永久 Provider 错误立即停止。
+      if (error instanceof AgentOutputInvalidError || safe.retryable) {
+        return { kind: 'retry', errorCode: safe.code };
+      }
+      return { kind: 'stop', errorCode: safe.code };
+    } finally {
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+      }
+      if (onLeaseAbort !== null) {
+        leaseSignal.removeEventListener('abort', onLeaseAbort);
+      }
+    }
+  }
+
+  /**
+   * 调用遥测与业务状态提交解耦：实际调用完成后立即 append。
+   *
+   * 使用调用前后生成的稳定 `callId` 作为主键；同一逻辑调用只写一次，
+   * 也允许旧 Worker 追加它真实发生的调用日志（`step_id` 为空）。
+   */
+  private async appendCall(call: CallTelemetry): Promise<void> {
+    await this.db.novelAgentCall.create({
+      data: {
+        id: call.callId,
+        runId: call.runId,
+        stepId: null,
+        callKind: 'coordinator',
+        agentName: call.agentName,
+        agentVersion: call.agentVersion,
+        provider: call.provider,
+        model: call.model,
+        promptTokens: call.promptTokens,
+        completionTokens: call.completionTokens,
+        latencyMs: call.latencyMs,
+        success: call.success,
+        errorCode: call.errorCode,
+      },
+    });
   }
 
   private async usedTokens(runId: string): Promise<number> {
@@ -514,7 +587,6 @@ export class NovelCoordinatorWorker {
     fresh: RunExecutionState,
     action: NovelCoordinatorAction,
     result: NovelToolResult,
-    calls: readonly PendingCall[],
   ): Promise<void> {
     const nextStatus = result.status;
     const stepNo = fresh.step_count + 1;
@@ -546,7 +618,7 @@ export class NovelCoordinatorWorker {
       if (updated.length === 0) {
         throw new CommitAborted('lease-lost');
       }
-      const step = await tx.novelRunStep.create({
+      await tx.novelRunStep.create({
         data: {
           runId: run.id,
           stepNo,
@@ -557,26 +629,7 @@ export class NovelCoordinatorWorker {
           status: 'succeeded',
           errorCode: null,
         },
-        select: { id: true },
       });
-      if (calls.length > 0) {
-        await tx.novelAgentCall.createMany({
-          data: calls.map((call) => ({
-            runId: run.id,
-            stepId: step.id,
-            callKind: call.callKind,
-            agentName: call.agentName,
-            agentVersion: call.agentVersion,
-            provider: call.provider,
-            model: call.model,
-            promptTokens: call.promptTokens,
-            completionTokens: call.completionTokens,
-            latencyMs: call.latencyMs,
-            success: call.success,
-            errorCode: call.errorCode,
-          })),
-        });
-      }
     });
   }
 
@@ -584,7 +637,6 @@ export class NovelCoordinatorWorker {
     run: ClaimedNovelRun,
     fresh: RunExecutionState,
     errorCode: string,
-    calls: readonly PendingCall[],
     toolName: string,
     recordStep: boolean,
   ): Promise<void> {
@@ -614,7 +666,7 @@ export class NovelCoordinatorWorker {
       if (!canRecordStep) {
         return;
       }
-      const step = await tx.novelRunStep.create({
+      await tx.novelRunStep.create({
         data: {
           runId: run.id,
           stepNo,
@@ -625,26 +677,7 @@ export class NovelCoordinatorWorker {
           status: 'failed',
           errorCode,
         },
-        select: { id: true },
       });
-      if (calls.length > 0) {
-        await tx.novelAgentCall.createMany({
-          data: calls.map((call) => ({
-            runId: run.id,
-            stepId: step.id,
-            callKind: call.callKind,
-            agentName: call.agentName,
-            agentVersion: call.agentVersion,
-            provider: call.provider,
-            model: call.model,
-            promptTokens: call.promptTokens,
-            completionTokens: call.completionTokens,
-            latencyMs: call.latencyMs,
-            success: call.success,
-            errorCode: call.errorCode,
-          })),
-        });
-      }
     });
   }
 

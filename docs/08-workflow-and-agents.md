@@ -2518,7 +2518,8 @@ Runtime 仍是代码控制的持久化与执行层；Coordinator 只输出结构
 
 - JSON Schema 允许 `question` / `finishReason` 为 `string | null`，交叉语义由
   `validateNovelCoordinatorAction` 负责：
-  - `ask_user`：`question` 非空、`options` 1–6 个且不重复、`finishReason === null`；
+  - `ask_user`：`question` 非空、`options` 0–6 个（空数组表示开放式回答；非空时每项
+    trim 后必须非空且不重复）、`finishReason === null`；
   - `finish`：`question === null`、`options` 为空、`finishReason` 非空；
   - `objective` / `decisionSummary` 非空且长度受限；
   - 任何 SQL、Prisma 调用、文件路径、shell 或 HTML 片段一律拒绝。
@@ -2543,16 +2544,29 @@ C1-A **不产生 `waiting_approval`**，也不创建 Work、章节或正文。
 - 过期租约回收：有 `cancel_requested_at` 的 running run 直接 `cancelled`，否则重排 `queued`；
 - `FOR UPDATE SKIP LOCKED` 领取单条 run，写 `locked_by / lease_until / heartbeat_at`；
 - 心跳与 fence：所有提交条件都带 `status = 'running' AND locked_by = 本 Worker
-  AND state_version = 读取时版本 AND cancel_requested_at IS NULL`；
-- Schema / 语义非法与可重试错误最多尝试 `maxAttempts` 次；每次实际模型调用都缓冲
-  一条 `novel_agent_calls`，失败且未形成 step 时 `step_id = NULL`；
-- 预算：`remainingSteps <= 0` 直接失败且不写 step；token 预算超限写 failed step
-  并记录 `NOVEL_RUN_BUDGET_EXCEEDED`；
+  AND state_version = 读取时版本 AND cancel_requested_at IS NULL`，并确认 `lease_until`
+  尚未过期；
+- 两个独立信号：`leaseAbort` 只由心跳失败、取消或真实 fence 失败触发；每次 attempt
+  使用独立的 `attemptAbort`，只负责单次模型调用超时。`attemptAbort` 不参与
+  `checkFence`，超时不得被误判为租约丢失；
+- 模型硬超时：`Promise.race` 截断 Provider，即使 Provider 不监听 signal；
+  `modelCallTimeoutMs` 可注入（生产默认 60 秒，测试用更短值）。单次超时记一条
+  `MODEL_TIMEOUT` 调用、作为该 attempt 的可重试失败，下一次 attempt 使用新的
+  `attemptAbort`；attempt 用尽后在同一 run 提交 failed step + `failed`；
+- 调用遥测与状态提交解耦：每次实际模型调用完成后立即 append 一条脱敏
+  `novel_agent_calls`（`step_id = NULL`），使用调用级稳定 UUID 作为主键，同一逻辑
+  调用只写一次。旧 Worker 晚返回时可以补写它实际发生的调用日志，但不得写 step、
+  state、问题或任何创作资料；
+- 预算：`remainingSteps <= 0` 直接失败且不写 step；token 预算读取所有实际调用日志
+  （含失败重试、超时、取消），超限写 failed step 并记录
+  `NOVEL_RUN_BUDGET_EXCEEDED`；
 - 循环熔断：`hash(action + question/options/finishReason)` 连续 3 次相同 →
   `COORDINATOR_LOOP_DETECTED`；
-- 成功提交：条件 UPDATE run + 插入一条 `novel_run_steps` + 批量插入 calls，
-  全在同一事务；旧 Worker 条件 UPDATE 无行时抛 `CommitAborted('lease-lost')`，
-  整事务回滚，`runOnce` 返回 `'lease-lost'`。
+- 成功提交：条件 UPDATE run + 插入一条 `novel_run_steps`，在同一事务；旧 Worker
+  条件 UPDATE 无行时抛 `CommitAborted('lease-lost')`，整事务回滚，`runOnce` 返回
+  `'lease-lost'`；
+- 读取：`readNovelRun()` 使用 `RepeatableRead` 事务在同一快照读取 run 与最新成功
+  step，避免返回“旧 version + 新 question”；DTO 不变。
 
 ### 36.4 持久化
 
@@ -2587,14 +2601,33 @@ C1-A **不产生 `waiting_approval`**，也不创建 Work、章节或正文。
 
 页面 `/novel-runs/[runId]`：
 
-- 1s → 2s → 5s 轮询；页面隐藏暂停，恢复可见立即刷新；
+- 1s → 2s → 5s 轮询；`isPageHidden()` 在初始 tick 前、每次成功/失败安排下一次 timer
+  前都会检查：隐藏时清 timer 且不排新 timer，恢复可见立即补一次并重置退避；
 - 请求带单调 `seq` 与 `AbortController`，旧响应不能覆盖新状态；
 - 回答提交带当前 `version`；409 时提示并立即重取，不覆盖作者输入；
 - 终态停止轮询并展示结论；取消按钮只在非终态出现；
 - 问题、选项、摘要、错误全部按纯文本渲染，不使用 `dangerouslySetInnerHTML`；
 - 顶部「写作台 → 写新小说」只有一个目标输入框，不做题材预设或向导。
 
-### 36.7 未做
+### 36.7 C1-B 前置：Work 绑定
+
+C1-A 的 migration 把 `novel_runs.work_id` 设为不可变（创建后不能 UPDATE），
+这是为了防止问答中途篡改归属。C1-B 若要在同一 run 上“创建或绑定 Work”，
+开工前必须先设计受控的一次性绑定方案，二选一：
+
+- 新增专用绑定表（run_id ↔ work_id，唯一约束 + 作者校验），不改 run 的可变字段；
+- 或在新的一份**未发布** migration 中允许 `NULL → work_id` 的单次迁移，并由触发器
+  保证只能发生一次。
+
+无论哪种方案都必须满足：
+
+- 绑定的作品属于同一作者（`works.id + works.author_id` 复合校验）；
+- 只能从未绑定变为已绑定一次，不允许改绑或解绑；
+- 不把 Work 创建 / 绑定能力塞进本次 C1-A 修复卡。
+
+本次修复不实现任何 Work 功能。
+
+### 36.8 未做
 
 故事规划 Agent（创意 / 世界观 / 人物 / 剧情 / 三级大纲）、候选 revision、
 作者确认故事圣经、`waiting_approval`、创建 Work、正文生成、事实写回、

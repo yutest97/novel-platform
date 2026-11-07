@@ -103,42 +103,30 @@ function questionOf(outputSummary: unknown): { question: string; options: string
   return { question, options };
 }
 
-async function toView(
-  db: PrismaClient,
-  row: {
-    readonly id: string;
-    readonly status: string;
-    readonly state_version: number;
-    readonly current_goal: string;
-    readonly last_decision_summary: string;
-    readonly step_count: number;
-    readonly created_at: Date;
-    readonly updated_at: Date;
-  },
-): Promise<NovelRunView> {
-  const status = statusOf(row);
-  let question: string | null = null;
-  let options: readonly string[] = [];
-  if (status === 'waiting_user') {
-    const step = await db.novelRunStep.findFirst({
-      where: { runId: row.id, status: 'succeeded' },
-      orderBy: { stepNo: 'desc' },
-      select: { outputSummary: true },
-    });
-    const pending = questionOf(step?.outputSummary);
-    if (pending !== null) {
-      question = pending.question;
-      options = pending.options;
-    }
-  }
+interface NovelRunViewRow {
+  readonly id: string;
+  readonly status: string;
+  readonly state_version: number;
+  readonly current_goal: string;
+  readonly last_decision_summary: string;
+  readonly step_count: number;
+  readonly created_at: Date;
+  readonly updated_at: Date;
+}
+
+/** 由调用方提供同一快照内的 step 输出，构造对外 DTO。 */
+function buildView(
+  row: NovelRunViewRow,
+  pending: { readonly question: string; readonly options: readonly string[] } | null,
+): NovelRunView {
   return {
     runId: row.id,
-    status,
+    status: statusOf(row),
     version: row.state_version,
     currentGoal: row.current_goal,
     decisionSummary: row.last_decision_summary,
-    question,
-    options,
+    question: pending?.question ?? null,
+    options: pending?.options ?? [],
     stepCount: row.step_count,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -219,32 +207,48 @@ export async function readNovelRun(
   input: { readonly authorId: string; readonly runId: unknown },
 ): Promise<NovelRunView> {
   const runId = normalizeRunId(input.runId);
-  const row = await db.novelRun.findFirst({
-    where: { id: runId, authorId: input.authorId },
-    select: {
-      id: true,
-      status: true,
-      stateVersion: true,
-      currentGoal: true,
-      lastDecisionSummary: true,
-      stepCount: true,
-      createdAt: true,
-      updatedAt: true,
+  // run 与当前问题必须在同一快照读取；否则 Worker 可能在两次查询间提交下一步，
+  // 返回"旧 version + 新 question"这种自相矛盾的 DTO。
+  return db.$transaction(
+    async (tx) => {
+      const row = await tx.novelRun.findFirst({
+        where: { id: runId, authorId: input.authorId },
+        select: {
+          id: true,
+          status: true,
+          stateVersion: true,
+          currentGoal: true,
+          lastDecisionSummary: true,
+          stepCount: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+      if (row === null) {
+        throw new AuthError('NOVEL_RUN_NOT_FOUND');
+      }
+      const viewRow: NovelRunViewRow = {
+        id: row.id,
+        status: row.status,
+        state_version: row.stateVersion,
+        current_goal: row.currentGoal,
+        last_decision_summary: row.lastDecisionSummary,
+        step_count: row.stepCount,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+      };
+      if (statusOf(viewRow) !== 'waiting_user') {
+        return buildView(viewRow, null);
+      }
+      const step = await tx.novelRunStep.findFirst({
+        where: { runId: row.id, status: 'succeeded' },
+        orderBy: { stepNo: 'desc' },
+        select: { outputSummary: true },
+      });
+      return buildView(viewRow, questionOf(step?.outputSummary));
     },
-  });
-  if (row === null) {
-    throw new AuthError('NOVEL_RUN_NOT_FOUND');
-  }
-  return toView(db, {
-    id: row.id,
-    status: row.status,
-    state_version: row.stateVersion,
-    current_goal: row.currentGoal,
-    last_decision_summary: row.lastDecisionSummary,
-    step_count: row.stepCount,
-    created_at: row.createdAt,
-    updated_at: row.updatedAt,
-  });
+    { isolationLevel: 'RepeatableRead' },
+  );
 }
 
 /**

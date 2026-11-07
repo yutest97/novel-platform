@@ -10,6 +10,23 @@ import type { NovelRunStatus } from './api';
 /** 轮询退避：1s → 2s → 5s，之后固定 5s。 */
 export const NOVEL_POLL_DELAYS_MS = [1_000, 2_000, 5_000] as const;
 
+/**
+ * 页面是否处于隐藏状态。
+ *
+ * 隐藏时必须真正暂停轮询：初始 tick 前、每次成功/失败安排下一次 timer 前，
+ * 都必须经过这个判定。
+ */
+export function isPageHidden(
+  documentLike: { readonly visibilityState: string } | null | undefined = typeof document ===
+  'undefined'
+    ? null
+    : document,
+): boolean {
+  return documentLike !== null && documentLike !== undefined
+    ? documentLike.visibilityState === 'hidden'
+    : false;
+}
+
 /** 只有 queued / running 需要继续拉取；waiting_user 等待作者输入。 */
 export function shouldPollNovelRun(status: NovelRunStatus): boolean {
   return status === 'queued' || status === 'running';

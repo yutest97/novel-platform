@@ -77,7 +77,7 @@ describe('Coordinator 输入 / 输出契约', () => {
     expect(validateJson(NOVEL_COORDINATOR_OUTPUT_SCHEMA, bad).length).toBeGreaterThan(0);
   });
 
-  it('语义校验：ask 必须有非空问题与非空选项，选项不得重复', () => {
+  it('语义校验：ask 必须有非空问题；options 为 0..6，空数组合法', () => {
     expect(validateNovelCoordinatorAction(ASK_ACTION).ok).toBe(true);
 
     const emptyQuestion = {
@@ -86,17 +86,40 @@ describe('Coordinator 输入 / 输出契约', () => {
     };
     expect(validateNovelCoordinatorAction(emptyQuestion).ok).toBe(false);
 
+    // 0 个选项表示开放式回答，合法。
     const emptyOptions = {
       ...ASK_ACTION,
       input: { ...ASK_ACTION.input, options: [] },
     };
-    expect(validateNovelCoordinatorAction(emptyOptions).ok).toBe(false);
+    expect(validateNovelCoordinatorAction(emptyOptions).ok).toBe(true);
+
+    // 1..6 个均合法。
+    for (let count = 1; count <= 6; count += 1) {
+      const options = Array.from({ length: count }, (_, index) => `选项${index + 1}`);
+      const action = { ...ASK_ACTION, input: { ...ASK_ACTION.input, options } };
+      expect(validateNovelCoordinatorAction(action).ok).toBe(true);
+    }
+
+    // 7 个拒绝。
+    const sevenOptions = Array.from({ length: 7 }, (_, index) => `选项${index + 1}`);
+    expect(
+      validateNovelCoordinatorAction({
+        ...ASK_ACTION,
+        input: { ...ASK_ACTION.input, options: sevenOptions },
+      }).ok,
+    ).toBe(false);
 
     const duplicateOptions = {
       ...ASK_ACTION,
       input: { ...ASK_ACTION.input, options: ['玄幻', '玄幻'] },
     };
     expect(validateNovelCoordinatorAction(duplicateOptions).ok).toBe(false);
+
+    const blankOptions = {
+      ...ASK_ACTION,
+      input: { ...ASK_ACTION.input, options: ['  '] },
+    };
+    expect(validateNovelCoordinatorAction(blankOptions).ok).toBe(false);
   });
 
   it('语义校验：finish 不得带问题或选项', () => {
@@ -232,5 +255,30 @@ describe('Coordinator Mock Provider（无网络、确定性）', () => {
       });
       expect(validateNovelCoordinatorAction(result.output).ok).toBe(true);
     }
+  });
+
+  it('作者原文含 SQL / HTML / 路径 / shell 时，Mock finish 仍安全且不回显原文', async () => {
+    const maliciousRequest =
+      'SELECT * FROM novel_runs; <script>alert(1)</script> E:\\小说开发\\secret.txt $(rm -rf /)';
+    const maliciousFacts = [
+      'DROP TABLE novel_runs',
+      '<img src=x onerror=alert(1)>',
+      'C:\\Windows\\System32',
+      '`whoami`',
+    ];
+    const result = await runner.run<Record<string, unknown>>(NOVEL_COORDINATOR_AGENT, {
+      ...BASE_INPUT,
+      requestText: maliciousRequest,
+      latestAnswer: '结束',
+      stateSummary: { ...INITIAL_NOVEL_STATE_SUMMARY, knownFacts: maliciousFacts },
+    });
+    const semantic = validateNovelCoordinatorAction(result.output);
+    expect(semantic.ok).toBe(true);
+    expect(result.output['action']).toBe('finish');
+    const summary = (result.output as { decisionSummary: string }).decisionSummary;
+    expect(summary).not.toContain('SELECT');
+    expect(summary).not.toContain('script');
+    expect(summary).not.toContain('小说开发');
+    expect(summary).not.toContain('whoami');
   });
 });

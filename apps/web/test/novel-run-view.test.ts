@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NOVEL_POLL_DELAYS_MS,
   canCancelNovelRun,
+  isPageHidden,
   isTerminalNovelStatus,
   nextNovelPollDelay,
   novelStatusLabel,
@@ -29,6 +30,14 @@ describe('动态问答页轮询策略（C1-A）', () => {
     expect(nextNovelPollDelay(3)).toBe(5_000);
     expect(nextNovelPollDelay(100)).toBe(5_000);
     expect(nextNovelPollDelay(-1)).toBe(1_000);
+  });
+
+  it('可见性判定只认隐藏态；无 document 时不阻塞', () => {
+    expect(isPageHidden({ visibilityState: 'hidden' })).toBe(true);
+    expect(isPageHidden({ visibilityState: 'visible' })).toBe(false);
+    expect(isPageHidden({ visibilityState: 'prerender' })).toBe(false);
+    expect(isPageHidden(null)).toBe(false);
+    expect(isPageHidden(undefined)).toBe(false);
   });
 
   it('只有 queued / running 需要继续轮询', () => {

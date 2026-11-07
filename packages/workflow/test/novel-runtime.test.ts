@@ -154,12 +154,14 @@ class GatedProvider implements ModelProvider {
   readonly gate = new Promise<void>((resolve) => {
     this.releaseGate = resolve;
   });
+  calls = 0;
 
   release(): void {
     this.releaseGate?.();
   }
 
   generateJson(input: ModelJsonInput): Promise<ModelJsonResult> {
+    this.calls += 1;
     return this.gate.then(() => ({
       json: ASK_ACTION,
       provider: this.name,
@@ -167,6 +169,53 @@ class GatedProvider implements ModelProvider {
       usage: { promptTokens: 10, completionTokens: 10 },
       latencyMs: 0,
     }));
+  }
+
+  generateText(): Promise<ModelTextResult> {
+    throw new Error('不支持文本输出');
+  }
+}
+
+/** 永不返回且不监听 signal：验证 Runtime 的硬超时截断。 */
+class NeverResolvingProvider implements ModelProvider {
+  readonly name = 'never';
+  readonly defaultModel = 'never-model';
+  calls = 0;
+
+  generateJson(): Promise<ModelJsonResult> {
+    this.calls += 1;
+    return new Promise<ModelJsonResult>(() => {
+      // 故意不监听 AbortSignal，也不 resolve。
+    });
+  }
+
+  generateText(): Promise<ModelTextResult> {
+    throw new Error('不支持文本输出');
+  }
+}
+
+/** 前 N 次永不返回，之后返回合法 action；用于验证超时重试。 */
+class TimeoutThenSuccessProvider implements ModelProvider {
+  readonly name = 'timeout-then-success';
+  readonly defaultModel = 'timeout-model';
+  calls = 0;
+
+  constructor(private readonly failures: number) {}
+
+  generateJson(input: ModelJsonInput): Promise<ModelJsonResult> {
+    this.calls += 1;
+    if (this.calls <= this.failures) {
+      return new Promise<ModelJsonResult>(() => {
+        // 故意不监听 AbortSignal，也不 resolve。
+      });
+    }
+    return Promise.resolve({
+      json: ASK_ACTION,
+      provider: this.name,
+      model: input.model,
+      usage: { promptTokens: 10, completionTokens: 10 },
+      latencyMs: 0,
+    });
   }
 
   generateText(): Promise<ModelTextResult> {
@@ -215,11 +264,33 @@ describe('动态问答主路径', () => {
     expect(callRows.calls).toBe(1);
     expect(callRows.succeededCalls).toBe(1);
     const call = await db.novelAgentCall.findFirstOrThrow({ where: { runId } });
-    expect(call.stepId).not.toBeNull();
+    // 调用遥测与业务提交解耦：实际调用完成后立即写入，step_id 允许为空。
+    expect(call.stepId).toBeNull();
     expect(call.callKind).toBe('coordinator');
     expect(call.agentName).toBe('novel.coordinator');
     expect(call.provider).toBe('mock');
     expect(call.model).toBe('mock-coordinator');
+  });
+
+  it('作者原文含 SQL / HTML / 路径 / shell 时，Mock 流程仍能安全完成', async () => {
+    const runId = await trackRun(
+      'SELECT * FROM novel_runs; <script>alert(1)</script> E:\\小说开发\\secret $(rm -rf /)',
+    );
+    const worker = coordinatorWorker(createNovelCoordinatorMockProvider());
+    expect(await worker.runOnce()).toBe('waiting_user');
+    await answerNovelRun(db, { authorId, runId, expectedVersion: 1, answer: '结束' });
+    expect(await worker.runOnce()).toBe('completed');
+
+    const view = await readNovelRun(db, { authorId, runId });
+    expect(view.status).toBe('completed');
+    expect(view.decisionSummary).not.toContain('SELECT');
+    expect(view.decisionSummary).not.toContain('script');
+    const row = await db.novelRun.findUniqueOrThrow({
+      where: { id: runId },
+      select: { lastDecisionSummary: true },
+    });
+    expect(row.lastDecisionSummary).not.toContain('SELECT');
+    expect(row.lastDecisionSummary).not.toContain('小说开发');
   });
 
   it('回答推进到下一问，明确结束口令进入 completed', async () => {
@@ -433,7 +504,7 @@ describe('工具白名单、语义失败与预算', () => {
 });
 
 describe('租约与并发', () => {
-  it('旧 Worker 晚返回丢弃提交，不写 step / call / 状态', async () => {
+  it('旧 Worker 晚返回丢弃业务提交，只保留实际调用遥测', async () => {
     const runId = await trackRun('写一个故事');
     const provider = new GatedProvider();
     const worker = coordinatorWorker(provider, {
@@ -442,7 +513,7 @@ describe('租约与并发', () => {
     });
 
     const pending = worker.runOnce();
-    await waitFor(async () => (await rawStatus(runId)).lockedBy === 'worker-old');
+    await waitFor(async () => provider.calls === 1);
 
     // 模拟另一个 Worker 接管：只改 locked_by，不改状态与版本。
     await db.$executeRaw`
@@ -453,7 +524,10 @@ describe('租约与并发', () => {
     expect(await pending).toBe('lease-lost');
     const rows = await counts(runId);
     expect(rows.steps).toBe(0);
-    expect(rows.calls).toBe(0);
+    // 实际调用已经发生，允许补一条 step_id 为空的遥测；
+    // 但 step / state / question 仍必须被 fence 丢弃。
+    expect(rows.calls).toBe(1);
+    expect(rows.succeededCalls).toBe(1);
     const view = await readNovelRun(db, { authorId, runId });
     expect(view.status).toBe('running');
     expect(view.version).toBe(0);
@@ -486,6 +560,181 @@ describe('租约与并发', () => {
     expect(row.completedAt).toBeNull();
     const view = await readNovelRun(db, { authorId, runId });
     expect(view.version).toBe(2);
+  });
+});
+
+describe('模型硬超时与租约分离', () => {
+  it('Provider 不返回且不监听 signal 时，被 Promise.race 硬截断为 MODEL_TIMEOUT', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new NeverResolvingProvider();
+    const worker = coordinatorWorker(provider, {
+      maxAttempts: 1,
+      modelCallTimeoutMs: 20,
+    });
+
+    expect(await worker.runOnce()).toBe('failed');
+    expect(provider.calls).toBe(1);
+
+    const view = await readNovelRun(db, { authorId, runId });
+    expect(view.status).toBe('failed');
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(1);
+    expect(rows.calls).toBe(1);
+    const call = await db.novelAgentCall.findFirstOrThrow({ where: { runId } });
+    expect(call.success).toBe(false);
+    expect(call.errorCode).toBe('MODEL_TIMEOUT');
+    const step = await db.novelRunStep.findFirstOrThrow({ where: { runId } });
+    expect(step.status).toBe('failed');
+    expect(step.errorCode).toBe('MODEL_TIMEOUT');
+  });
+
+  it('前两次 MODEL_TIMEOUT、第三次成功 → waiting_user', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new TimeoutThenSuccessProvider(2);
+    const worker = coordinatorWorker(provider, {
+      maxAttempts: 3,
+      modelCallTimeoutMs: 20,
+    });
+
+    expect(await worker.runOnce()).toBe('waiting_user');
+    expect(provider.calls).toBe(3);
+
+    const view = await readNovelRun(db, { authorId, runId });
+    expect(view.status).toBe('waiting_user');
+    expect(view.stepCount).toBe(1);
+    const calls = await db.novelAgentCall.findMany({
+      where: { runId },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(calls).toHaveLength(3);
+    expect(calls.slice(0, 2).map((call) => call.errorCode)).toEqual([
+      'MODEL_TIMEOUT',
+      'MODEL_TIMEOUT',
+    ]);
+    expect(calls[2]?.success).toBe(true);
+  });
+
+  it('全部超时 → failed，不产生永久 running，也不会再次领取', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new NeverResolvingProvider();
+    const worker = coordinatorWorker(provider, {
+      maxAttempts: 3,
+      modelCallTimeoutMs: 20,
+    });
+
+    expect(await worker.runOnce()).toBe('failed');
+    const row = await rawStatus(runId);
+    expect(row.status).toBe('failed');
+    expect(row.lockedBy).toBeNull();
+    expect(await worker.runOnce()).toBe('idle');
+    expect(provider.calls).toBe(3);
+
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(1);
+    expect(rows.calls).toBe(3);
+    expect(rows.succeededCalls).toBe(0);
+  });
+
+  it('取消发生在模型调用期间：保留真实调用遥测，不写 step / state', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new GatedProvider();
+    const worker = coordinatorWorker(provider, {
+      workerId: 'worker-cancelled',
+      heartbeatIntervalMs: 5_000,
+    });
+
+    const pending = worker.runOnce();
+    await waitFor(async () => provider.calls === 1);
+    await cancelNovelRun(db, { authorId, runId });
+    provider.release();
+
+    expect(await pending).toBe('lease-lost');
+    const rows = await counts(runId);
+    expect(rows.steps).toBe(0);
+    expect(rows.calls).toBe(1);
+    const view = await readNovelRun(db, { authorId, runId });
+    expect(view.status).toBe('cancelled');
+    expect(view.version).toBe(1);
+    expect(view.question).toBeNull();
+  });
+
+  it('token 预算统计所有实际调用，包含失败重试', async () => {
+    const runId = await trackRun('写一个故事');
+    const provider = new FlakySchemaProvider();
+    // 第一次 Schema 失败在 AgentRunner 内部抛出，usage 未知记 0；
+    // 第二次成功记 20。预算必须把这两次实际调用都算进去。
+    const worker = coordinatorWorker(provider, { tokenBudget: 15 });
+
+    expect(await worker.runOnce()).toBe('waiting_user');
+    expect(provider.calls).toBe(2);
+    const consumed = await db.novelAgentCall.aggregate({
+      where: { runId },
+      _sum: { promptTokens: true, completionTokens: true },
+    });
+    expect((consumed._sum.promptTokens ?? 0) + (consumed._sum.completionTokens ?? 0)).toBe(20);
+
+    await answerNovelRun(db, { authorId, runId, expectedVersion: 1, answer: '继续' });
+    expect(await worker.runOnce()).toBe('failed');
+    // 预算检查基于全部已发生调用，第二次 run 不再发起模型调用。
+    expect(provider.calls).toBe(2);
+    const step = await db.novelRunStep.findFirstOrThrow({
+      where: { runId },
+      orderBy: { stepNo: 'desc' },
+    });
+    expect(step.errorCode).toBe('NOVEL_RUN_BUDGET_EXCEEDED');
+    expect(await db.novelAgentCall.count({ where: { runId } })).toBe(2);
+  });
+});
+
+describe('读取快照与 DTO 边界', () => {
+  it('run 与当前问题在同一快照读取，任何响应都自洽且不泄露内部字段', async () => {
+    const runId = await trackRun('写一个故事');
+    const worker = coordinatorWorker(createNovelCoordinatorMockProvider());
+    expect(await worker.runOnce()).toBe('waiting_user');
+
+    const first = await readNovelRun(db, { authorId, runId });
+    expect(first.status).toBe('waiting_user');
+    expect(first.question).not.toBeNull();
+    expect(Object.keys(first).sort()).toEqual(
+      [
+        'createdAt',
+        'currentGoal',
+        'decisionSummary',
+        'options',
+        'question',
+        'runId',
+        'status',
+        'stepCount',
+        'updatedAt',
+        'version',
+      ].sort(),
+    );
+    expect(first).not.toHaveProperty('stateSummary');
+    expect(first).not.toHaveProperty('decision');
+    expect(first).not.toHaveProperty('lockedBy');
+    expect(first).not.toHaveProperty('model');
+
+    // 读取与回答/推进并发：任何一次响应都必须是“waiting 才有问题、非 waiting 无问题”。
+    const reads = Array.from({ length: 12 }, () => readNovelRun(db, { authorId, runId }));
+    const answered = answerNovelRun(db, {
+      authorId,
+      runId,
+      expectedVersion: first.version,
+      answer: '继续',
+    });
+    for (const view of await Promise.all(reads)) {
+      if (view.status === 'waiting_user') {
+        expect(view.question).not.toBeNull();
+      } else {
+        expect(view.question).toBeNull();
+      }
+    }
+    await answered;
+    expect(await worker.runOnce()).toBe('waiting_user');
+    const next = await readNovelRun(db, { authorId, runId });
+    expect(next.status).toBe('waiting_user');
+    expect(next.question).not.toBeNull();
+    expect(next.version).toBeGreaterThan(first.version);
   });
 });
 

@@ -82,10 +82,6 @@ function parseInput(input: ModelJsonInput): NovelCoordinatorInput | null {
 }
 
 function actionFor(input: NovelCoordinatorInput | null): NovelCoordinatorAction {
-  const requestText =
-    input !== null && typeof input.requestText === 'string' && input.requestText.length > 0
-      ? input.requestText
-      : '开始一部小说';
   const latestAnswer =
     input !== null && typeof input.latestAnswer === 'string' && input.latestAnswer.trim() !== ''
       ? input.latestAnswer
@@ -100,7 +96,11 @@ function actionFor(input: NovelCoordinatorInput | null): NovelCoordinatorAction 
       action: 'finish',
       objective: '结束本轮创作问答',
       input: { question: null, options: [], finishReason: 'author_requested_finish' },
-      decisionSummary: `作者明确要求结束问答。已有 ${knownFacts.length} 条补充事实，本轮请求：${requestText.slice(0, 80)}`,
+      // 只使用固定安全文案与结构化计数，绝不回显作者原文。
+      decisionSummary:
+        knownFacts.length === 0
+          ? '作者明确要求结束问答。'
+          : `作者明确要求结束问答。已有 ${knownFacts.length} 条补充事实。`,
     };
   }
 

@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
+
+import { readAuthorCredentials } from './shared-credentials.js';
 
 /**
  * C1-A 动态问答浏览器 E2E。
@@ -10,12 +9,9 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test';
  * 取消 → 重新发起并回答结束口令 → completed。
  *
  * 前置：真实 PostgreSQL + next（BASE_URL）+ 已启动 Worker（mock provider），
- * 且数据库已通过本地种子脚本创建 `.e2e-author.json` 对应作者。
+ * 且 admin-flow.spec.ts 已创建并改密 `e2e-author`（写入 `.e2e-author.json`）。
+ * 凭据在运行时读取，不在模块加载期读取，避免全量启动时文件尚未生成。
  */
-
-const credentials = JSON.parse(
-  readFileSync(path.resolve(process.cwd(), '.e2e-author.json'), 'utf8'),
-) as { email: string; password: string };
 
 let context: BrowserContext;
 let page: Page;
@@ -33,6 +29,7 @@ test.afterAll(async () => {
 
 /** 登录作者并进入写作台。 */
 async function login(): Promise<void> {
+  const credentials = readAuthorCredentials();
   await page.goto('/login');
   await expect(page.getByRole('heading', { name: '登录' })).toBeVisible();
   // 登录页在 hydration 后自动聚焦邮箱；等待它可避免原生表单 GET 提交。
