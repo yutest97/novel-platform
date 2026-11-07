@@ -633,14 +633,16 @@ C1-A 只跑单 Coordinator Agent 的问答与结束，不创建 Work、章节或
 | --- | --- | --- |
 | `novel_runs` | `author_id`、`work_id`（C1-A 恒为 NULL）、`status`、`request_text`、`state_summary`、`state_version`、`current_goal`、`last_decision_summary`、`step_count`、`max_steps`、`locked_by`、`lease_until`、`heartbeat_at`、`cancel_requested_at`、`completed_at` | `status` 只允许 `queued/running/waiting_user/waiting_approval/completed/failed/cancelled`；`request_text` 1–2000、`max_steps` 1–100、`state_version >= 0`、`step_count <= max_steps`；`(status, locked_by, lease_until)` 与 `cancel/completed` 组合自洽；`(work_id, author_id)` 复合外键且作品必须属于同一作者 |
 | `novel_run_steps` | `run_id`、`step_no`、`decision`、`tool_name`、`input_hash`（SHA-256 hex）、`output_summary`、`status`、`error_code` | `(run_id, step_no)` 唯一；`(id, run_id)` 唯一供 calls 复合外键；`status` 只允许 `succeeded/failed`，succeeded 的 `error_code` 必须为 NULL、failed 必须非 NULL；UPDATE / DELETE 一律拒绝 |
-| `novel_agent_calls` | `run_id`、`step_id`（可为 NULL）、`call_kind`、`agent_name`、`agent_version`、`provider`、`model`、token 数与延迟、`success`、`error_code` | 每次实际模型调用恰好一行；`step_id` 为空表示失败且未形成可提交步骤；`(step_id, run_id)` 复合外键保证 step 属于同一 run；UPDATE / DELETE 一律拒绝 |
+| `novel_agent_calls` | `run_id`、`step_id`（可为 NULL）、`call_kind`（`coordinator` / `tool`）、`agent_name`、`agent_version`、`provider`、`model`、token 数与延迟、`success`、`error_code` | 每次实际模型调用恰好一行；`step_id` 为空表示失败且未形成可提交步骤，或 C1-B-A1 的 Concept 工具调用尚未关联 step；`(step_id, run_id)` 复合外键保证 step 属于同一 run；UPDATE / DELETE 一律拒绝 |
 
 **触发器与不可变边界**：
 
 - `novel_runs_guard`：禁止 DELETE；禁止修改 `id`、`author_id`、`work_id`、
   `request_text`、`max_steps`、`created_at`；只允许白名单状态迁移，
-  `queued → running`、`running → waiting_user/completed/failed/cancelled`、
-  `waiting_user → queued/cancelled` 等；终态不可离开；
+  `queued → running/cancelled/waiting_approval`、
+  `running → queued/waiting_user/waiting_approval/completed/failed/cancelled`、
+  `waiting_user → queued/cancelled/waiting_approval`、
+  `waiting_approval → queued/completed/failed/cancelled`；终态不可离开；
   `state_version` 与 `step_count` 只能单调递增；
 - step / call 的 UPDATE/DELETE 由触发器直接拒绝，保证 append-only；
 - 状态迁移由服务层事务 + 条件 UPDATE（`status='running' AND locked_by AND
@@ -656,6 +658,105 @@ C1-A 只跑单 Coordinator Agent 的问答与结束，不创建 Work、章节或
 - 预算：步数用尽直接失败且不写 step；token 用尽写一条 failed step 并记录
   `NOVEL_RUN_BUDGET_EXCEEDED`；
 - 连续 3 次相同 action 签名触发 `COORDINATOR_LOOP_DETECTED`。
+
+### 3.16 novel_artifacts / novel_artifact_revisions / novel_artifact_decisions（C1-B-A1 实现口径）
+
+> 以迁移 `20261107090000_c1b_a1_novel_artifacts` 与
+> `packages/workflow/src/novel/concept-service.ts` 为准。
+> C1-B-A1 只建立「故事候选」数据域与内部服务：不接 Coordinator、不做 HTTP API / UI、
+> 不创建 Work、不生成其它 Agent。`work_id` 本卡恒为 NULL。
+
+**状态机**
+
+```text
+draft → pending_approval → approved（终态）
+                         → rejected → （生成新 revision）→ draft
+```
+
+**novel_artifacts**
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| run_id / author_id | uuid | 归属；author 必须等于 run 的 author |
+| work_id | uuid NULL | C1-B-A1 固定 NULL（CHECK `work_id IS NULL`） |
+| artifact_type | text | 本卡只允许 `concept` |
+| status | text | `draft` / `pending_approval` / `approved` / `rejected` |
+| current_revision | integer | `>= 1`，必须等于 revision 最大编号 |
+| created_at / updated_at | timestamptz | |
+
+约束与触发器：
+
+- `UNIQUE(run_id, artifact_type)`：一个 run 同一类型最多一个 artifact；
+- `(run_id, author_id) → novel_runs(id, author_id)` 复合外键：
+  artifact 的 author 必须等于 run 的 author（`novel_runs` 为此新增
+  `(id, author_id)` 唯一索引）；
+- `(work_id, author_id) → works(id, author_id)` 复合外键保留给后续阶段；
+- `novel_artifacts_insert_guard`：只能以 `draft` / `current_revision = 1` 创建；
+- `novel_artifacts_guard`：禁止 DELETE；禁止修改 `id`、`run_id`、`author_id`、
+  `work_id`、`artifact_type`、`created_at`；approved 为终态；
+  只允许 `draft → pending_approval`、`pending_approval → approved|rejected`、
+  `rejected → draft`；只有 draft / rejected 才能推进 `current_revision + 1`，
+  且 rejected → draft 必须同时生成新 revision；
+- 状态与 decision 自洽：`approved` / `rejected` 必须有当前 revision 的 decision，
+  `draft` / `pending_approval` 不允许有；
+- 延迟约束触发器 `novel_artifact_revision_consistency`：事务提交时校验
+  `current_revision = MAX(revision_no)`，允许服务层在同一事务里先插 revision、
+  再推进 current_revision。
+
+**novel_artifact_revisions**（append-only）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| artifact_id / run_id / author_id | uuid | 归属三件套，冗余存列用于复合外键 |
+| revision_no | integer | `>= 1`，`UNIQUE(artifact_id, revision_no)` |
+| schema_version | text | 本卡只允许 `concept@1.0.0` |
+| content | jsonb | 必须是 object，序列化长度 1–131072 |
+| source_agent / source_agent_version | text | 1–120 字符 |
+| source_step_id | uuid NULL | 若存在必须属于同一 run |
+| created_at | timestamptz | |
+
+约束与触发器：
+
+- `(artifact_id, run_id, author_id) → novel_artifacts(id, run_id, author_id)`
+  复合外键：revision 必须钉在同一 run / author 的 artifact 上；
+- `(source_step_id, run_id) → novel_run_steps(id, run_id)` 复合外键；
+- UPDATE / DELETE 一律拒绝（append-only）；
+- INSERT 时拒绝已 approved 的 artifact，且 `revision_no <= current_revision + 1`。
+
+**novel_artifact_decisions**（append-only）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | uuid PK | |
+| artifact_id / revision_no | uuid / integer | `UNIQUE(artifact_id, revision_no)` |
+| author_id | uuid | 必须等于 artifact / run 的 author |
+| decision | text | 只允许 `approved` / `rejected` |
+| decided_at | timestamptz | 数据库时钟 |
+
+约束与触发器：
+
+- `(artifact_id, revision_no) → novel_artifact_revisions(artifact_id, revision_no)`
+  复合外键：决定必须指向同一 artifact 的 revision；
+- `(artifact_id, author_id) → novel_artifacts(id, author_id)` 复合外键：
+  不允许他人替作者决定；
+- 只能在该 revision 是 artifact 当前 revision 且 artifact 为 `pending_approval` 时插入；
+- UPDATE / DELETE 一律拒绝；同一 revision 最多一条决定。
+
+**服务层规则（不在数据库层表达）**
+
+- Concept Agent 输出必须通过 `concept@1.0.0` Schema + 语义校验；
+  trim 后非空、数组去重、数量限制、拒绝 HTML / Markdown / SQL / Prisma / 路径 /
+  shell / 工具或正式写入指令，失败统一 `AGENT_OUTPUT_INVALID` 且不回显原文；
+- 同内容（规范 JSON 哈希）不新增 revision，返回 `deduplicated`；
+- 模型调用前后各校验一次 run `state_version` + artifact `current_revision`；
+  旧 Worker 晚返回不覆盖新 artifact state；
+- 每次实际 Concept Agent 调用写一条 `call_kind = 'tool'` 脱敏遥测
+  （provider / model / usage / latency / success / error_code），失败调用也保留 usage；
+- 稳定错误码：`NOVEL_ARTIFACT_NOT_FOUND`（404，跨作者统一）、
+  `NOVEL_ARTIFACT_VERSION_CONFLICT`、`NOVEL_ARTIFACT_DECISION_STALE`、
+  `NOVEL_ARTIFACT_ALREADY_DECIDED`、`NOVEL_ARTIFACT_ALREADY_APPROVED`。
 
 ---
 

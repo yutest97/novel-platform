@@ -3,8 +3,9 @@
 - 更新日期：2026-11-07
 - 最后已验收产品基线：`07cb346`（A2-F-C-REV-01）
 - 对应 CI：A2-F-C-REV-01，CI #25 绿色
-- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 本地复审通过（未推送、未过远端 CI）；
-  下一步为 C1-B-A1 故事候选域与 Concept Agent；事实写回与高级审阅门禁后移
+- 当前产品阶段：A1 / A2 已验收；C1-A-REV-02 本地复审通过；C1-B-A1 本地完成待复审
+  （均未推送、未过远端 CI）；下一步为 C1-B-A2 Coordinator 创意工具与确认 UI；
+  事实写回与高级审阅门禁后移
 
 当前本地提交状态一律以 `git status --short --branch` 为准，不在本文硬编码
 “ahead / clean”等会随提交立即失效的信息。
@@ -168,6 +169,31 @@
 - C1-A 只产生 `waiting_user` / `completed` / `failed` / `cancelled`，
   **不产生 `waiting_approval`**；不创建 Work、章节或正文。
 
+### C1-B-A1 故事候选域与 Concept Agent（本地完成，待复审）
+
+- 迁移 `20261107090000_c1b_a1_novel_artifacts`：三张 append-only 候选表
+  `novel_artifacts` / `novel_artifact_revisions` / `novel_artifact_decisions`；
+  复合外键把 revision / decision 钉到同一 run + author，`current_revision` 与
+  revision 最大编号用**延迟约束触发器**在提交时校验；
+- artifact 状态机：`draft → pending_approval → approved | rejected`，
+  `rejected → draft`（仅随新 revision），approved 终态且禁止新 revision；
+- `novel.concept@1.0.0`：输入只允许 `requestText` / `knownFacts[]` / `authorFocus`，
+  输出严格 Schema（1–3 标题、3–6 卖点、1–5 主题、0–5 问题等），
+  拒绝 HTML / Markdown / SQL / Prisma / 路径 / shell / 下一步工具 / 数据库写入意图，
+  非法输出统一 `AGENT_OUTPUT_INVALID` 且不回显原文；
+- `createNovelConceptMockProvider()` 确定性、不读时钟 / Key / 网络、不回显作者原文；
+- `createConceptCandidate` / `requestConceptApproval` / `decideConceptArtifact` /
+  `readConceptArtifact`：run + artifact 双行锁、`state_version` 与
+  `current_revision` 双 fence、内容哈希幂等、同决定幂等 / 不同决定冲突；
+- 每次实际模型调用写 `novel_agent_calls`（`call_kind='tool'`，`step_id` 可空），
+  只存 provider / model / usage / latency / success / error_code，不存 prompt / 原始输出 / Key；
+- 新错误码：`NOVEL_ARTIFACT_NOT_FOUND` / `NOVEL_ARTIFACT_VERSION_CONFLICT` /
+  `NOVEL_ARTIFACT_DECISION_STALE` / `NOVEL_ARTIFACT_ALREADY_DECIDED` /
+  `NOVEL_ARTIFACT_ALREADY_APPROVED`；跨作者与不存在统一 404；
+- `novel_runs` 状态机扩展 `queued / running / waiting_user → waiting_approval`
+  与 `waiting_approval → completed / failed / cancelled`；
+- **不接** Coordinator / HTTP API / UI / E2E，不创建 Work，不生成其它 Agent。
+
 ---
 
 ## 2. 当前冻结决策
@@ -233,8 +259,8 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 | A2-E | 事实候选只读审阅 UI | 已验收（CI #25）：提取、六类筛选、total / truncated、空态与纯文本展示 |
 | A2-F | 事实候选决策 | A2-F-A/B/C 已验收（CI #25）：决策记录/API、状态读取、决策 UI；不写回实体 |
 | C1-A | Coordinator Runtime + 工作流 + 动态问答壳 | REV-02 本地复审通过：失败调用 usage 保留、数据库时钟 lease fence、隐藏轮询与 options 已验收；未推送 / 未过远端 CI |
-| C1-B-A1 | 故事候选域与 Concept Agent | 下一步：`novel_artifacts` / revisions / decisions、`novel.concept`、Mock、服务层；不接 API/UI |
-| C1-B-A2 | Coordinator 创意工具与确认 UI | 待 C1-B-A1：Coordinator 1.1、`concept.generate` / approval tool、API、UI、E2E |
+| C1-B-A1 | 故事候选域与 Concept Agent | 本地完成待复审：artifact 三表、`novel.concept`、Mock、候选 / 决策服务；不接 API/UI |
+| C1-B-A2 | Coordinator 创意工具与确认 UI | 下一步：Coordinator 1.1、`concept.generate` / approval tool、API、UI、E2E |
 | C1-B-B | 世界观、人物与剧情 Agent | 待 C1-B-A2：扩展世界规则、人物关系与主线候选 |
 | C1-B-C | 三级大纲 | 待 C1-B-B：全书 / 分卷 / 章节大纲候选与确认门禁 |
 | C1-B-D | 故事圣经编辑与 Work 绑定 | 待 C1-B-C：完整编辑、历史 revision、确认投影与受控 Work 绑定 |
@@ -267,10 +293,14 @@ Runtime 负责校验、门禁、工具执行、落库和状态推进
 - `C1-A-REV-02` 已修复三个 P2：Schema-invalid / invalid-JSON 失败调用保留已发生的
   usage；lease fence 与最终条件 UPDATE 改由数据库 `clock_timestamp()` 判断；
   `docs/07` / `docs/08` / `docs/09` 状态、测试数和已修复风险已同步；
-- 当前不产生 `waiting_approval`，不接故事规划 Agent，不创建 Work；
+- 当前 Runtime 不产生 `waiting_approval`（C1-B-A1 已扩展 run 状态机白名单，
+  但尚未接入 Runtime）；
 - C1-A-REV-02 已本地复审通过：全量单测 1189、E2E 160、15 migrations /
   26 表 / 19 触发器；尚未推送，也未经过远端 CI；
-- 当前下一步：`C1-B-A1` 故事候选域与 Concept Agent；
+- C1-B-A1 已本地完成待复审：artifact 三表、Concept Agent / Mock / 服务层；
+  全量单测 1227、E2E 160、16 migrations / 29 表 / 25 触发器；
+- 当前下一步：`C1-B-A2` Coordinator 1.1 与 `concept.generate` / approval tool、
+  HTTP API、最小候选 UI 与 E2E；
 - C1-B 前置：`novel_runs.work_id` 在 C1-A migration 中不可变。C1-B 开工前必须
   设计受控的一次性绑定方案（专用绑定表，或新的未发布 migration 允许
   `NULL → work_id` 单次迁移），校验作品属于同一作者且只能绑定一次；
@@ -301,7 +331,8 @@ C1-A 实施卡：`docs/tasks/C1-A-coordinator-runtime.md`（首次实现已提�
 C1-A-REV-01 卡：`docs/tasks/C1-A-REV-01-coordinator-runtime.md`（代码已提交
 `a40a0dd`）。
 C1-A-REV-02 卡：`docs/tasks/C1-A-REV-02-coordinator-runtime.md`（本地复审通过）。
-C1-B-A1 卡：`docs/tasks/C1-B-A1-story-artifact-concept.md`（下一步）。
+C1-B-A1 卡：`docs/tasks/C1-B-A1-story-artifact-concept.md`（本地完成待复审）。
+C1-B-A2 卡：下一张，Coordinator 1.1 与确认 UI。
 C1-A 同时交付最小“写新小说”动态问答页，确保每个阶段都有作者可感知的纵向切片。
 
 C1 的默认产品路径是“核心创意 → 世界观 → 人物 → 剧情 → 全书/分卷/章节大纲 →
@@ -435,6 +466,31 @@ REV-02 新增 10 个 workflow 用例（`novel-runtime.test.ts`）：
 5 个失败调用 usage 保留 / token 预算累计，5 个数据库时钟租约 fence
 （应用时钟偏快 / 偏慢、fence 后 UPDATE 前过期、心跳 locked_by / state_version）。
 
+C1-B-A1 完成后的当前数字：
+
+| 项目 | 数量 |
+| --- | --- |
+| 全量单测 | **1227**（web 458 / workflow 454 / works 132 / auth 95 / worker 63 / shared 15 / db 10） |
+| 浏览器 E2E | **160**（本卡无新增 E2E） |
+| migrations | **16** |
+| 数据表 | **29**（不含 `_prisma_migrations`） |
+| 数据库触发器 | **25**（distinct trigger） |
+
+C1-B-A1 新增 38 个 workflow 用例：15 个 Concept Agent / Mock 纯单测
+（`novel-concept-agent.test.ts`）与 23 个真实 PostgreSQL 用例
+（`novel-concept-service.test.ts`，覆盖三表约束、append-only、状态机、
+approved 终态、内容长度、revision / decision 一致性、幂等、双 fence、
+跨作者 404、失败调用脱敏遥测）。空库 migration 与 E2E 都在全新库上重跑：
+29 表 / 16 migrations / 25 触发器 / 86 CHECK。
+
+C1-B-A1 的两处灵敏度验证：
+
+1. 删除事务内 approved 门禁（保留调用前快照门禁）→
+   「旧 Worker 晚返回：批准后不能覆盖新 artifact state」失败（1/454）；
+2. 删除 `decideConceptArtifact` 的 `expectedRunVersion` fence →
+   「旧 expectedRunVersion / 旧 revision 使用稳定错误且不留决定」失败（1/454）；
+   两处改动均已还原，workflow 恢复全绿。
+
 
 A2-F-C 的两处灵敏度验证：
 
@@ -565,6 +621,13 @@ A2-F-C 附带把 A2-E E2E 的「事实区没有任何接受 / 拒绝 / 写回入
     token 预算覆盖所有实际模型调用；只有 Provider 未返回 usage 时才记 0。
 45. `novel_runs.work_id` 当前不可变，而 C1-B 规划需要把 run 绑定到 Work；
     C1-B 开工前必须设计一次性受控绑定，不允许直接放开任意更新。
+46. Concept 候选目前只有服务层：approved 候选还不能被后续 Agent 读取为正式输入；
+    C1-B-A2 接入时必须只读已批准 revision，禁止把 draft / rejected 当成设定。
+47. `novel_runs` 白名单已开放 `waiting_approval`，但 Runtime 尚未产生该状态；
+    C1-B-A2 若忘接，run 会停在 `waiting_approval` 或绕过作者确认，必须补运行时与 E2E。
+48. artifact 的 `work_id` 固定为 NULL，尚无 Work 绑定方案；绑定前候选不能视为作品级设定。
+49. Concept 的“不安全文本”校验是启发式正则，真实模型可能用同义表达绕过；
+    它只用于档住明显越权输出，不能替代 Runtime 的工具白名单与作者确认。
 
 ---
 
@@ -656,6 +719,12 @@ D-043 `ask_user.options` 恢复为 0..6：空数组表示开放式问题，页�
 D-044 已发生的模型调用必须保留 Provider 返回的 usage；Schema-invalid /
       invalid-JSON 也不得丢 token。租约有效性只由 PostgreSQL `clock_timestamp()` 判断，
       fence 与所有终态条件 UPDATE 都必须再次校验租约。
+D-045 故事候选域按 artifact → revision → decision 三段 append-only：
+      artifact 只保存当前指针与状态，revision 不可改不可删，decision 只追加；
+      approved 为终态且禁止新 revision；revision / decision 必须通过复合外键
+      钉在同一 run + author，`current_revision` 与最大 revision 编号用延迟约束触发器
+      在提交时校验；候选生成与决策同时受 run `state_version` 和 artifact
+      `current_revision` 双 fence 保护。
 ```
 
 ---

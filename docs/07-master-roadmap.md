@@ -61,8 +61,8 @@
 | **A2-E** | 事实候选只读审阅 UI | 复用 A2-B API 展示六类事实、过滤和空/截断/error 状态；不做接受/拒绝和实体写回 | 已验收（CI #25） |
 | **A2-F** | 事实决策与受控写回 | 作者明确接受/拒绝事实后，按白名单更新人物、物品、关系和境界；独立审计与冲突提示 | A2-F-A/B/C 已验收（CI #25）；实体写回待产品语义确认 |
 | **C1-A** | Coordinator Runtime + 工作流 + 动态问答壳 | `novel.coordinator@1.0.0` 严格动作 Schema、ToolWorkflow guard/execute/validate/commit、run 状态机、`novel_runs` / `novel_run_steps` / `novel_agent_calls`、单 run 租约与 fence、预算/循环保护、ask_user/finish、4 个 API、可操作的“写新小说”问答页；不做专业创作 Agent | REV-02 本地复审通过（未推送 / 未过远端 CI） |
-| **C1-B-A1** | 故事候选域与 Concept Agent | `novel_artifacts` / revisions / decisions、`novel.concept`、Mock、候选 / 决策服务；不接 API/UI | 下一阶段（Trae） |
-| **C1-B-A2** | Coordinator 创意工具与确认 UI | Coordinator 1.1、`concept.generate` / approval tool、API、最小候选 UI 与 E2E | 待 C1-B-A1 |
+| **C1-B-A1** | 故事候选域与 Concept Agent | `novel_artifacts` / revisions / decisions、`novel.concept`、Mock、候选 / 决策服务；不接 API/UI | 本地完成（未推送 / 待复审） |
+| **C1-B-A2** | Coordinator 创意工具与确认 UI | Coordinator 1.1、`concept.generate` / approval tool、API、最小候选 UI 与 E2E | 待 C1-B-A1 复审通过 |
 | **C1-B-B** | 世界观、人物与剧情 Agent | 世界规则、人物关系、主线与冲突候选；复用候选 / 确认域 | 待 C1-B-A2 |
 | **C1-B-C** | 三级大纲 | 全书 / 分卷 / 章节大纲候选；未确认大纲不得驱动写作 | 待 C1-B-B |
 | **C1-B-D** | 故事圣经编辑与 Work 绑定 | 作者编辑、revision 历史、确认投影、受控一次性 Work 绑定与完整 UI | 待 C1-B-C |
@@ -168,3 +168,4 @@
 | 2026-11-07 | C1-A-REV-01 代码修复完成（`a40a0dd`，本地）：超时/租约分离、即时调用遥测、Mock 脱敏、隐藏页轮询、options 0..6、读取同快照；全量单测 1179、E2E 160。复审仍未通过：Schema-invalid / invalid-JSON 调用 usage 可能丢失、lease fence 仍用应用时钟、docs/07/09 未收尾。新增 `C1-A-REV-02`，C1-B 继续暂缓 |
 | 2026-11-07 | C1-A-REV-02 代码修复完成（本地）：Schema / invalid-JSON 失败调用保留已发生的 usage，Runtime 不再固定记 0；lease fence 与 `commitSuccess` / `commitFailure` / `failWithoutStep` 的条件 UPDATE 改由 PostgreSQL `clock_timestamp()` 判断；docs/07、docs/08、docs/09 同步；新增 10 个 workflow 用例，全量单测 1189、E2E 160，migrations / 表 / 触发器保持 15 / 26 / 19；等待复审 |
 | 2026-11-07 | C1-A-REV-02 本地复审通过：代码、全量单测 1189、E2E 160、静态检查和构建均通过；仍未推送 / 未过远端 CI。C1-B 拆分为 C1-B-A1（artifact / Concept Agent）、C1-B-A2（Coordinator / API / UI）、C1-B-B（世界/人物/剧情）、C1-B-C（三级大纲）、C1-B-D（编辑与 Work 绑定），下一步 C1-B-A1 |
+| 2026-11-07 | C1-B-A1 本地完成（未推送 / 待复审）：`novel_artifacts` / `novel_artifact_revisions` / `novel_artifact_decisions`（复合外键 + CHECK + append-only + 延迟一致性触发器）、`novel.concept@1.0.0` 严格 Schema 与语义校验、确定性 Mock、`createConceptCandidate` / `requestConceptApproval` / `decideConceptArtifact` / `readConceptArtifact`（run + artifact 双锁、双 fence、内容哈希幂等、`call_kind='tool'` 脱敏遥测）；`novel_runs` 状态机扩展 `waiting_approval`；不接 Coordinator / HTTP API / UI / Work；migrations / 表 / 触发器 16 / 29 / 25，全量单测 1227、E2E 160；下一步 C1-B-A2 |

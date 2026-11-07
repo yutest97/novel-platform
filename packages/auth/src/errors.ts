@@ -63,6 +63,11 @@ export type AuthErrorCode =
   | 'NOVEL_RUN_VERSION_CONFLICT'
   | 'NOVEL_RUN_ANSWER_CONFLICT'
   | 'NOVEL_RUN_INVALID_STATE'
+  | 'NOVEL_ARTIFACT_NOT_FOUND'
+  | 'NOVEL_ARTIFACT_VERSION_CONFLICT'
+  | 'NOVEL_ARTIFACT_DECISION_STALE'
+  | 'NOVEL_ARTIFACT_ALREADY_DECIDED'
+  | 'NOVEL_ARTIFACT_ALREADY_APPROVED'
   | 'CONCURRENT_MODIFICATION'
   | 'NOT_FOUND';
 
@@ -147,6 +152,16 @@ const STATUS_BY_CODE: Record<AuthErrorCode, number> = {
   NOVEL_RUN_ANSWER_CONFLICT: 409,
   // 运行当前状态不允许回答 / 取消等操作
   NOVEL_RUN_INVALID_STATE: 409,
+  // 故事候选不存在（含"不属于当前作者 / run"），统一 404 避免探测
+  NOVEL_ARTIFACT_NOT_FOUND: 404,
+  // 候选 / 运行版本已变化：旧 revision 或旧 expectedVersion
+  NOVEL_ARTIFACT_VERSION_CONFLICT: 409,
+  // 候选已不是可决策的当前 pending revision
+  NOVEL_ARTIFACT_DECISION_STALE: 409,
+  // 同一 revision 已做出不同决定：不翻转、不改判
+  NOVEL_ARTIFACT_ALREADY_DECIDED: 409,
+  // 已批准的候选不允许继续生成新 revision
+  NOVEL_ARTIFACT_ALREADY_APPROVED: 409,
   // 并发修改冲突：同一作品的写操作串行化后仍发生写冲突
   CONCURRENT_MODIFICATION: 409,
   NOT_FOUND: 404,
@@ -215,6 +230,12 @@ const MESSAGE_BY_CODE: Record<AuthErrorCode, string> = {
   NOVEL_RUN_VERSION_CONFLICT: '问答版本已更新，请刷新后重试',
   NOVEL_RUN_ANSWER_CONFLICT: '该版本已提交过不同回答，请刷新后重试',
   NOVEL_RUN_INVALID_STATE: '当前状态不允许该操作',
+  // 故事候选：不区分"不存在"与"不属于当前作者 / run"
+  NOVEL_ARTIFACT_NOT_FOUND: '故事候选不存在',
+  NOVEL_ARTIFACT_VERSION_CONFLICT: '故事候选已变化，请重新读取',
+  NOVEL_ARTIFACT_DECISION_STALE: '故事候选已不是可决策的当前版本',
+  NOVEL_ARTIFACT_ALREADY_DECIDED: '该故事候选已做出不同决定',
+  NOVEL_ARTIFACT_ALREADY_APPROVED: '故事候选已批准，不能继续生成新版本',
   // 并发修改冲突
   CONCURRENT_MODIFICATION: '数据已被其他操作修改，请重试',
   NOT_FOUND: '资源不存在',

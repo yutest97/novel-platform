@@ -336,3 +336,47 @@ export {
 } from './novel/runtime.js';
 
 export { answerNovelRun, cancelNovelRun, readNovelRun, startNovelRun } from './novel/service.js';
+
+export {
+  MAX_CONCEPT_FACT_CHARS,
+  MAX_CONCEPT_FOCUS_CHARS,
+  MAX_CONCEPT_KNOWN_FACTS,
+  MAX_CONCEPT_OPEN_QUESTIONS,
+  MAX_CONCEPT_REQUEST_CHARS,
+  MAX_CONCEPT_SELLING_POINTS,
+  MAX_CONCEPT_THEMES,
+  MAX_CONCEPT_TITLES,
+  MIN_CONCEPT_SELLING_POINTS,
+  NOVEL_CONCEPT_AGENT,
+  NOVEL_CONCEPT_INPUT_SCHEMA,
+  NOVEL_CONCEPT_OUTPUT_SCHEMA,
+  NOVEL_CONCEPT_SCHEMA_VERSION,
+  runNovelConcept,
+  validateNovelConceptOutput,
+  type NovelConceptInput,
+  type NovelConceptOutput,
+} from './novel/concept-agent.js';
+
+export {
+  NOVEL_CONCEPT_MOCK_OUTPUT,
+  createNovelConceptMockProvider,
+  type NovelConceptMockOptions,
+} from './novel/concept-mock.js';
+
+export {
+  NOVEL_ARTIFACT_STATUSES,
+  NOVEL_ARTIFACT_TYPE_CONCEPT,
+  createConceptCandidate,
+  decideConceptArtifact,
+  readConceptArtifact,
+  requestConceptApproval,
+  type ConceptApprovalResult,
+  type ConceptDecisionResult,
+  type CreateConceptCandidateInput,
+  type CreateConceptCandidateResult,
+  type DecideConceptArtifactInput,
+  type NovelArtifactDecisionValue,
+  type NovelArtifactStatus,
+  type NovelConceptArtifactView,
+  type RequestConceptApprovalInput,
+} from './novel/concept-service.js';

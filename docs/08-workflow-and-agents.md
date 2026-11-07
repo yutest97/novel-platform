@@ -2636,6 +2636,49 @@ C1-A 的 migration 把 `novel_runs.work_id` 设为不可变（创建后不能 UP
 
 ### 36.8 未做
 
-故事规划 Agent（创意 / 世界观 / 人物 / 剧情 / 三级大纲）、候选 revision、
-作者确认故事圣经、`waiting_approval`、创建 Work、正文生成、事实写回、
+故事规划 Agent（创意 / 世界观 / 人物 / 剧情 / 三级大纲）、World / Character /
+Plot Agent、三级大纲、正式故事圣经投影、创建 Work、正文生成、事实写回、
 RAG、图数据库与任何自动采纳。
+
+C1-B-A1 只完成「故事候选」数据域 + Concept Agent + 内部服务；
+Coordinator 1.1、`concept.generate` 工具、HTTP API、UI 与浏览器 E2E 留给 C1-B-A2。
+`waiting_approval` 状态与作者确认闭环已在 C1-B-A1 的服务 / 数据层打通，但尚未接
+Coordinator。
+
+### 36.9 C1-B-A1：Concept Agent 与故事候选域
+
+- Agent：`novel.concept@1.0.0`，工具名 `concept.generate`（尚未注册到 Runtime
+  的白名单，C1-B-A2 再接）；
+- 输入只允许 `requestText`、`knownFacts[]`、`authorFocus`（nullable）；不包含
+  prompt、密钥、数据库行或任意工具；
+- 输出严格 JSON：`titleSuggestions`（1–3）、`logline`、`coreConflict`、
+  `targetAudience`、`tone`、`sellingPoints`（3–6）、`themes`（1–5）、
+  `storyPromise`、`openQuestions`（0–5）；
+- 语义校验：所有字符串 trim 后非空；数组元素 trim、去重；拒绝 HTML / Markdown
+  标题 / 代码围栏 / SQL / Prisma / 文件路径 / shell，以及任何“下一步工具 / 数据库命令 /
+  正式写入”意图；失败统一 `AGENT_OUTPUT_INVALID`，错误只含路径与固定原因，不回显原文；
+- `createNovelConceptMockProvider()`：确定、非空、不读时钟 / Key / 网络，
+  不复制作者原文，输出通过同一 Schema + 语义校验；
+- 内部服务（不暴露 HTTP）：
+  - `createConceptCandidate`：首次创建 artifact + revision 1；draft / rejected
+    每次生成 revision N+1 并回到 draft；同内容（规范 JSON 哈希）不新增 revision；
+    每次实际调用写一条 `call_kind = 'tool'` 脱敏遥测；
+  - `requestConceptApproval`：draft → pending_approval，run → waiting_approval；
+  - `decideConceptArtifact`：pending / 当前 revision 才能决定；approved / rejected
+    后 run 回到 queued；同决定幂等，不同决定 409；
+  - `readConceptArtifact`：只返回 artifact / 当前 revision 内容 / decision；
+    不返回 `stateSummary`、prompt、provider / model 调用日志、租约或其它候选；
+- Fence：模型调用前后都校验 run `state_version` 与 artifact `current_revision`；
+  旧 Worker 晚返回不能覆盖新 artifact state；真实发生的调用遥测仍保留；
+- 稳定错误码：`NOVEL_ARTIFACT_NOT_FOUND`（404，跨作者统一）、
+  `NOVEL_ARTIFACT_VERSION_CONFLICT`、`NOVEL_ARTIFACT_DECISION_STALE`、
+  `NOVEL_ARTIFACT_ALREADY_DECIDED`、`NOVEL_ARTIFACT_ALREADY_APPROVED`；
+- 数据域：`novel_artifacts` / `novel_artifact_revisions` / `novel_artifact_decisions`
+  三张表；revision / decision append-only；artifact 与 decision 状态自洽；
+  `current_revision` 与 revision 最大编号一致；
+- `novel_agent_calls` 自本卡起允许 `call_kind = 'tool'`，`step_id` 允许为空（
+  A2 接 Runtime 后关联 step）；
+- `novel_runs` 状态机扩展：`queued / waiting_user → waiting_approval`，
+  使未接 Runtime 的内部服务也能完成作者确认闭环；`waiting_approval → queued`
+  已存在。C1-B-A2 的实际路径仍是 `running → waiting_approval`。
+- 本卡没有 HTTP API / UI / 浏览器 E2E，也没有 Work 创建 / 绑定。

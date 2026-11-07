@@ -56,6 +56,7 @@ model User {
   chapterVersions ChapterVersion[] @relation("ChapterVersionCreatedBy")
   chapterFactDecisions ChapterFactDecision[] @relation("UserChapterFactDecisions")
   novelRuns NovelRun[] @relation("NovelRunAuthor")
+  novelArtifacts NovelArtifact[] @relation("NovelArtifactAuthor")
 
   @@map("users")
 }
@@ -153,6 +154,7 @@ model Work {
   chapterSummaries ChapterSummary[] @relation("WorkChapterSummaries")
   chapterFactDecisions ChapterFactDecision[] @relation("WorkChapterFactDecisions")
   novelRuns NovelRun[]
+  novelArtifacts NovelArtifact[] @relation("NovelArtifactWork")
   rulePack RulePackage  @relation(fields: [genreRulePackage], references: [code])
 
   @@unique([authorId, title])
@@ -769,10 +771,13 @@ model NovelRun {
   work   Work?            @relation(fields: [workId, authorId], references: [id, authorId], onDelete: Restrict)
   steps  NovelRunStep[]
   calls  NovelAgentCall[]
+  artifacts NovelArtifact[] @relation("NovelArtifactRun")
 
   @@index([authorId, updatedAt])
   @@index([status, createdAt])
   @@index([status, leaseUntil])
+  /// 供 novel_artifacts 的复合外键引用（artifact 必须属于同一 run 与 author）
+  @@unique([id, authorId])
   @@map("novel_runs")
 }
 
@@ -799,6 +804,7 @@ model NovelRunStep {
 
   run   NovelRun         @relation(fields: [runId], references: [id], onDelete: Restrict)
   calls NovelAgentCall[]
+  artifactRevisions NovelArtifactRevision[] @relation("NovelArtifactRevisionSourceStep")
 
   @@unique([runId, stepNo])
   /// 供 novel_agent_calls 的复合外键引用（step 必须属于同一 run）
@@ -814,7 +820,7 @@ model NovelAgentCall {
   id               String   @id @default(uuid()) @db.Uuid
   runId            String   @map("run_id") @db.Uuid
   stepId           String?  @map("step_id") @db.Uuid
-  /// C1-A 只允许 coordinator
+  /// C1-A 只允许 coordinator；C1-B-A1 起允许 tool（Concept Agent 实际调用）
   callKind         String   @map("call_kind")
   agentName        String   @map("agent_name")
   agentVersion     String   @map("agent_version")
@@ -833,4 +839,94 @@ model NovelAgentCall {
   @@index([runId, createdAt])
   @@index([stepId])
   @@map("novel_agent_calls")
+}
+
+/// 故事候选（C1-B-A1）。本卡只允许 `artifact_type = concept`。
+///
+/// - 一个 run 同一类型最多一个 artifact；候选内容在 revisions 里 append-only；
+/// - `work_id` 本卡固定为 NULL，后续 C1-B-D 才允许绑定；
+/// - `current_revision` 必须与 revisions 最大编号一致（触发器把关）；
+/// - `status` 与 decisions 必须自洽：approved / rejected 必须有当前 revision 的 decision，
+///   draft / pending_approval 不允许有；
+/// - approved 是终态，禁止再生成新 revision；
+/// - 归属由复合外键钉死：artifact 的 author 必须等于 run 的 author。
+model NovelArtifact {
+  id              String   @id @default(uuid()) @db.Uuid
+  runId           String   @map("run_id") @db.Uuid
+  authorId        String   @map("author_id") @db.Uuid
+  /// C1-B-A1 固定为 NULL；C1-B-D 才允许绑定作品。
+  workId          String?  @map("work_id") @db.Uuid
+  /// concept
+  artifactType    String   @map("artifact_type")
+  /// draft | pending_approval | approved | rejected
+  status          String
+  currentRevision Int      @map("current_revision")
+  createdAt       DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  run       NovelRun                 @relation("NovelArtifactRun", fields: [runId, authorId], references: [id, authorId], onDelete: Restrict)
+  author    User                     @relation("NovelArtifactAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  work      Work?                    @relation("NovelArtifactWork", fields: [workId, authorId], references: [id, authorId], onDelete: Restrict)
+  revisions NovelArtifactRevision[]
+  decisions NovelArtifactDecision[]
+
+  @@unique([runId, artifactType])
+  /// 供 revisions 的复合外键引用（revision 必须属于同一 run / author 的 artifact）
+  @@unique([id, runId, authorId])
+  /// 供 decisions 的复合外键引用（decision 的 author 必须等于 artifact 的 author）
+  @@unique([id, authorId])
+  @@index([authorId, createdAt])
+  @@map("novel_artifacts")
+}
+
+/// 候选 revision（append-only）。
+///
+/// - `run_id` / `author_id` 冗余存列，仅用于复合外键与 revision 的同一 run / author 绑定；
+/// - `source_step_id` 若存在必须属于同一 run；
+/// - `schema_version` 本卡只允许 `concept@1.0.0`；
+/// - `content` 只保存通过 Agent Schema + 语义校验的结构化候选，不保存 prompt / 原始响应；
+/// - UPDATE / DELETE 由触发器拒绝。
+model NovelArtifactRevision {
+  id                 String   @id @default(uuid()) @db.Uuid
+  artifactId         String   @map("artifact_id") @db.Uuid
+  runId              String   @map("run_id") @db.Uuid
+  authorId           String   @map("author_id") @db.Uuid
+  revisionNo         Int      @map("revision_no")
+  schemaVersion      String   @map("schema_version")
+  content            Json
+  sourceAgent        String   @map("source_agent")
+  sourceAgentVersion String   @map("source_agent_version")
+  sourceStepId       String?  @map("source_step_id") @db.Uuid
+  createdAt          DateTime @default(dbgenerated("clock_timestamp()")) @map("created_at") @db.Timestamptz(3)
+
+  artifact   NovelArtifact         @relation(fields: [artifactId, runId, authorId], references: [id, runId, authorId], onDelete: Restrict)
+  sourceStep NovelRunStep?         @relation("NovelArtifactRevisionSourceStep", fields: [sourceStepId, runId], references: [id, runId], onDelete: Restrict)
+  decisions  NovelArtifactDecision[]
+
+  @@unique([artifactId, revisionNo])
+  @@map("novel_artifact_revisions")
+}
+
+/// 作者对某个 revision 的终态决定（append-only）。
+///
+/// - 只允许 `approved` / `rejected`；
+/// - 只能在该 revision 是 artifact 当前 revision 且 artifact 处于 pending_approval 时写入；
+/// - `(artifact_id, revision_no)` 复合外键保证决定对应的 revision 属于同一 artifact；
+/// - `(artifact_id, author_id)` 复合外键保证 author 等于 artifact / run 的 author；
+/// - 同一 revision 最多一条决定；UPDATE / DELETE 由触发器拒绝。
+model NovelArtifactDecision {
+  id         String   @id @default(uuid()) @db.Uuid
+  artifactId String   @map("artifact_id") @db.Uuid
+  revisionNo Int      @map("revision_no")
+  authorId   String   @map("author_id") @db.Uuid
+  /// approved | rejected
+  decision   String
+  decidedAt  DateTime @default(dbgenerated("clock_timestamp()")) @map("decided_at") @db.Timestamptz(3)
+
+  artifact NovelArtifact         @relation(fields: [artifactId, authorId], references: [id, authorId], onDelete: Restrict)
+  revision NovelArtifactRevision @relation(fields: [artifactId, revisionNo], references: [artifactId, revisionNo], onDelete: Restrict)
+
+  @@unique([artifactId, revisionNo])
+  @@index([artifactId, decidedAt])
+  @@map("novel_artifact_decisions")
 }
